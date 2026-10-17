@@ -40,17 +40,26 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Create debug signing key
+      - name: Restore project debug signing key and print SHA fingerprints
         run: |
-          keytool -genkeypair \
+          if [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          elif [ ! -f debug.keystore ]; then
+            keytool -genkeypair \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          keytool -list -v \
             -keystore debug.keystore \
-            -storepass android \
             -alias androiddebugkey \
-            -keypass android \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+            -storepass android \
+            -keypass android | grep -E "Alias name:|SHA1:|SHA256:"
 
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug

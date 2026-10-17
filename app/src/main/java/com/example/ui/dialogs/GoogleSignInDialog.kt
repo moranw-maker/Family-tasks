@@ -1,16 +1,17 @@
 package com.example.ui.dialogs
 
-import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.*
@@ -19,13 +20,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.example.auth.GoogleAuthHelper
 import com.example.model.FamilyMember
 import com.example.ui.theme.*
+import kotlinx.coroutines.launch
 
 @Composable
 fun GoogleSignInDialog(
@@ -36,12 +40,16 @@ fun GoogleSignInDialog(
     onSignInSuccess: (email: String) -> Unit,
     onSelectMember: (String) -> Unit
 ) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var emailInput by remember { mutableStateOf(currentEmail) }
     var selectedMemberId by remember { mutableStateOf(members.firstOrNull()?.id ?: "") }
     var inviteCodeInput by remember { mutableStateOf("") }
     var showInviteCodeField by remember { mutableStateOf(false) }
+    var isSigningIn by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
 
-    val scrollState = androidx.compose.foundation.rememberScrollState()
+    val scrollState = rememberScrollState()
     val safeDismiss = {
         onDismiss()
     }
@@ -121,11 +129,11 @@ fun GoogleSignInDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Account Email Field
+                // Account Email Field (optional — populated automatically by Google Sign-In)
                 OutlinedTextField(
                     value = emailInput,
                     onValueChange = { emailInput = it },
-                    label = { Text(if (isHebrew) "כתובת חשבון Google" else "Google Account Email") },
+                    label = { Text(if (isHebrew) "כתובת חשבון Google (אופציונלי)" else "Google Account Email (Optional)") },
                     leadingIcon = {
                         Icon(
                             imageVector = Icons.Default.AccountCircle,
@@ -162,7 +170,7 @@ fun GoogleSignInDialog(
                         Surface(
                             shape = RoundedCornerShape(12.dp),
                             color = if (isSelected) GoogleBlueLight else MaterialTheme.colorScheme.surfaceVariant,
-                            border = if (isSelected) androidx.compose.foundation.BorderStroke(1.5.dp, GoogleBlue) else null,
+                            border = if (isSelected) BorderStroke(1.5.dp, GoogleBlue) else null,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
@@ -243,6 +251,38 @@ fun GoogleSignInDialog(
                     )
                 }
 
+                if (errorMessage != null) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFFFEF2F2),
+                        border = BorderStroke(1.dp, Color(0xFFFCA5A5)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("dialog_google_auth_error")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ErrorOutline,
+                                contentDescription = null,
+                                tint = Color(0xFFDC2626),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = errorMessage.orEmpty(),
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = Color(0xFF991B1B),
+                                    fontWeight = FontWeight.Medium
+                                )
+                            )
+                        }
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // Security Note
@@ -266,13 +306,34 @@ fun GoogleSignInDialog(
 
                 Spacer(modifier = Modifier.height(20.dp))
 
-                // Primary Google Sign-In Button
+                // Primary Google Sign-In Button (launches Credential Manager without requiring manual email entry)
                 Button(
                     onClick = {
-                        if (emailInput.isNotBlank()) {
-                            onSignInSuccess(emailInput)
+                        if (isSigningIn) return@Button
+                        errorMessage = null
+                        isSigningIn = true
+                        coroutineScope.launch {
+                            val result = GoogleAuthHelper.signInWithGoogle(context)
+                            isSigningIn = false
+                            result.onSuccess { googleUser ->
+                                val resolvedEmail = googleUser.email
+                                    .ifBlank { googleUser.firebaseUser?.email.orEmpty() }
+                                    .ifBlank { emailInput.trim() }
+                                    .ifBlank { "user@gmail.com" }
+                                emailInput = resolvedEmail
+                                onSignInSuccess(resolvedEmail)
+                            }.onFailure { error ->
+                                val diagnosticMsg = GoogleAuthHelper.getDiagnosticErrorMessage(error, isHebrew)
+                                errorMessage = diagnosticMsg
+                                android.widget.Toast.makeText(
+                                    context,
+                                    diagnosticMsg,
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                            }
                         }
                     },
+                    enabled = !isSigningIn,
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = GoogleBlue),
                     modifier = Modifier
@@ -280,6 +341,14 @@ fun GoogleSignInDialog(
                         .height(48.dp)
                         .testTag("confirm_google_signin_btn")
                 ) {
+                    if (isSigningIn) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = Color.White
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
                     Text(
                         text = if (isHebrew) "המשך והתחבר עם Google ✓" else "Continue with Google ✓",
                         fontWeight = FontWeight.Bold,

@@ -6,6 +6,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -24,11 +25,9 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -42,7 +41,7 @@ import kotlinx.coroutines.launch
 
 @Composable
 fun GoogleOnboardingScreen(
-    initialEmail: String = "Moranw@gmail.com",
+    initialEmail: String = "",
     isHebrew: Boolean = true,
     onStartCleanFamily: (name: String, email: String, familyName: String, avatar: String) -> Unit,
     onJoinWithCode: (inviteCode: String) -> Unit
@@ -51,8 +50,9 @@ fun GoogleOnboardingScreen(
     val coroutineScope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     var isSigningInWithGoogle by remember { mutableStateOf(false) }
+    var authErrorMessage by remember { mutableStateOf<String?>(null) }
 
-    var adminName by remember { mutableStateOf("מורן") }
+    var adminName by remember { mutableStateOf("") }
     var adminEmail by remember { mutableStateOf(initialEmail) }
     var familyName by remember { mutableStateOf("וקסלר") }
     var selectedAvatar by remember { mutableStateOf("👩‍💻") }
@@ -152,32 +152,46 @@ fun GoogleOnboardingScreen(
 
             Spacer(modifier = Modifier.height(22.dp))
 
-            // 3. Primary Vibrant Google Sign-In Button (matches reference)
+            // 3. Primary Vibrant Google Sign-In Button (launches Credential Manager directly without requiring manual entry)
             Surface(
                 onClick = {
+                    if (isSigningInWithGoogle) return@Surface
                     focusManager.clearFocus()
+                    authErrorMessage = null
                     isSigningInWithGoogle = true
                     coroutineScope.launch {
                         val result = GoogleAuthHelper.signInWithGoogle(context)
                         isSigningInWithGoogle = false
                         result.onSuccess { googleUser ->
-                            adminEmail = googleUser.email
-                            if (!googleUser.displayName.isNullOrBlank()) {
-                                adminName = googleUser.displayName
+                            val resolvedEmail = googleUser.email
+                                .ifBlank { googleUser.firebaseUser?.email.orEmpty() }
+                                .ifBlank { adminEmail.trim() }
+                            val resolvedName = googleUser.displayName?.takeIf { it.isNotBlank() }
+                                ?: googleUser.firebaseUser?.displayName?.takeIf { it.isNotBlank() }
+                                ?: adminName.trim().ifBlank {
+                                    resolvedEmail.substringBefore('@').ifBlank {
+                                        if (isHebrew) "מנהל ראשי" else "Primary Admin"
+                                    }
+                                }
+                            val resolvedFamilyName = familyName.trim().ifBlank {
+                                googleUser.displayName?.trim()?.substringAfter(' ', "")?.takeIf { it.isNotBlank() }
+                                    ?: if (isHebrew) "וקסלר" else "Family"
                             }
+                            adminEmail = resolvedEmail
+                            adminName = resolvedName
                             onStartCleanFamily(
-                                adminName,
-                                adminEmail,
-                                familyName,
+                                resolvedName,
+                                resolvedEmail,
+                                resolvedFamilyName,
                                 selectedAvatar
                             )
-                        }.onFailure {
-                            // Expand manual options so user can proceed seamlessly
-                            showManualSetup = true
+                        }.onFailure { error ->
+                            val diagnosticMsg = GoogleAuthHelper.getDiagnosticErrorMessage(error, isHebrew)
+                            authErrorMessage = diagnosticMsg
                             android.widget.Toast.makeText(
                                 context,
-                                if (isHebrew) "הזן פרטים ידנית או אשר בחירת חשבון Google" else "Please enter details or choose account",
-                                android.widget.Toast.LENGTH_SHORT
+                                diagnosticMsg,
+                                android.widget.Toast.LENGTH_LONG
                             ).show()
                         }
                     }
@@ -235,6 +249,55 @@ fun GoogleOnboardingScreen(
                 }
             }
 
+            // Diagnostic Error Banner when Google Sign-In fails
+            AnimatedVisibility(visible = authErrorMessage != null) {
+                authErrorMessage?.let { errorText ->
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = Color(0xFFFEF2F2),
+                        border = BorderStroke(1.dp, Color(0xFFFCA5A5)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp)
+                            .testTag("google_auth_error_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ErrorOutline,
+                                contentDescription = if (isHebrew) "שגיאת התחברות" else "Authentication Error",
+                                tint = Color(0xFFDC2626),
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = errorText,
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = Color(0xFF991B1B),
+                                    fontWeight = FontWeight.SemiBold
+                                ),
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(
+                                onClick = { authErrorMessage = null },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = if (isHebrew) "סגור הודעת שגיאה" else "Dismiss error",
+                                    tint = Color(0xFF991B1B),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(16.dp))
 
             // 4. Divider with "או"
@@ -257,7 +320,7 @@ fun GoogleOnboardingScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 5. Secondary Outlined Button: "התחבר עם חשבון אחר" / "התחבר עם מייל"
+            // 5. Secondary Outlined Button: Customize Family Setup before Google Sign-In
             OutlinedButton(
                 onClick = { showManualSetup = !showManualSetup },
                 shape = RoundedCornerShape(28.dp),
@@ -279,7 +342,7 @@ fun GoogleOnboardingScreen(
                 )
             }
 
-            // 6. Expandable Manual Setup & Family Configuration
+            // 6. Expandable Family Customization (Optional fields; Google Sign-In does not require manual entry)
             AnimatedVisibility(visible = showManualSetup) {
                 Surface(
                     shape = RoundedCornerShape(24.dp),
@@ -308,7 +371,7 @@ fun GoogleOnboardingScreen(
                         OutlinedTextField(
                             value = adminName,
                             onValueChange = { adminName = it },
-                            label = { Text(if (isHebrew) "שם מלא" else "Full Name") },
+                            label = { Text(if (isHebrew) "שם מלא (אופציונלי - יילקח מ-Google)" else "Full Name (Optional - from Google)") },
                             singleLine = true,
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier
@@ -321,7 +384,7 @@ fun GoogleOnboardingScreen(
                         OutlinedTextField(
                             value = adminEmail,
                             onValueChange = { adminEmail = it },
-                            label = { Text(if (isHebrew) "אימייל" else "Email") },
+                            label = { Text(if (isHebrew) "אימייל (אופציונלי - יילקח מ-Google)" else "Email (Optional - from Google)") },
                             singleLine = true,
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier
@@ -382,32 +445,45 @@ fun GoogleOnboardingScreen(
 
                         Button(
                             onClick = {
+                                if (isSigningInWithGoogle) return@Button
                                 focusManager.clearFocus()
+                                authErrorMessage = null
                                 coroutineScope.launch {
-                                    if (GoogleAuthHelper.currentFirebaseUser == null) {
+                                    val existingUser = GoogleAuthHelper.currentFirebaseUser
+                                    if (existingUser == null) {
                                         isSigningInWithGoogle = true
                                         val authResult = GoogleAuthHelper.signInWithGoogle(context)
                                         isSigningInWithGoogle = false
                                         authResult.onSuccess { googleUser ->
-                                            val finalEmail = googleUser.email.ifBlank { adminEmail }
-                                            val finalName = googleUser.displayName ?: adminName
+                                            val finalEmail = adminEmail.trim().ifBlank { googleUser.email.ifBlank { "user@gmail.com" } }
+                                            val finalName = adminName.trim().ifBlank {
+                                                googleUser.displayName?.takeIf { it.isNotBlank() }
+                                                    ?: finalEmail.substringBefore('@').ifBlank { if (isHebrew) "מנהל ראשי" else "Primary Admin" }
+                                            }
                                             onStartCleanFamily(
-                                                finalName.trim().ifBlank { "מנהל ראשי" },
-                                                finalEmail.trim().ifBlank { "user@gmail.com" },
+                                                finalName,
+                                                finalEmail,
                                                 familyName.trim().ifBlank { "וקסלר" },
                                                 selectedAvatar
                                             )
-                                        }.onFailure {
+                                        }.onFailure { error ->
+                                            val diagnosticMsg = GoogleAuthHelper.getDiagnosticErrorMessage(error, isHebrew)
+                                            authErrorMessage = diagnosticMsg
                                             android.widget.Toast.makeText(
                                                 context,
-                                                if (isHebrew) "נדרש אימות Google כדי לפתוח משפחה מאובטחת בענן" else "Google authentication required to create family",
+                                                diagnosticMsg,
                                                 android.widget.Toast.LENGTH_LONG
                                             ).show()
                                         }
                                     } else {
+                                        val finalEmail = adminEmail.trim().ifBlank { existingUser.email.orEmpty().ifBlank { "user@gmail.com" } }
+                                        val finalName = adminName.trim().ifBlank {
+                                            existingUser.displayName?.takeIf { it.isNotBlank() }
+                                                ?: finalEmail.substringBefore('@').ifBlank { if (isHebrew) "מנהל ראשי" else "Primary Admin" }
+                                        }
                                         onStartCleanFamily(
-                                            adminName.trim().ifBlank { "מנהל ראשי" },
-                                            adminEmail.trim().ifBlank { "user@gmail.com" },
+                                            finalName,
+                                            finalEmail,
                                             familyName.trim().ifBlank { "וקסלר" },
                                             selectedAvatar
                                         )
@@ -476,8 +552,9 @@ fun GoogleOnboardingScreen(
 
                         Button(
                             onClick = {
-                                if (inviteCodeInput.isNotBlank()) {
+                                if (inviteCodeInput.isNotBlank() && !isSigningInWithGoogle) {
                                     focusManager.clearFocus()
+                                    authErrorMessage = null
                                     coroutineScope.launch {
                                         if (GoogleAuthHelper.currentFirebaseUser == null) {
                                             isSigningInWithGoogle = true
@@ -485,10 +562,12 @@ fun GoogleOnboardingScreen(
                                             isSigningInWithGoogle = false
                                             authResult.onSuccess {
                                                 onJoinWithCode(inviteCodeInput.trim())
-                                            }.onFailure {
+                                            }.onFailure { error ->
+                                                val diagnosticMsg = GoogleAuthHelper.getDiagnosticErrorMessage(error, isHebrew)
+                                                authErrorMessage = diagnosticMsg
                                                 android.widget.Toast.makeText(
                                                     context,
-                                                    if (isHebrew) "נדרש אימות Google כדי להצטרף למשפחה" else "Google authentication required to join family",
+                                                    diagnosticMsg,
                                                     android.widget.Toast.LENGTH_LONG
                                                 ).show()
                                             }

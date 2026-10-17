@@ -272,6 +272,7 @@ class FamilyRepository(
     fun joinFamilyByCode(inviteCode: String) {
         val cleanCode = inviteCode.trim().uppercase()
         _settings.value = _settings.value.copy(joinedFamilyCode = cleanCode)
+        persistOnboardingSettings()
         _tasks.value = emptyList()
         _files.value = emptyList()
         _periods.value = emptyList()
@@ -289,6 +290,7 @@ class FamilyRepository(
                 isCurrentUser = true
             )
             _members.value = listOf(joiningMember)
+            detachFirestoreSync()
             attachFirestoreSync(user.uid)
         }
     }
@@ -751,9 +753,46 @@ class FamilyRepository(
     private var familyMembersListenerRegistration: ListenerRegistration? = null
     private var docsListenerRegistration: ListenerRegistration? = null
     private var activeSyncUserId: String? = null
+    private var activeSyncFamilyId: String? = null
+
+    private fun restoreOnboardingSettings(context: android.content.Context) {
+        runCatching {
+            val prefs = context.getSharedPreferences("family_tasks_prefs", android.content.Context.MODE_PRIVATE)
+            val currentUser = getSafeAuth()?.currentUser
+            val savedCompleted = prefs.getBoolean("has_completed_google_signin", false)
+            val savedEmail = prefs.getString("google_account_email", null)
+            val savedFamilyName = prefs.getString("family_name", null)
+            val savedJoinedCode = prefs.getString("joined_family_code", null)
+            if (savedCompleted || currentUser != null) {
+                _settings.value = _settings.value.copy(
+                    hasCompletedGoogleSignIn = savedCompleted || currentUser != null,
+                    googleAccountEmail = savedEmail?.takeIf { it.isNotBlank() }
+                        ?: currentUser?.email
+                        ?: _settings.value.googleAccountEmail,
+                    familyName = savedFamilyName?.takeIf { it.isNotBlank() } ?: _settings.value.familyName,
+                    joinedFamilyCode = savedJoinedCode?.takeIf { it.isNotBlank() } ?: _settings.value.joinedFamilyCode
+                )
+            }
+        }
+    }
+
+    private fun persistOnboardingSettings() {
+        val ctx = appContext ?: return
+        runCatching {
+            val s = _settings.value
+            ctx.getSharedPreferences("family_tasks_prefs", android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("has_completed_google_signin", s.hasCompletedGoogleSignIn)
+                .putString("google_account_email", s.googleAccountEmail)
+                .putString("family_name", s.familyName)
+                .putString("joined_family_code", s.joinedFamilyCode)
+                .apply()
+        }
+    }
 
     fun setContext(context: android.content.Context) {
         appContext = context.applicationContext
+        restoreOnboardingSettings(context.applicationContext)
         if (firestore == null) {
             val dbId = context.applicationContext.getString(R.string.firestore_database_id)
             val db = FirebaseFirestore.getInstance(dbId)
@@ -800,9 +839,14 @@ class FamilyRepository(
     private fun attachFirestoreSync(userId: String) {
         val db = firestore ?: return
         val famId = getActiveFamilyId()
-        if (activeSyncUserId == userId && familyTasksListenerRegistration != null && familyMembersListenerRegistration != null) return
+        if (activeSyncUserId == userId &&
+            activeSyncFamilyId == famId &&
+            familyTasksListenerRegistration != null &&
+            familyMembersListenerRegistration != null
+        ) return
         detachFirestoreSync()
         activeSyncUserId = userId
+        activeSyncFamilyId = famId
 
         // Ensure hardcoded demo data is completely removed from real family accounts
         val demoMemberIds = setOf("user_moran", "user_david", "user_maya", "user_noam", "user_daniel")
@@ -1152,6 +1196,7 @@ class FamilyRepository(
         docsListenerRegistration?.remove()
         docsListenerRegistration = null
         activeSyncUserId = null
+        activeSyncFamilyId = null
     }
 
     fun detachAll() {
@@ -1681,6 +1726,7 @@ class FamilyRepository(
             hasCompletedGoogleSignIn = completed,
             googleAccountEmail = email
         )
+        persistOnboardingSettings()
     }
 
     fun initializeCleanFamily(
@@ -1714,8 +1760,10 @@ class FamilyRepository(
             hasCompletedGoogleSignIn = true,
             googleAccountEmail = resolvedEmail
         )
+        persistOnboardingSettings()
         val uid = getCurrentUserId()
         if (uid != null) {
+            detachFirestoreSync()
             attachFirestoreSync(uid)
         }
         pushNotification(

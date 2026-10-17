@@ -1,18 +1,7 @@
 package com.example.auth
 
 import android.content.Context
-import android.util.Log
-import androidx.credentials.CredentialManager
-import androidx.credentials.CustomCredential
-import androidx.credentials.GetCredentialRequest
-import androidx.credentials.exceptions.GetCredentialCancellationException
-import androidx.credentials.exceptions.GetCredentialException
-import com.google.android.libraries.identity.googleid.GetGoogleIdOption
-import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
-import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
-import com.google.firebase.auth.GoogleAuthProvider
-import kotlinx.coroutines.tasks.await
 
 data class GoogleSignInResult(
     val email: String,
@@ -23,11 +12,10 @@ data class GoogleSignInResult(
 )
 
 /**
- * Helper object providing robust Google Sign-In with Jetpack Credential Manager
+ * Helper object providing Google Sign-In with Jetpack Credential Manager
  * and unified Firebase Authentication session management.
  */
 object GoogleAuthHelper {
-    private const val TAG = "GoogleAuthHelper"
 
     val authManager: FirebaseAuthManager
         get() = FirebaseAuthManager.getInstance()
@@ -62,9 +50,25 @@ object GoogleAuthHelper {
     }
 
     /**
+     * Formats a user-safe, localized diagnostic error message from a failed sign-in [Throwable].
+     */
+    fun getDiagnosticErrorMessage(error: Throwable?, isHebrew: Boolean): String {
+        val classified = if (error != null) {
+            authManager.classifyAuthException(error)
+        } else {
+            GoogleSignInAccountException(
+                reason = AuthFailureReason.UNKNOWN_ERROR,
+                userMessageHebrew = "שגיאה בהתחברות עם Google. נסה שוב.",
+                userMessageEnglish = "Google Sign-In failed. Please try again."
+            )
+        }
+        return classified.getLocalizedUserMessage(isHebrew)
+    }
+
+    /**
      * Signs out the user from Firebase and clears session state.
      */
-    fun signOut() {
-        authManager.signOut()
+    fun signOut(context: Context? = null) {
+        authManager.signOut(context)
     }
 }
