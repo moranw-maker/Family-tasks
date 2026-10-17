@@ -1,10 +1,61 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android"
-    android:shape="rectangle">
-    <gradient
-        android:angle="315"
-        android:startColor="#1A73E8"
-        android:centerColor="#1557B0"
-        android:endColor="#0D47A1"
-        android:type="linear" />
-</shape>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Base Gradient Fill from Deep Royal Blue to Bright Cyan -->
+    <path
+        android:pathData="M0,0 H108 V108 H0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:angle="315"
+                android:startX="10"
+                android:startY="10"
+                android:endX="98"
+                android:endY="98"
+                android:type="linear">
+                <item android:color="#0D47A1" android:offset="0.0" />
+                <item android:color="#1976D2" android:offset="0.45" />
+                <item android:color="#00B0FF" android:offset="0.8" />
+                <item android:color="#00E5FF" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Gentle Glowing Wave 1 -->
+    <path
+        android:pathData="M0,75 C25,65 50,85 75,70 C90,62 100,68 108,72 V108 H0 Z"
+        android:fillAlpha="0.25">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="70"
+                android:endX="108"
+                android:endY="108"
+                android:type="linear">
+                <item android:color="#FFFFFF" android:offset="0.0" />
+                <item android:color="#00E5FF" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Gentle Glowing Wave 2 -->
+    <path
+        android:pathData="M0,88 C30,78 60,95 90,82 C98,78 104,80 108,82 V108 H0 Z"
+        android:fillAlpha="0.35">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="80"
+                android:endX="108"
+                android:endY="108"
+                android:type="linear">
+                <item android:color="#80D8FF" android:offset="0.0" />
+                <item android:color="#00E5FF" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

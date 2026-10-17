@@ -92,9 +92,15 @@ fun CameraScannerDialog(
         }
     }
 
+    val safeDismiss = {
+        onDismiss()
+    }
+
     Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        onDismissRequest = safeDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false
+        )
     ) {
         Surface(
             shape = RoundedCornerShape(26.dp),
@@ -155,7 +161,7 @@ fun CameraScannerDialog(
                     }
 
                     IconButton(
-                        onClick = onDismiss,
+                        onClick = safeDismiss,
                         modifier = Modifier
                             .size(32.dp)
                             .testTag("close_camera_scanner_btn")

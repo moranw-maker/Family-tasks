@@ -1,10 +1,14 @@
 package com.example
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -13,6 +17,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -26,13 +31,24 @@ import com.example.ui.components.*
 import com.example.ui.dialogs.*
 import com.example.ui.screens.*
 import com.example.ui.theme.*
+import com.example.util.NotificationHelper
 import com.example.viewmodel.AppScreen
 import com.example.viewmodel.FamilyViewModel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        NotificationHelper.createNotificationChannels(this)
+        enableEdgeToEdge(
+            statusBarStyle = androidx.activity.SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            ),
+            navigationBarStyle = androidx.activity.SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            )
+        )
         setContent {
             val viewModel: FamilyViewModel = viewModel()
             val settings by viewModel.settings.collectAsStateWithLifecycle()
@@ -42,7 +58,12 @@ class MainActivity : ComponentActivity() {
                 LocalLayoutDirection provides if (isHebrew) LayoutDirection.Rtl else LayoutDirection.Ltr
             ) {
                 MyApplicationTheme(themeColor = settings.themeColor) {
-                    FamilyTasksApp(viewModel = viewModel)
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = MaterialTheme.colorScheme.background
+                    ) {
+                        FamilyTasksApp(viewModel = viewModel)
+                    }
                 }
             }
         }
@@ -82,14 +103,37 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
     val geminiLoading by viewModel.geminiLoading.collectAsStateWithLifecycle()
     val geminiResponse by viewModel.geminiResponse.collectAsStateWithLifecycle()
 
+    var showRewardsSheet by remember { mutableStateOf(false) }
+
+    val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     val isHebrew = settings.language == AppLanguage.HEBREW
     val currentMember = viewModel.currentMember
     val unreadCount = notifications.count { !it.isRead }
     val familyTitle = settings.getFamilyTitle(isHebrew)
 
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+
+    LaunchedEffect(Unit) {
+        viewModel.initContext(context)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val isGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!isGranted) {
+                // Allow the initial activity window and Compose tree to finish rendering before presenting system dialog
+                kotlinx.coroutines.delay(500)
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
     // 1. Initial Google Login & Clean Household Setup Gate
-    if (!settings.hasCompletedGoogleSignIn) {
+    val activeFirebaseUser by com.example.auth.GoogleAuthHelper.authManager.currentUser.collectAsStateWithLifecycle()
+    if (!settings.hasCompletedGoogleSignIn || activeFirebaseUser == null) {
         GoogleOnboardingScreen(
             initialEmail = settings.googleAccountEmail,
             isHebrew = isHebrew,
@@ -97,8 +141,29 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
                 viewModel.initializeCleanFamily(name, email, famName, avatar)
             },
             onJoinWithCode = { code ->
-                viewModel.completeGoogleSignIn("user_${code.lowercase().replace("-", "_")}@gmail.com")
+                viewModel.joinFamilyWithCode(code)
             }
+        )
+        return
+    }
+
+    // 2. Biometric Fingerprint Lock Gate
+    var isAppUnlocked by remember {
+        mutableStateOf(!settings.biometricEnabled || !settings.requireBiometricOnStart)
+    }
+
+    LaunchedEffect(settings.requireBiometricOnStart, settings.biometricEnabled) {
+        if (!settings.biometricEnabled || !settings.requireBiometricOnStart) {
+            isAppUnlocked = true
+        }
+    }
+
+    if (!isAppUnlocked) {
+        BiometricLockScreen(
+            settings = settings,
+            isHebrew = isHebrew,
+            onUnlock = { isAppUnlocked = true },
+            onEmergencyBypass = { isAppUnlocked = true }
         )
         return
     }
@@ -148,22 +213,22 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
                 windowInsets = WindowInsets.navigationBars,
                 modifier = Modifier.testTag("bottom_nav_bar")
             ) {
-                // 1. Tasks
+                // 1. Tasks / Home
                 NavigationBarItem(
                     selected = currentScreen == AppScreen.TASKS,
                     onClick = { viewModel.navigateTo(AppScreen.TASKS) },
                     icon = {
-                        Icon(imageVector = Icons.Default.CheckCircle, contentDescription = "Tasks")
+                        Icon(imageVector = Icons.Default.Home, contentDescription = "Home")
                     },
                     label = {
                         Text(
-                            text = if (isHebrew) "מטלות" else "Tasks",
+                            text = if (isHebrew) "בית" else "Home",
                             fontWeight = if (currentScreen == AppScreen.TASKS) FontWeight.Bold else FontWeight.Normal,
                             fontSize = 11.sp
                         )
                     },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = GoogleBlue,
+                        selectedIconColor = VibrantActionBlue,
                         indicatorColor = GoogleBlueLight
                     ),
                     modifier = Modifier.testTag("nav_tasks")
@@ -184,7 +249,7 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
                         )
                     },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = GoogleBlue,
+                        selectedIconColor = VibrantActionBlue,
                         indicatorColor = GoogleBlueLight
                     ),
                     modifier = Modifier.testTag("nav_calendar")
@@ -205,7 +270,7 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
                         )
                     },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = GoogleBlue,
+                        selectedIconColor = VibrantActionBlue,
                         indicatorColor = GoogleBlueLight
                     ),
                     modifier = Modifier.testTag("nav_timetable")
@@ -226,28 +291,28 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
                         )
                     },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = GoogleBlue,
+                        selectedIconColor = VibrantActionBlue,
                         indicatorColor = GoogleBlueLight
                     ),
                     modifier = Modifier.testTag("nav_files")
                 )
 
-                // 5. Admin Dashboard
+                // 5. Family & Admin Dashboard
                 NavigationBarItem(
                     selected = currentScreen == AppScreen.ADMIN_DASHBOARD,
                     onClick = { viewModel.navigateTo(AppScreen.ADMIN_DASHBOARD) },
                     icon = {
-                        Icon(imageVector = Icons.Default.Dashboard, contentDescription = "Admin")
+                        Icon(imageVector = Icons.Default.Group, contentDescription = "Family")
                     },
                     label = {
                         Text(
-                            text = if (isHebrew) "דאשבורד" else "Admin",
+                            text = if (isHebrew) "משפחה" else "Family",
                             fontWeight = if (currentScreen == AppScreen.ADMIN_DASHBOARD) FontWeight.Bold else FontWeight.Normal,
                             fontSize = 11.sp
                         )
                     },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = GoogleBlue,
+                        selectedIconColor = VibrantActionBlue,
                         indicatorColor = GoogleBlueLight
                     ),
                     modifier = Modifier.testTag("nav_admin")
@@ -261,6 +326,8 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .consumeWindowInsets(innerPadding)
+                .imePadding()
         ) {
             when (currentScreen) {
                 AppScreen.TASKS -> {
@@ -275,7 +342,9 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
                         onEditTask = { viewModel.openEditTaskDialog(it) },
                         onDeleteTask = { viewModel.deleteTask(it) },
                         onSendNudge = { viewModel.sendNudge(it) },
-                        onAddNewTask = { viewModel.openAddTaskDialog() }
+                        onAddNewTask = { viewModel.openAddTaskDialog() },
+                        onOpenFamilyAdmin = { viewModel.navigateTo(AppScreen.ADMIN_DASHBOARD) },
+                        onOpenRewards = { showRewardsSheet = true }
                     )
                 }
                 AppScreen.CALENDAR -> {
@@ -345,6 +414,7 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
                         onUpdateRole = { memberId, role -> viewModel.updateMemberRole(memberId, role) },
                         onRemoveMember = { viewModel.removeMember(it) },
                         onSendNudge = { viewModel.sendNudge(it) },
+                        onSendPushInvite = { viewModel.sendInvitationNotification(it) },
                         onShowToast = { viewModel.showToast(it) }
                     )
                 }
@@ -396,7 +466,8 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
             onConfirm = { name, email, role, emoji, grade ->
                 viewModel.saveMember(memberToEdit?.id, name, email, role, emoji, grade)
             },
-            onDeleteMember = { viewModel.removeMember(it) }
+            onDeleteMember = { viewModel.removeMember(it) },
+            onSendPushInvite = { viewModel.sendInvitationNotification(it) }
         )
     }
 
@@ -463,6 +534,17 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
             isHebrew = isHebrew,
             onClearAll = { viewModel.clearAllNotifications() },
             onDismiss = { viewModel.closeNotificationsSheet() }
+        )
+    }
+
+    if (showRewardsSheet) {
+        RewardsSheet(
+            currentMember = currentMember,
+            isHebrew = isHebrew,
+            onClaimReward = { reward ->
+                viewModel.showToast(if (isHebrew) "מזל טוב! פרס '${reward.title}' מומש בהצלחה 🎁" else "Reward '${reward.title}' claimed! 🎁")
+            },
+            onDismiss = { showRewardsSheet = false }
         )
     }
 }

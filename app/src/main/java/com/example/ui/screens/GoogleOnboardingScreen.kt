@@ -1,6 +1,10 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
@@ -16,13 +20,25 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.R
+import com.example.auth.GoogleAuthHelper
 import com.example.ui.theme.*
+import kotlinx.coroutines.launch
 
 @Composable
 fun GoogleOnboardingScreen(
@@ -31,114 +47,268 @@ fun GoogleOnboardingScreen(
     onStartCleanFamily: (name: String, email: String, familyName: String, avatar: String) -> Unit,
     onJoinWithCode: (inviteCode: String) -> Unit
 ) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    var isSigningInWithGoogle by remember { mutableStateOf(false) }
+
     var adminName by remember { mutableStateOf("מורן") }
     var adminEmail by remember { mutableStateOf(initialEmail) }
     var familyName by remember { mutableStateOf("וקסלר") }
     var selectedAvatar by remember { mutableStateOf("👩‍💻") }
+    var showManualSetup by remember { mutableStateOf(false) }
     var showInviteCodeSection by remember { mutableStateOf(false) }
     var inviteCodeInput by remember { mutableStateOf("") }
 
-    val avatars = listOf("👩‍💻", "👨‍💻", "👩", "👨", "👑", "🏡", "🌟", "🦁")
+    val avatars = listOf("👩‍💻", "👨‍💻", "👩", "👨", "👧", "👦", "👑", "🌟")
 
-    Surface(
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0xFFEBF3FE),
+                        Color(0xFFF7F9FD),
+                        Color.White
+                    )
+                )
+            )
             .statusBarsPadding()
-            .navigationBarsPadding(),
-        color = MaterialTheme.colorScheme.background
+            .navigationBarsPadding()
+            .imePadding()
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = {
+                    focusManager.clearFocus()
+                })
+            }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(24.dp)
+                .padding(horizontal = 24.dp)
                 .verticalScroll(rememberScrollState()),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-                // Google Brand Icon
-                Surface(
-                    shape = CircleShape,
-                    color = GoogleBlueLight,
-                    modifier = Modifier.size(76.dp)
+            // 1. Hero 3D Family House Illustration
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(240.dp)
+                    .clip(RoundedCornerShape(28.dp))
+                    .shadow(10.dp, RoundedCornerShape(28.dp), spotColor = GoogleBlue.copy(alpha = 0.25f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Image(
+                    painter = painterResource(id = R.drawable.img_family_house),
+                    contentDescription = "FamilyTasks House",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // 2. App Branding & Slogans
+            Text(
+                text = "FamilyTasks",
+                style = MaterialTheme.typography.headlineMedium.copy(
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color(0xFF1E293B),
+                    letterSpacing = 0.5.sp
+                )
+            )
+
+            Text(
+                text = if (isHebrew) "משימות קטנות • הישגים גדולים יחד" else "Together • Organize • Achieve",
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontWeight = FontWeight.SemiBold,
+                    color = VibrantActionBlue
+                ),
+                modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
+            )
+
+            Text(
+                text = if (isHebrew) "!ברוכים הבאים" else "Welcome!",
+                style = MaterialTheme.typography.headlineSmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    color = VibrantActionBlue
+                )
+            )
+
+            Text(
+                text = if (isHebrew)
+                    "ניהול משימות משפחתי בצורה חכמה, מהנה ומאובטחת"
+                else
+                    "Smart, fun and secure family chore & schedule management",
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    color = TextSecondary,
+                    textAlign = TextAlign.Center
+                ),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+            )
+
+            Spacer(modifier = Modifier.height(22.dp))
+
+            // 3. Primary Vibrant Google Sign-In Button (matches reference)
+            Surface(
+                onClick = {
+                    focusManager.clearFocus()
+                    isSigningInWithGoogle = true
+                    coroutineScope.launch {
+                        val result = GoogleAuthHelper.signInWithGoogle(context)
+                        isSigningInWithGoogle = false
+                        result.onSuccess { googleUser ->
+                            adminEmail = googleUser.email
+                            if (!googleUser.displayName.isNullOrBlank()) {
+                                adminName = googleUser.displayName
+                            }
+                            onStartCleanFamily(
+                                adminName,
+                                adminEmail,
+                                familyName,
+                                selectedAvatar
+                            )
+                        }.onFailure {
+                            // Expand manual options so user can proceed seamlessly
+                            showManualSetup = true
+                            android.widget.Toast.makeText(
+                                context,
+                                if (isHebrew) "הזן פרטים ידנית או אשר בחירת חשבון Google" else "Please enter details or choose account",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                },
+                shape = RoundedCornerShape(28.dp),
+                color = VibrantActionBlue,
+                shadowElevation = 6.dp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(54.dp)
+                    .testTag("google_login_primary_button")
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
+                    if (isSigningInWithGoogle) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            strokeWidth = 2.5.dp,
+                            color = Color.White
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "G",
-                            fontSize = 42.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = GoogleBlue
+                            text = if (isHebrew) "מתחבר עם Google..." else "Signing in...",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                    } else {
+                        // Google 'G' icon badge
+                        Surface(
+                            shape = CircleShape,
+                            color = Color.White,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = "G",
+                                    fontSize = 17.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = GoogleBlue
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = if (isHebrew) "התחבר עם Google" else "Sign in with Google",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
                         )
                     }
                 }
+            }
 
-                Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
+            // 4. Divider with "או"
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                HorizontalDivider(modifier = Modifier.weight(1f), color = OutlineLight)
                 Text(
-                    text = if (isHebrew) "ברוכים הבאים ל-Family Hub" else "Welcome to Family Hub",
-                    style = MaterialTheme.typography.headlineSmall.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    ),
-                    textAlign = TextAlign.Center
+                    text = if (isHebrew) " או " else " OR ",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 10.dp)
                 )
+                HorizontalDivider(modifier = Modifier.weight(1f), color = OutlineLight)
+            }
 
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 5. Secondary Outlined Button: "התחבר עם חשבון אחר" / "התחבר עם מייל"
+            OutlinedButton(
+                onClick = { showManualSetup = !showManualSetup },
+                shape = RoundedCornerShape(28.dp),
+                border = BorderStroke(1.5.dp, OutlineLight),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = Color.White,
+                    contentColor = TextPrimary
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .testTag("onboarding_manual_toggle_btn")
+            ) {
                 Text(
-                    text = if (isHebrew)
-                        "המרכז המשפחתי החכם לניהול משימות, יומן, מערכת שעות ומסמכים"
-                    else
-                        "Smart Family Hub for tasks, shared calendar, school timetables & Drive",
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    ),
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    text = if (isHebrew) "התחבר עם חשבון אחר" else "Sign in with another account",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp,
+                    color = TextPrimary
                 )
+            }
 
-                Spacer(modifier = Modifier.height(24.dp))
-
-                // Sign-In & Household Card
+            // 6. Expandable Manual Setup & Family Configuration
+            AnimatedVisibility(visible = showManualSetup) {
                 Surface(
                     shape = RoundedCornerShape(24.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 4.dp,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, GoogleBlue.copy(alpha = 0.2f)),
-                    modifier = Modifier.fillMaxWidth()
+                    color = Color.White,
+                    tonalElevation = 2.dp,
+                    border = BorderStroke(1.dp, OutlineLight),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 18.dp)
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(20.dp)
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.AccountCircle,
-                                contentDescription = null,
-                                tint = GoogleBlue,
-                                modifier = Modifier.size(22.dp)
+                        Text(
+                            text = if (isHebrew) "הגדרת בית ומשפחה חדשה" else "Set Up New Household",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
                             )
-                            Text(
-                                text = if (isHebrew) "כניסה ראשונית והקמת משפחה נקייה" else "First-Time Sign-In & Clean Setup",
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = GoogleBlue
-                                )
-                            )
-                        }
+                        )
 
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.height(12.dp))
 
-                        // Admin Name
                         OutlinedTextField(
                             value = adminName,
                             onValueChange = { adminName = it },
-                            label = { Text(if (isHebrew) "שם המנהל/ת הראשי/ת" else "Your Name (Primary Admin)") },
+                            label = { Text(if (isHebrew) "שם מלא" else "Full Name") },
                             singleLine = true,
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier
@@ -146,13 +316,12 @@ fun GoogleOnboardingScreen(
                                 .testTag("onboarding_name_input")
                         )
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
 
-                        // Google Email
                         OutlinedTextField(
                             value = adminEmail,
                             onValueChange = { adminEmail = it },
-                            label = { Text(if (isHebrew) "כתובת חשבון Google" else "Google Account Email") },
+                            label = { Text(if (isHebrew) "אימייל" else "Email") },
                             singleLine = true,
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier
@@ -160,9 +329,8 @@ fun GoogleOnboardingScreen(
                                 .testTag("onboarding_email_input")
                         )
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
 
-                        // Family Name
                         OutlinedTextField(
                             value = familyName,
                             onValueChange = { familyName = it },
@@ -174,157 +342,262 @@ fun GoogleOnboardingScreen(
                                 .testTag("onboarding_family_name_input")
                         )
 
-                        Spacer(modifier = Modifier.height(14.dp))
+                        Spacer(modifier = Modifier.height(12.dp))
 
-                        // Choose Avatar
                         Text(
-                            text = if (isHebrew) "בחר אימוג'י פרופיל:" else "Choose Avatar:",
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                            text = if (isHebrew) "בחר סמליל לפרופיל:" else "Choose profile avatar:",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = TextSecondary
+                            )
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Spacer(modifier = Modifier.height(8.dp))
 
                         LazyRow(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            items(avatars) { avatar ->
-                                val isSelected = selectedAvatar == avatar
+                            items(avatars) { av ->
+                                val isSelected = av == selectedAvatar
                                 Box(
                                     modifier = Modifier
-                                        .size(42.dp)
+                                        .size(44.dp)
                                         .clip(CircleShape)
-                                        .background(if (isSelected) GoogleBlueLight else MaterialTheme.colorScheme.surfaceVariant)
-                                        .clickable { selectedAvatar = avatar },
+                                        .background(if (isSelected) GoogleBlueLight else Color(0xFFF1F5F9))
+                                        .border(
+                                            2.dp,
+                                            if (isSelected) VibrantActionBlue else Color.Transparent,
+                                            CircleShape
+                                        )
+                                        .clickable { selectedAvatar = av },
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text(text = avatar, fontSize = 22.sp)
+                                    Text(text = av, fontSize = 20.sp)
                                 }
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(18.dp))
+                        Spacer(modifier = Modifier.height(16.dp))
 
-                        // Clean Setup Note
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = GoogleGreenLight.copy(alpha = 0.5f),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text(text = "✨", fontSize = 16.sp)
-                                Text(
-                                    text = if (isHebrew)
-                                        "האפליקציה תיפתח נקייה מנתונים, מוכנה להזמנת בני המשפחה האמיתיים שלכם"
-                                    else
-                                        "App will start completely clean, ready to invite your real household",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        color = GoogleGreenDark,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(20.dp))
-
-                        // Main Sign-In Button
                         Button(
                             onClick = {
-                                if (adminName.isNotBlank() && adminEmail.isNotBlank()) {
-                                    onStartCleanFamily(adminName.trim(), adminEmail.trim(), familyName.trim(), selectedAvatar)
+                                focusManager.clearFocus()
+                                coroutineScope.launch {
+                                    if (GoogleAuthHelper.currentFirebaseUser == null) {
+                                        isSigningInWithGoogle = true
+                                        val authResult = GoogleAuthHelper.signInWithGoogle(context)
+                                        isSigningInWithGoogle = false
+                                        authResult.onSuccess { googleUser ->
+                                            val finalEmail = googleUser.email.ifBlank { adminEmail }
+                                            val finalName = googleUser.displayName ?: adminName
+                                            onStartCleanFamily(
+                                                finalName.trim().ifBlank { "מנהל ראשי" },
+                                                finalEmail.trim().ifBlank { "user@gmail.com" },
+                                                familyName.trim().ifBlank { "וקסלר" },
+                                                selectedAvatar
+                                            )
+                                        }.onFailure {
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                if (isHebrew) "נדרש אימות Google כדי לפתוח משפחה מאובטחת בענן" else "Google authentication required to create family",
+                                                android.widget.Toast.LENGTH_LONG
+                                            ).show()
+                                        }
+                                    } else {
+                                        onStartCleanFamily(
+                                            adminName.trim().ifBlank { "מנהל ראשי" },
+                                            adminEmail.trim().ifBlank { "user@gmail.com" },
+                                            familyName.trim().ifBlank { "וקסלר" },
+                                            selectedAvatar
+                                        )
+                                    }
                                 }
                             },
-                            enabled = adminName.isNotBlank() && adminEmail.isNotBlank(),
                             shape = RoundedCornerShape(16.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = GoogleBlue),
+                            colors = ButtonDefaults.buttonColors(containerColor = VibrantActionBlue),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(50.dp)
-                                .testTag("start_clean_family_btn")
+                                .testTag("onboarding_save_and_start_btn")
                         ) {
                             Text(
-                                text = if (isHebrew) "התחבר עם Google והקם משפחה נקייה ✓" else "Continue with Google & Start Clean ✓",
+                                text = if (isHebrew) "התחל ניהול משימות משפחתי ✓" else "Start FamilyTasks ✓",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // 7. Join Existing Family link
+            TextButton(
+                onClick = { showInviteCodeSection = !showInviteCodeSection },
+                modifier = Modifier.testTag("onboarding_toggle_join_code_btn")
+            ) {
+                Text(
+                    text = if (isHebrew) "יש לך כבר קוד הזמנה למשפחה? לחץ כאן" else "Have a family invite code? Tap here",
+                    color = VibrantActionBlue,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp
+                )
+            }
+
+            AnimatedVisibility(visible = showInviteCodeSection) {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = PastelBlueBackground,
+                    border = BorderStroke(1.dp, PastelBlueBorder),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = inviteCodeInput,
+                            onValueChange = { inviteCodeInput = it.uppercase() },
+                            label = { Text(if (isHebrew) "קוד הזמנה (למשל: FAM-WEXLER-7749)" else "Invite Code") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("invite_code_input")
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Button(
+                            onClick = {
+                                if (inviteCodeInput.isNotBlank()) {
+                                    focusManager.clearFocus()
+                                    coroutineScope.launch {
+                                        if (GoogleAuthHelper.currentFirebaseUser == null) {
+                                            isSigningInWithGoogle = true
+                                            val authResult = GoogleAuthHelper.signInWithGoogle(context)
+                                            isSigningInWithGoogle = false
+                                            authResult.onSuccess {
+                                                onJoinWithCode(inviteCodeInput.trim())
+                                            }.onFailure {
+                                                android.widget.Toast.makeText(
+                                                    context,
+                                                    if (isHebrew) "נדרש אימות Google כדי להצטרף למשפחה" else "Google authentication required to join family",
+                                                    android.widget.Toast.LENGTH_LONG
+                                                ).show()
+                                            }
+                                        } else {
+                                            onJoinWithCode(inviteCodeInput.trim())
+                                        }
+                                    }
+                                }
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = VibrantActionBlue),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(46.dp)
+                                .testTag("submit_join_code_btn")
+                        ) {
+                            Text(
+                                text = if (isHebrew) "הצטרף למשפחה" else "Join Family",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 14.sp
                             )
                         }
                     }
                 }
+            }
 
-                Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(28.dp))
 
-                // Toggle Join with Invite Code
-                TextButton(
-                    onClick = { showInviteCodeSection = !showInviteCodeSection }
-                ) {
-                    Text(
-                        text = if (isHebrew) "קיבלתם קוד הזמנה ממשפחה קיימת? לחצו כאן" else "Have an invite code from family? Tap here",
-                        color = GoogleBlue,
-                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
-                    )
-                }
-
-                if (showInviteCodeSection) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            OutlinedTextField(
-                                value = inviteCodeInput,
-                                onValueChange = { inviteCodeInput = it },
-                                label = { Text(if (isHebrew) "קוד הזמנה (למשל: FAM-WEXLER-7749)" else "Invite Code") },
-                                singleLine = true,
-                                shape = RoundedCornerShape(12.dp),
-                                modifier = Modifier.weight(1f)
+            // 8. Bottom Trophy & Features Banner (matches reference)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color(0xFFF1F6FE),
+                                Color(0xFFE4EDFD)
                             )
-                            Button(
-                                onClick = {
-                                    if (inviteCodeInput.isNotBlank()) {
-                                        onJoinWithCode(inviteCodeInput.trim())
-                                    }
-                                },
-                                shape = RoundedCornerShape(12.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = GoogleBlue)
-                            ) {
-                                Text(if (isHebrew) "הצטרף" else "Join")
-                            }
-                        }
+                        )
+                    )
+                    .border(1.dp, Color(0xFFD6E4FC), RoundedCornerShape(24.dp))
+                    .padding(16.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        modifier = Modifier
+                            .size(110.dp)
+                            .clip(CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Image(
+                            painter = painterResource(id = R.drawable.img_golden_trophy),
+                            contentDescription = "Trophy",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        text = if (isHebrew) "משימות • ניקוד • פרסים" else "Tasks • Points • Rewards",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF1E3A8A)
+                        )
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Feature highlights row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        FeatureMiniPill(icon = "🔄", label = if (isHebrew) "סנכרון חי" else "Live Sync")
+                        FeatureMiniPill(icon = "🛡️", label = if (isHebrew) "Firebase" else "Firebase")
+                        FeatureMiniPill(icon = "🔔", label = if (isHebrew) "התראות" else "Push Alerts")
+                        FeatureMiniPill(icon = "📱", label = if (isHebrew) "אופליין" else "Offline")
                     }
                 }
             }
 
-            // Footer Security Badge
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.padding(top = 16.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Security,
-                    contentDescription = null,
-                    tint = GoogleGreen,
-                    modifier = Modifier.size(16.dp)
-                )
-                Text(
-                    text = if (isHebrew) "מאובטח ע\"י Google Cloud Workspace & Drive" else "Secured by Google Cloud Workspace & Drive",
-                    style = MaterialTheme.typography.labelSmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
-                )
-            }
+            Spacer(modifier = Modifier.height(32.dp))
+        }
+    }
+}
+
+@Composable
+private fun FeatureMiniPill(icon: String, label: String) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = Color.White.copy(alpha = 0.85f),
+        modifier = Modifier.padding(2.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(text = icon, fontSize = 12.sp)
+            Text(
+                text = label,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF334155)
+            )
         }
     }
 }

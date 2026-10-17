@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:pivotX="54"
+        android:pivotY="54">
+        <!-- House Roof & Walls Outline -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M54,20 L20,47 L25,47 L25,82 C25,85.3 27.7,88 31,88 L77,88 C80.3,88 83,85.3 83,82 L83,47 L88,47 L54,20 Z M76,28 L70,28 L70,35 L76,40 Z" />
+        
+        <!-- House Interior Cutout -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2.5"
+            android:pathData="M31,52 L54,34 L77,52 L77,84 L31,84 Z" />
+
+        <!-- Golden Heart at Apex -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M54,32 C54,32 51.5,29 48.5,29 C45.5,29 43.5,31.2 43.5,34 C43.5,38 54,43.5 54,43.5 C54,43.5 64.5,38 64.5,34 C64.5,31.2 62.5,29 59.5,29 C56.5,29 54,32 54,32 Z" />
+
+        <!-- Father Silhouette (Head & Shoulders) -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M43,44 C45.5,44 47.5,42 47.5,39.5 C47.5,37 45.5,35 43,35 C40.5,35 38.5,37 38.5,39.5 C38.5,42 40.5,44 43,44 Z M48.5,48 C47,46 45,45.5 43,45.5 C41,45.5 39,46 37.5,48 C35.5,50.5 35,54 35,56 L51,56 C51,54 50.5,50.5 48.5,48 Z" />
+
+        <!-- Mother Silhouette (Head & Shoulders) -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M63,44 C65.5,44 67.5,42 67.5,39.5 C67.5,37 65.5,35 63,35 C60.5,35 58.5,37 58.5,39.5 C58.5,42 60.5,44 63,44 Z M68.5,48 C67,46 65,45.5 63,45.5 C61,45.5 59,46 57.5,48 C55.5,50.5 55,54 55,56 L71,56 C71,54 70.5,50.5 68.5,48 Z" />
+
+        <!-- Son & Daughter Silhouettes (Front row) -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M47,60 C49,60 50.5,58.5 50.5,56.5 C50.5,54.5 49,53 47,53 C45,53 43.5,54.5 43.5,56.5 C43.5,58.5 45,60 47,60 Z M51,64 C50,62.5 48.5,62 47,62 C45.5,62 44,62.5 43,64 C41.5,66 41,70 41,72 L53,72 C53,70 52.5,66 51,64 Z" />
+
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M59,60 C61,60 62.5,58.5 62.5,56.5 C62.5,54.5 61,53 59,53 C57,53 55.5,54.5 55.5,56.5 C55.5,58.5 57,60 59,60 Z M63,64 C62,62.5 60.5,62 59,62 C57.5,62 56,62.5 55,64 C53.5,66 53,70 53,72 L65,72 C65,70 64.5,66 63,64 Z" />
+
+        <!-- Task Checklist Clipboard (Bottom Right) -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M66,66 L83,66 C84.5,66 85.5,67 85.5,68.5 L85.5,88 C85.5,89.5 84.5,90.5 83,90.5 L66,90.5 C64.5,90.5 63.5,89.5 63.5,88 L63.5,68.5 C63.5,67 64.5,66 66,66 Z" />
+        
+        <!-- Clipboard Clip -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M71,63 L78,63 C79,63 79.5,63.5 79.5,64.5 L79.5,66.5 L69.5,66.5 L69.5,64.5 C69.5,63.5 70,63 71,63 Z" />
+
+        <!-- Big Completion Checkmark Badge -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M78,74 C83.5,74 88,78.5 88,84 C88,89.5 83.5,94 78,94 C72.5,94 68,89.5 68,84 C68,78.5 72.5,74 78,74 Z" />
+        
+        <!-- Inner checkmark cut -->
+        <path
+            android:fillColor="#000000"
+            android:pathData="M74,84 L76.8,86.8 L82.5,80.5 L84,82 L76.8,89.8 L72.5,85.5 Z" />
+    </group>
+</vector>

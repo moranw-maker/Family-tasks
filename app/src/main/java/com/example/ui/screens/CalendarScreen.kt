@@ -57,12 +57,12 @@ fun CalendarScreen(
         floatingActionButton = {
             Surface(
                 onClick = onAddNewTask,
-                shape = RoundedCornerShape(16.dp),
-                color = GoogleBlue,
+                shape = RoundedCornerShape(24.dp),
+                color = VibrantActionBlue,
                 contentColor = Color.White,
                 shadowElevation = 4.dp,
                 modifier = Modifier
-                    .height(40.dp)
+                    .height(46.dp)
                     .testTag("calendar_add_task_fab")
             ) {
                 Row(
@@ -88,7 +88,15 @@ fun CalendarScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .background(MaterialTheme.colorScheme.background)
+                .background(
+                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                        colors = listOf(
+                            androidx.compose.ui.graphics.Color(0xFFEBF3FE),
+                            androidx.compose.ui.graphics.Color(0xFFF7F9FD),
+                            androidx.compose.ui.graphics.Color.White
+                        )
+                    )
+                )
         ) {
             // Quick Screen Help Guide
             Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)) {
@@ -170,7 +178,7 @@ fun CalendarScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                val locale = if (isHebrew) Locale("he") else Locale.ENGLISH
+                val locale = if (isHebrew) Locale.forLanguageTag("he") else Locale.ENGLISH
                 val monthName = displayMonth.month.getDisplayName(TextStyle.FULL, locale)
                 val yearNumber = displayMonth.year
 
@@ -375,7 +383,7 @@ fun MonthCalendarView(
 
         // Selected Date Details & Chores
         val selectedDateTasks = tasks.filter { it.dateEpochDay == selectedDate.toEpochDay() }
-        val locale = if (isHebrew) Locale("he") else Locale.ENGLISH
+        val locale = if (isHebrew) Locale.forLanguageTag("he") else Locale.ENGLISH
         val selectedDateFormatted = selectedDate.dayOfWeek.getDisplayName(TextStyle.FULL, locale) +
                 ", " + selectedDate.dayOfMonth + " " + selectedDate.month.getDisplayName(TextStyle.SHORT, locale)
 
@@ -560,7 +568,7 @@ fun WeekCalendarView(
             weekDays.forEach { date ->
                 val isSelected = date == selectedDate
                 val isToday = date == today
-                val locale = if (isHebrew) Locale("he") else Locale.ENGLISH
+                val locale = if (isHebrew) Locale.forLanguageTag("he") else Locale.ENGLISH
                 val dayLetter = date.dayOfWeek.getDisplayName(TextStyle.NARROW, locale)
 
                 Surface(
@@ -597,7 +605,7 @@ fun WeekCalendarView(
 
         // Week's selected day tasks list
         val dayTasks = tasks.filter { it.dateEpochDay == selectedDate.toEpochDay() }
-        val locale = if (isHebrew) Locale("he") else Locale.ENGLISH
+        val locale = if (isHebrew) Locale.forLanguageTag("he") else Locale.ENGLISH
         val title = selectedDate.dayOfWeek.getDisplayName(TextStyle.FULL, locale) + ", " + selectedDate.dayOfMonth + " " + selectedDate.month.getDisplayName(TextStyle.SHORT, locale)
 
         Column(
@@ -677,7 +685,7 @@ fun DayCalendarView(
     }
     val dayPeriods = if (schoolDay != null) periods.filter { it.day == schoolDay } else emptyList()
 
-    val locale = if (isHebrew) Locale("he") else Locale.ENGLISH
+    val locale = if (isHebrew) Locale.forLanguageTag("he") else Locale.ENGLISH
     val dayTitle = selectedDate.dayOfWeek.getDisplayName(TextStyle.FULL, locale) + ", " + selectedDate.dayOfMonth + " " + selectedDate.month.getDisplayName(TextStyle.FULL, locale)
 
     Column(

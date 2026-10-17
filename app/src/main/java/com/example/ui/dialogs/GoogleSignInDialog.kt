@@ -3,6 +3,8 @@ package com.example.ui.dialogs
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -39,13 +41,23 @@ fun GoogleSignInDialog(
     var inviteCodeInput by remember { mutableStateOf("") }
     var showInviteCodeField by remember { mutableStateOf(false) }
 
-    Dialog(onDismissRequest = onDismiss) {
+    val scrollState = androidx.compose.foundation.rememberScrollState()
+    val safeDismiss = {
+        onDismiss()
+    }
+
+    Dialog(
+        onDismissRequest = safeDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false
+        )
+    ) {
         Surface(
             shape = RoundedCornerShape(26.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 8.dp,
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxWidth(0.92f)
                 .padding(vertical = 16.dp)
                 .testTag("google_signin_dialog")
         ) {
@@ -53,6 +65,7 @@ fun GoogleSignInDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(22.dp)
+                    .verticalScroll(scrollState)
             ) {
                 // Header with Google Colors
                 Row(
@@ -97,7 +110,7 @@ fun GoogleSignInDialog(
                     }
 
                     IconButton(
-                        onClick = onDismiss,
+                        onClick = safeDismiss,
                         modifier = Modifier
                             .size(32.dp)
                             .testTag("close_google_signin_btn")

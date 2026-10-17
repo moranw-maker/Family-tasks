@@ -86,7 +86,33 @@ data class FamilyTask(
     val recurrence: TaskRecurrence = TaskRecurrence.DAILY,
     val isCompleted: Boolean = false,
     val completedAtMillis: Long? = null,
-    val completedByMemberId: String? = null
+    val completedByMemberId: String? = null,
+    val familyId: String = "",
+    val approvedByParent: Boolean = false,
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val updatedAtMillis: Long = System.currentTimeMillis()
+)
+
+data class FamilyGroup(
+    val id: String,
+    val name: String,
+    val inviteCode: String,
+    val createdByUserId: String,
+    val memberIds: List<String> = emptyList(),
+    val createdAtMillis: Long = System.currentTimeMillis()
+)
+
+data class RewardItem(
+    val id: String,
+    val familyId: String,
+    val title: String,
+    val description: String = "",
+    val pointsCost: Int = 50,
+    val iconEmoji: String = "🎁",
+    val isClaimed: Boolean = false,
+    val claimedByMemberId: String? = null,
+    val approvedByParent: Boolean = false,
+    val createdAtMillis: Long = System.currentTimeMillis()
 )
 
 enum class SchoolDay(val dayNumber: Int) {
@@ -240,7 +266,11 @@ data class AppSettings(
     val themeColor: AppThemeColor = AppThemeColor.GOOGLE_BLUE,
     val filesViewMode: FilesViewMode = FilesViewMode.FOLDERS,
     val timetableViewMode: TimetableViewMode = TimetableViewMode.DAILY_LIST,
-    val appVersion: Double = 1.0
+    val appVersion: Double = 1.0,
+    val joinedFamilyCode: String? = null,
+    val customSoundUri: String? = null,
+    val requireBiometricOnStart: Boolean = false,
+    val fallbackPin: String = "1234"
 ) {
     val formattedVersion: String
         get() = String.format(java.util.Locale.US, "%.1f", appVersion)
@@ -259,6 +289,7 @@ data class AppSettings(
     }
 
     fun getDynamicInviteCode(): String {
+        joinedFamilyCode?.let { if (it.isNotBlank()) return it }
         val cleanName = familyName
             .replace("משפחת", "")
             .replace("Family", "", ignoreCase = true)

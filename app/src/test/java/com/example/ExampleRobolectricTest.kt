@@ -26,6 +26,14 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `verify build config version name and code incremented`() {
+        assertEquals("1.1", BuildConfig.VERSION_NAME)
+        assertEquals(2, BuildConfig.VERSION_CODE)
+        assertEquals("1.2", BuildConfig.NEXT_RELEASE_VERSION_NAME)
+        assertEquals(3, BuildConfig.NEXT_RELEASE_VERSION_CODE)
+    }
+
+    @Test
     fun `test family member addition and 10 members limit`() {
         val repository = FamilyRepository()
         val initialCount = repository.members.value.size

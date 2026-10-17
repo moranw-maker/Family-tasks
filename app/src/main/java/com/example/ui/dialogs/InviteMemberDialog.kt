@@ -3,6 +3,8 @@ package com.example.ui.dialogs
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -28,6 +30,7 @@ import com.example.model.FamilyMember
 import com.example.model.UserRole
 import com.example.ui.theme.*
 
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -42,7 +45,8 @@ fun InviteMemberDialog(
     inviteLink: String = "https://familytasks.app/join/$inviteCode",
     onDismiss: () -> Unit,
     onConfirm: (name: String, email: String, role: UserRole, avatarEmoji: String, schoolGrade: String?) -> Unit,
-    onDeleteMember: ((String) -> Unit)? = null
+    onDeleteMember: ((String) -> Unit)? = null,
+    onSendPushInvite: ((String) -> Unit)? = null
 ) {
     val isEditMode = memberToEdit != null
     var name by remember(memberToEdit) { mutableStateOf(memberToEdit?.name ?: "") }
@@ -52,14 +56,23 @@ fun InviteMemberDialog(
     var schoolGrade by remember(memberToEdit) { mutableStateOf(memberToEdit?.schoolGrade ?: "") }
 
     val emojis = listOf("🧒", "👧", "👦", "👶", "👨", "👩", "👵", "👴", "🐶", "🐱", "🦁", "🦄", "⚽", "🎨")
+    val scrollState = androidx.compose.foundation.rememberScrollState()
+    val safeDismiss = {
+        onDismiss()
+    }
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = safeDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false
+        )
+    ) {
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp,
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxWidth(0.92f)
                 .padding(vertical = 16.dp)
                 .testTag("invite_member_dialog")
         ) {
@@ -67,6 +80,7 @@ fun InviteMemberDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(20.dp)
+                    .verticalScroll(scrollState)
             ) {
                 // Header
                 Row(
@@ -104,7 +118,7 @@ fun InviteMemberDialog(
                         )
                     }
 
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = safeDismiss, modifier = Modifier.size(32.dp)) {
                         Icon(imageVector = Icons.Default.Close, contentDescription = "Close")
                     }
                 }
@@ -288,6 +302,42 @@ fun InviteMemberDialog(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
+                    // Direct Push Notification Invitation Button
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = GoogleGreenLight,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable {
+                                val targetName = name.trim().ifBlank { if (isHebrew) "חבר בית" else "Family Member" }
+                                onSendPushInvite?.invoke(targetName)
+                            }
+                            .testTag("send_push_invite_btn")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.NotificationsActive,
+                                contentDescription = null,
+                                tint = GoogleGreenDark,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isHebrew) "שלח התראת Push של הזמנה לנייד 📲" else "Send Push Notification Invitation 📲",
+                                style = MaterialTheme.typography.bodySmall.copy(color = GoogleGreenDark, fontWeight = FontWeight.Bold)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
                     Surface(
                         shape = RoundedCornerShape(14.dp),
                         color = GoogleBlueLight,
@@ -340,8 +390,8 @@ fun InviteMemberDialog(
                     if (memberToEdit != null && !memberToEdit.isPrimaryAdmin && onDeleteMember != null) {
                         OutlinedButton(
                             onClick = {
+                                safeDismiss()
                                 onDeleteMember(memberToEdit.id)
-                                onDismiss()
                             },
                             shape = RoundedCornerShape(18.dp),
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = GoogleRed),

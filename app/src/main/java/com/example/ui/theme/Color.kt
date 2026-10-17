@@ -23,12 +23,36 @@ val GoogleRedLight = Color(0xFFFCE8E6)
 val GooglePurple = Color(0xFF9334E8)
 val GooglePurpleLight = Color(0xFFF3E8FD)
 
-val BackgroundLight = Color(0xFFF8F9FA)
+val BackgroundLight = Color(0xFFF7F9FD)
 val SurfaceLight = Color(0xFFFFFFFF)
-val SurfaceVariantLight = Color(0xFFF1F3F4)
-val OutlineLight = Color(0xFFDADCE0)
-val TextPrimary = Color(0xFF202124)
-val TextSecondary = Color(0xFF5F6368)
+val SurfaceVariantLight = Color(0xFFF1F5F9)
+val OutlineLight = Color(0xFFE2E8F0)
+val TextPrimary = Color(0xFF1E293B)
+val TextSecondary = Color(0xFF64748B)
+
+// Reference Pastel Colors
+val PastelYellowBackground = Color(0xFFFFF7E6)
+val PastelYellowBorder = Color(0xFFFFE8B2)
+val PastelYellowAccent = Color(0xFFF59E0B)
+val PastelYellowDark = Color(0xFF92400E)
+
+val PastelGreenBackground = Color(0xFFEBF9F1)
+val PastelGreenBorder = Color(0xFFC3EED5)
+val PastelGreenAccent = Color(0xFF10B981)
+val PastelGreenDark = Color(0xFF065F46)
+
+val PastelPurpleBackground = Color(0xFFF4EEFD)
+val PastelPurpleBorder = Color(0xFFDCC8F9)
+val PastelPurpleAccent = Color(0xFF8B5CF6)
+val PastelPurpleDark = Color(0xFF5B21B6)
+
+val PastelBlueBackground = Color(0xFFEFF6FF)
+val PastelBlueBorder = Color(0xFFBFDBFE)
+val PastelBlueAccent = Color(0xFF2563EB)
+val PastelBlueDark = Color(0xFF1E40AF)
+
+val VibrantActionBlue = Color(0xFF1E6FFB)
+val VibrantActionBlueHover = Color(0xFF185ED4)
 
 // Dark theme palette
 val BackgroundDark = Color(0xFF121212)

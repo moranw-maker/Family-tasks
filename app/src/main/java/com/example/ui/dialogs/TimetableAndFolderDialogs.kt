@@ -2,6 +2,8 @@ package com.example.ui.dialogs
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -17,7 +19,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.example.model.SchedulePeriod
 import com.example.model.SchoolDay
+import com.example.ui.components.TimePickerField
 import com.example.ui.theme.GoogleBlue
+import com.example.ui.theme.VibrantActionBlue
 
 @Composable
 fun AddPeriodDialog(
@@ -36,13 +40,23 @@ fun AddPeriodDialog(
     var startTime by remember { mutableStateOf(periodToEdit?.startTime ?: "08:00") }
     var endTime by remember { mutableStateOf(periodToEdit?.endTime ?: "08:45") }
 
-    Dialog(onDismissRequest = onDismiss) {
+    val scrollState = androidx.compose.foundation.rememberScrollState()
+    val safeDismiss = {
+        onDismiss()
+    }
+
+    Dialog(
+        onDismissRequest = safeDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false
+        )
+    ) {
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp,
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxWidth(0.92f)
                 .padding(vertical = 16.dp)
                 .testTag("add_period_dialog")
         ) {
@@ -50,6 +64,7 @@ fun AddPeriodDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(20.dp)
+                    .verticalScroll(scrollState)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -67,7 +82,7 @@ fun AddPeriodDialog(
                             color = GoogleBlue
                         )
                     )
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = safeDismiss, modifier = Modifier.size(32.dp)) {
                         Icon(imageVector = Icons.Default.Close, contentDescription = "Close")
                     }
                 }
@@ -87,23 +102,22 @@ fun AddPeriodDialog(
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    OutlinedTextField(
-                        value = startTime,
-                        onValueChange = { startTime = it },
-                        label = { Text(if (isHebrew) "שעת התחלה" else "Start") },
-                        singleLine = true,
-                        shape = RoundedCornerShape(16.dp),
+                    TimePickerField(
+                        label = if (isHebrew) "שעת התחלה" else "Start Time",
+                        time = startTime,
+                        onTimeSelected = { startTime = it },
+                        isHebrew = isHebrew,
                         modifier = Modifier.weight(1f)
                     )
 
-                    OutlinedTextField(
-                        value = endTime,
-                        onValueChange = { endTime = it },
-                        label = { Text(if (isHebrew) "שעת סיום" else "End") },
-                        singleLine = true,
-                        shape = RoundedCornerShape(16.dp),
+                    TimePickerField(
+                        label = if (isHebrew) "שעת סיום" else "End Time",
+                        time = endTime,
+                        onTimeSelected = { endTime = it },
+                        isHebrew = isHebrew,
                         modifier = Modifier.weight(1f)
                     )
                 }
@@ -153,11 +167,12 @@ fun AddPeriodDialog(
                             onSavePeriod(period)
                         }
                     },
-                    shape = RoundedCornerShape(18.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = GoogleBlue),
+                    shape = RoundedCornerShape(28.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = VibrantActionBlue),
+                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 4.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(48.dp)
+                        .height(52.dp)
                 ) {
                     Text(
                         text = if (periodToEdit != null) {
@@ -185,14 +200,22 @@ fun AddFolderDialog(
     var selectedEmoji by remember { mutableStateOf("📁") }
 
     val emojis = listOf("📁", "📝", "🏥", "🎨", "⚽", "🎓", "📑", "💳")
+    val safeDismiss = {
+        onDismiss()
+    }
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = safeDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false
+        )
+    ) {
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp,
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxWidth(0.92f)
                 .padding(vertical = 16.dp)
         ) {
             Column(
@@ -212,7 +235,7 @@ fun AddFolderDialog(
                             color = GoogleBlue
                         )
                     )
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = safeDismiss, modifier = Modifier.size(32.dp)) {
                         Icon(imageVector = Icons.Default.Close, contentDescription = "Close")
                     }
                 }

@@ -37,13 +37,22 @@ fun EditFamilyNameDialog(
         listOf("Wexler Family", "Cohen Family", "Levi Family", "Miller Family", "Smith Family")
     }
 
-    Dialog(onDismissRequest = onDismiss) {
+    val safeDismiss = {
+        onDismiss()
+    }
+
+    Dialog(
+        onDismissRequest = safeDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false
+        )
+    ) {
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp,
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxWidth(0.92f)
                 .padding(vertical = 16.dp)
                 .testTag("edit_family_name_dialog")
         ) {
@@ -95,7 +104,7 @@ fun EditFamilyNameDialog(
                     }
 
                     IconButton(
-                        onClick = onDismiss,
+                        onClick = safeDismiss,
                         modifier = Modifier
                             .size(32.dp)
                             .testTag("close_edit_family_name_btn")
@@ -164,7 +173,7 @@ fun EditFamilyNameDialog(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     OutlinedButton(
-                        onClick = onDismiss,
+                        onClick = safeDismiss,
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier.weight(1f)
                     ) {

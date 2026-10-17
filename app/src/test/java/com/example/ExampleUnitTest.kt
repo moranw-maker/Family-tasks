@@ -51,4 +51,42 @@ class ExampleUnitTest {
         val added11th = repo.addMember("Extra Member", "extra@family.com", UserRole.MEMBER_KID, "👦")
         assertFalse("Should not allow more than 10 members", added11th)
     }
+
+    @Test
+    fun testTaskRoomAndFirestoreModel() {
+        val task = Task(
+            taskName = "Do Homework",
+            dueDate = "2026-10-20",
+            assignedFamilyMember = "Maya",
+            isCompleted = false
+        )
+
+        assertEquals("Do Homework", task.taskName)
+        assertEquals("Do Homework", task.name)
+        assertEquals("2026-10-20", task.dueDate)
+        assertEquals("Maya", task.assignedFamilyMember)
+        assertFalse(task.isCompleted)
+        assertFalse(task.completionStatus)
+
+        // Verify default no-argument constructor for Firestore serialization
+        val emptyTask = Task()
+        assertEquals("", emptyTask.taskName)
+        assertEquals("", emptyTask.dueDate)
+        assertEquals("", emptyTask.assignedFamilyMember)
+        assertFalse(emptyTask.isCompleted)
+
+        // Verify conversion to and from FamilyTask
+        val domainTask = task.toFamilyTask()
+        assertEquals(task.taskName, domainTask.title)
+        assertEquals(task.isCompleted, domainTask.isCompleted)
+
+        val restoredTask = Task.fromFamilyTask(domainTask, assignedMemberName = "Maya")
+        assertEquals(task.taskName, restoredTask.taskName)
+        assertEquals(task.isCompleted, restoredTask.isCompleted)
+        assertEquals("Maya", restoredTask.assignedFamilyMember)
+
+        // Verify IgnoreExtraProperties runtime annotation
+        val ignoreExtraProps = Task::class.java.getAnnotation(com.google.firebase.firestore.IgnoreExtraProperties::class.java)
+        assertNotNull("Task must be annotated with @IgnoreExtraProperties for Firestore", ignoreExtraProps)
+    }
 }

@@ -39,6 +39,7 @@ fun AdminDashboardScreen(
     onUpdateRole: (String, UserRole) -> Unit,
     onRemoveMember: (String) -> Unit,
     onSendNudge: (FamilyTask) -> Unit,
+    onSendPushInvite: (String) -> Unit = {},
     onShowToast: (String) -> Unit
 ) {
     val clipboardManager: ClipboardManager = LocalClipboardManager.current
@@ -62,7 +63,15 @@ fun AdminDashboardScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp),
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(
+                androidx.compose.ui.graphics.Brush.verticalGradient(
+                    colors = listOf(
+                        androidx.compose.ui.graphics.Color(0xFFEBF3FE),
+                        androidx.compose.ui.graphics.Color(0xFFF7F9FD),
+                        androidx.compose.ui.graphics.Color.White
+                    )
+                )
+            )
     ) {
         // Quick Screen Help Guide
         item {
@@ -82,6 +91,49 @@ fun AdminDashboardScreen(
                 isHebrew = isHebrew,
                 testTag = "admin_help_banner"
             )
+        }
+
+        // Non-Manager Permissions Notice
+        if (!currentMember.isAdmin) {
+            item {
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = GoogleYellowLight,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, GoogleYellowDark.copy(alpha = 0.4f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("non_manager_warning_card")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = GoogleYellowDark,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Column {
+                            Text(
+                                text = if (isHebrew) "הרשאות חבר בית (צפייה בלבד) 🔒" else "Member Permissions (View-Only) 🔒",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = GoogleYellowDark
+                                )
+                            )
+                            Text(
+                                text = if (isHebrew)
+                                    "רק למנהלים (מנהל ראשי ומנהל משני) יש הרשאה להזמין בני משפחה, לשלוח התראות Push ולשנות הרשאות."
+                                else
+                                    "Only household managers (Primary Admin & Co-Admin) have permission to invite members, send push invitations, and manage roles.",
+                                style = MaterialTheme.typography.bodySmall.copy(color = TextPrimary)
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // Dashboard Overview Card
@@ -309,16 +361,37 @@ fun AdminDashboardScreen(
                             )
                         }
 
-                        if (currentMember.isAdmin && members.size < 10) {
-                            FilledTonalButton(
-                                onClick = onInviteMember,
-                                shape = RoundedCornerShape(14.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                modifier = Modifier.testTag("admin_invite_btn")
+                        if (currentMember.isAdmin) {
+                            if (members.size < 10) {
+                                Button(
+                                    onClick = onInviteMember,
+                                    shape = RoundedCornerShape(24.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = VibrantActionBlue),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp),
+                                    modifier = Modifier.testTag("admin_invite_btn")
+                                ) {
+                                    Icon(imageVector = Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.White)
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(text = if (isHebrew) "+ הזמן חבר" else "+ Invite Member", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                }
+                            }
+                        } else {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant
                             ) {
-                                Icon(imageVector = Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(text = if (isHebrew) "הזמן" else "Invite", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(imageVector = Icons.Default.Lock, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(12.dp))
+                                    Text(
+                                        text = if (isHebrew) "הרשאת מנהל נדרשת" else "Managers Only",
+                                        style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary, fontWeight = FontWeight.Bold)
+                                    )
+                                }
                             }
                         }
                     }
@@ -397,18 +470,43 @@ fun AdminDashboardScreen(
                                 )
                             }
 
-                            Button(
-                                onClick = {
-                                    clipboardManager.setText(AnnotatedString(inviteLink))
-                                    onShowToast(if (isHebrew) "הקישור הועתק ללוח! שתפו עם בני המשפחה" else "Invite link copied to clipboard!")
-                                },
-                                shape = RoundedCornerShape(12.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                modifier = Modifier.testTag("copy_invite_link_btn")
-                            ) {
-                                Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(text = if (isHebrew) "העתק" else "Copy", fontSize = 12.sp)
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                if (currentMember.isAdmin) {
+                                    FilledTonalButton(
+                                        onClick = {
+                                            onSendPushInvite(if (isHebrew) "חבר משפחה" else "Family Member")
+                                        },
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.filledTonalButtonColors(
+                                            containerColor = GoogleGreenLight,
+                                            contentColor = GoogleGreenDark
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                                        modifier = Modifier.testTag("dashboard_push_invite_btn")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.NotificationsActive,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(text = if (isHebrew) "התראת Push" else "Push Alert", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+
+                                Button(
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(inviteLink))
+                                        onShowToast(if (isHebrew) "הקישור הועתק ללוח! שתפו עם בני המשפחה" else "Invite link copied to clipboard!")
+                                    },
+                                    shape = RoundedCornerShape(12.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                    modifier = Modifier.testTag("copy_invite_link_btn")
+                                ) {
+                                    Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(text = if (isHebrew) "העתק" else "Copy", fontSize = 12.sp)
+                                }
                             }
                         }
                     }

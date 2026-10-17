@@ -113,12 +113,12 @@ fun FilesScreen(
         floatingActionButton = {
             Surface(
                 onClick = { showUploadSourceSheet = true },
-                shape = RoundedCornerShape(16.dp),
-                color = GoogleBlue,
+                shape = RoundedCornerShape(24.dp),
+                color = VibrantActionBlue,
                 contentColor = Color.White,
                 shadowElevation = 4.dp,
                 modifier = Modifier
-                    .height(40.dp)
+                    .height(46.dp)
                     .testTag("upload_file_fab")
             ) {
                 Row(
@@ -144,7 +144,15 @@ fun FilesScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .background(MaterialTheme.colorScheme.background)
+                .background(
+                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                        colors = listOf(
+                            androidx.compose.ui.graphics.Color(0xFFEBF3FE),
+                            androidx.compose.ui.graphics.Color(0xFFF7F9FD),
+                            androidx.compose.ui.graphics.Color.White
+                        )
+                    )
+                )
         ) {
             // Quick Screen Help Guide
             Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)) {
@@ -395,7 +403,8 @@ fun FilesScreen(
     if (showUploadSourceSheet) {
         ModalBottomSheet(
             onDismissRequest = { showUploadSourceSheet = false },
-            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+            containerColor = MaterialTheme.colorScheme.surface
         ) {
             Column(
                 modifier = Modifier

@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -7,6 +8,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material3.*
@@ -22,6 +24,9 @@ import androidx.compose.ui.unit.sp
 import com.example.model.AppNotification
 import com.example.model.NotificationType
 import com.example.ui.theme.*
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -31,6 +36,8 @@ fun NotificationHistorySheet(
     onClearAll: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val timeFormatter = SimpleDateFormat("HH:mm", Locale.getDefault())
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
@@ -43,46 +50,38 @@ fun NotificationHistorySheet(
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 32.dp)
         ) {
+            // Header (matches reference Image 2 Screen 7)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.NotificationsActive,
-                        contentDescription = null,
-                        tint = GoogleBlue
-                    )
-                    Text(
-                        text = if (isHebrew) "מרכז התראות פוש" else "Push Notifications Hub",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.Bold
-                        )
-                    )
+                IconButton(onClick = onDismiss) {
+                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close")
                 }
+
+                Text(
+                    text = if (isHebrew) "התראות" else "Notifications",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF1E293B)
+                    )
+                )
 
                 if (notifications.isNotEmpty()) {
                     TextButton(
                         onClick = onClearAll,
                         modifier = Modifier.testTag("clear_notifications_btn")
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.DeleteSweep,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                            tint = GoogleRed
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = if (isHebrew) "נקה הכל" else "Clear All",
+                            text = if (isHebrew) "נקה" else "Clear",
                             color = GoogleRed,
-                            fontSize = 12.sp
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
                         )
                     }
+                } else {
+                    Spacer(modifier = Modifier.size(40.dp))
                 }
             }
 
@@ -99,9 +98,10 @@ fun NotificationHistorySheet(
                         Text(text = "🔔", fontSize = 42.sp)
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = if (isHebrew) "אין התראות חדשות כרגע" else "No new notifications",
+                            text = if (isHebrew) "אין התראות חדשות כרגע" else "No notifications at this time",
                             style = MaterialTheme.typography.bodyMedium.copy(
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = TextSecondary,
+                                fontWeight = FontWeight.Medium
                             )
                         )
                     }
@@ -112,18 +112,26 @@ fun NotificationHistorySheet(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     items(notifications) { item ->
-                        val (icon, bg) = when (item.type) {
-                            NotificationType.TASK_COMPLETED -> "🎉" to GoogleGreenLight
-                            NotificationType.TASK_ASSIGNED -> "📋" to GoogleBlueLight
-                            NotificationType.NUDGE_REMINDER -> "⏰" to GoogleRedLight
-                            NotificationType.SCHOOL_START -> "🔔" to GoogleYellowLight
-                            NotificationType.FILE_SHARED -> "📁" to GooglePurpleLight
-                            NotificationType.MEMBER_INVITED -> "👋" to GoogleBlueLight
+                        val (icon, iconBg, iconColor) = when (item.type) {
+                            NotificationType.TASK_COMPLETED -> Triple("✓", Color(0xFFD1FAE5), Color(0xFF059669))
+                            NotificationType.TASK_ASSIGNED -> Triple("🔔", Color(0xFFFEF3C7), Color(0xFFD97706))
+                            NotificationType.NUDGE_REMINDER -> Triple("⭐", Color(0xFFFFFBEB), Color(0xFFF59E0B))
+                            NotificationType.MEMBER_INVITED -> Triple("👥", Color(0xFFF3E8FF), Color(0xFF9334E8))
+                            NotificationType.SCHOOL_START -> Triple("🏫", Color(0xFFDBEAFE), Color(0xFF2563EB))
+                            NotificationType.FILE_SHARED -> Triple("📁", Color(0xFFE0E7FF), Color(0xFF4338CA))
+                        }
+
+                        val timeString = try {
+                            timeFormatter.format(Date(item.timestampMillis))
+                        } catch (_: Exception) {
+                            "עכשיו"
                         }
 
                         Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = bg,
+                            shape = RoundedCornerShape(18.dp),
+                            color = Color.White,
+                            border = BorderStroke(1.dp, OutlineLight),
+                            tonalElevation = 2.dp,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Row(
@@ -131,34 +139,55 @@ fun NotificationHistorySheet(
                                     .fillMaxWidth()
                                     .padding(14.dp),
                                 verticalAlignment = Alignment.Top,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .clip(CircleShape)
-                                        .background(Color.White),
-                                    contentAlignment = Alignment.Center
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.Top,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                                 ) {
-                                    Text(text = icon, fontSize = 18.sp)
+                                    Box(
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .clip(CircleShape)
+                                            .background(iconBg),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = icon,
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = iconColor
+                                        )
+                                    }
+
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = item.title,
+                                            style = MaterialTheme.typography.titleSmall.copy(
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF1E293B)
+                                            )
+                                        )
+                                        Spacer(modifier = Modifier.height(3.dp))
+                                        Text(
+                                            text = item.message,
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = TextSecondary
+                                            )
+                                        )
+                                    }
                                 }
 
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = item.title,
-                                        style = MaterialTheme.typography.titleSmall.copy(
-                                            fontWeight = FontWeight.Bold,
-                                            color = TextPrimary
-                                        )
-                                    )
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text(
-                                        text = item.message,
-                                        style = MaterialTheme.typography.bodySmall.copy(
-                                            color = TextSecondary
-                                        )
-                                    )
-                                }
+                                Text(
+                                    text = timeString,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        color = TextSecondary,
+                                        fontWeight = FontWeight.Medium,
+                                        fontSize = 11.sp
+                                    ),
+                                    modifier = Modifier.padding(start = 8.dp)
+                                )
                             }
                         }
                     }

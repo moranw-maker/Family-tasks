@@ -2,8 +2,11 @@ package com.example.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.auth.AuthState
+import com.example.auth.FirebaseAuthManager
 import com.example.data.FamilyRepository
 import com.example.model.*
+import com.google.firebase.auth.FirebaseUser
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -25,8 +28,13 @@ enum class CalendarViewMode {
 
 class FamilyViewModel(
     private val repository: FamilyRepository = FamilyRepository(),
-    private val geminiService: com.example.data.GeminiService = com.example.data.GeminiService()
+    private val geminiService: com.example.data.GeminiService = com.example.data.GeminiService(),
+    val authManager: FirebaseAuthManager = FirebaseAuthManager.getInstance()
 ) : ViewModel() {
+
+    // Auth Manager & Reactive States
+    val authState: StateFlow<AuthState> = authManager.authState
+    val currentFirebaseUser: StateFlow<FirebaseUser?> = authManager.currentUser
 
     // Main Flows
     val members: StateFlow<List<FamilyMember>> = repository.members
@@ -156,6 +164,11 @@ class FamilyViewModel(
     }
 
     fun openEditTaskDialog(task: FamilyTask) {
+        if (!currentMember.isAdmin) {
+            val isHeb = settings.value.language == AppLanguage.HEBREW
+            showToast(if (isHeb) "רק הורים ומנהלים מורשים לערוך משימות" else "Only parents can edit tasks")
+            return
+        }
         _taskToEdit.value = task
         _showAddTaskDialog.value = true
     }
@@ -165,12 +178,26 @@ class FamilyViewModel(
         _showAddTaskDialog.value = false
     }
 
+    fun initContext(context: android.content.Context) {
+        repository.setContext(context)
+    }
+
     fun openInviteMemberDialog() {
+        if (!currentMember.isAdmin) {
+            val isHeb = settings.value.language == AppLanguage.HEBREW
+            showToast(if (isHeb) "רק מנהל ראשי או משני יכול להזמין חברים למשפחה" else "Only household managers can invite members")
+            return
+        }
         _memberToEdit.value = null
         _showInviteMemberDialog.value = true
     }
 
     fun openEditMemberDialog(member: FamilyMember) {
+        if (!currentMember.isAdmin && member.id != currentMember.id) {
+            val isHeb = settings.value.language == AppLanguage.HEBREW
+            showToast(if (isHeb) "רק מנהלי המשפחה מורשים לערוך חברים אחרים" else "Only managers can edit other members")
+            return
+        }
         _memberToEdit.value = member
         _showInviteMemberDialog.value = true
     }
@@ -207,10 +234,22 @@ class FamilyViewModel(
     fun openGoogleProfileSheet() { _showGoogleProfileSheet.value = true }
     fun closeGoogleProfileSheet() { _showGoogleProfileSheet.value = false }
 
-    fun openEditFamilyNameDialog() { _showEditFamilyNameDialog.value = true }
+    fun openEditFamilyNameDialog() {
+        if (!currentMember.isAdmin) {
+            val isHeb = settings.value.language == AppLanguage.HEBREW
+            showToast(if (isHeb) "רק מנהלי הבית מורשים לעדכן את שם המשפחה" else "Only managers can rename the household")
+            return
+        }
+        _showEditFamilyNameDialog.value = true
+    }
     fun closeEditFamilyNameDialog() { _showEditFamilyNameDialog.value = false }
 
     fun updateFamilyName(newName: String) {
+        if (!currentMember.isAdmin) {
+            val isHeb = settings.value.language == AppLanguage.HEBREW
+            showToast(if (isHeb) "רק מנהלי הבית מורשים לעדכן את שם המשפחה" else "Only managers can rename the household")
+            return
+        }
         val trimmed = newName.trim()
         if (trimmed.isNotBlank()) {
             repository.updateFamilyName(trimmed)
@@ -242,6 +281,12 @@ class FamilyViewModel(
     fun saveTask(task: FamilyTask) {
         val exists = tasks.value.any { it.id == task.id }
         if (exists) {
+            if (!currentMember.isAdmin) {
+                val isHebrew = settings.value.language == AppLanguage.HEBREW
+                showToast(if (isHebrew) "רק הורים ומנהלים מורשים לערוך משימות" else "Only parents can edit tasks")
+                closeAddTaskDialog()
+                return
+            }
             repository.updateTask(task)
             val isHebrew = settings.value.language == AppLanguage.HEBREW
             showToast(if (isHebrew) "המשימה עודכנה בהצלחה! ✓" else "Task updated successfully! ✓")
@@ -280,6 +325,11 @@ class FamilyViewModel(
     }
 
     fun saveMember(memberId: String?, name: String, email: String, role: UserRole, avatarEmoji: String, schoolGrade: String? = null): Boolean {
+        if (!currentMember.isAdmin) {
+            val isHebrew = settings.value.language == AppLanguage.HEBREW
+            showToast(if (isHebrew) "רק מנהלי הבית מורשים להוסיף או לערוך חברי משפחה" else "Only managers can add or edit family members")
+            return false
+        }
         return if (memberId != null) {
             repository.updateMemberProfile(memberId, name, email, role, avatarEmoji, schoolGrade)
             val isHebrew = settings.value.language == AppLanguage.HEBREW
@@ -292,9 +342,16 @@ class FamilyViewModel(
     }
 
     fun addMember(name: String, email: String, role: UserRole, avatarEmoji: String, schoolGrade: String? = null): Boolean {
+        if (!currentMember.isAdmin) {
+            val isHebrew = settings.value.language == AppLanguage.HEBREW
+            showToast(if (isHebrew) "רק מנהלי הבית מורשים להוסיף חברים חדשים" else "Only managers can add new members")
+            return false
+        }
         val success = repository.addMember(name, email, role, avatarEmoji, schoolGrade)
         if (success) {
             closeInviteMemberDialog()
+            val isHebrew = settings.value.language == AppLanguage.HEBREW
+            showToast(if (isHebrew) "הזמנה נשלחה בהצלחה עבור $name! 💌" else "Invitation sent for $name! 💌")
         } else {
             val isHebrew = settings.value.language == AppLanguage.HEBREW
             showToast(if (isHebrew) "הגעת למגבלת 10 משתמשים במשפחה" else "Maximum 10 family members reached")
@@ -302,11 +359,32 @@ class FamilyViewModel(
         return success
     }
 
+    fun sendInvitationNotification(inviteeName: String, email: String? = null) {
+        if (!currentMember.isAdmin) {
+            val isHebrew = settings.value.language == AppLanguage.HEBREW
+            showToast(if (isHebrew) "רק מנהלי הבית מורשים לשלוח התראות הזמנה" else "Only managers can send invitation alerts")
+            return
+        }
+        repository.sendInvitationNotification(inviteeName, email)
+        val isHebrew = settings.value.language == AppLanguage.HEBREW
+        showToast(if (isHebrew) "נשלחה התראת Push של הזמנה עבור $inviteeName! 📲" else "Push notification invitation sent for $inviteeName! 📲")
+    }
+
     fun updateMemberRole(memberId: String, newRole: UserRole) {
+        if (!currentMember.isPrimaryAdmin) {
+            val isHebrew = settings.value.language == AppLanguage.HEBREW
+            showToast(if (isHebrew) "רק המנהל הראשי יכול לשנות תפקידים והרשאות" else "Only Primary Admin can modify roles")
+            return
+        }
         repository.updateMemberRole(memberId, newRole)
     }
 
     fun removeMember(memberId: String) {
+        if (!currentMember.isAdmin) {
+            val isHebrew = settings.value.language == AppLanguage.HEBREW
+            showToast(if (isHebrew) "רק מנהלי המשפחה מורשים להסיר חברים" else "Only managers can remove members")
+            return
+        }
         repository.removeMember(memberId)
         val isHebrew = settings.value.language == AppLanguage.HEBREW
         showToast(if (isHebrew) "המשתמש הוסר מהמשפחה" else "Member removed from household")
@@ -351,6 +429,13 @@ class FamilyViewModel(
         repository.initializeCleanFamily(name, email, familyName, avatar)
         val isHebrew = settings.value.language == AppLanguage.HEBREW
         showToast(if (isHebrew) "ברוכים הבאים $name! המשפחה הוקמה בהצלחה 🌟" else "Welcome $name! Household setup complete 🌟")
+    }
+
+    fun joinFamilyWithCode(code: String) {
+        repository.joinFamilyByCode(code)
+        completeGoogleSignIn(settings.value.googleAccountEmail)
+        val isHebrew = settings.value.language == AppLanguage.HEBREW
+        showToast(if (isHebrew) "הצטרפת בהצלחה למשפחה עם הקוד $code 🏠" else "Successfully joined family with code $code 🏠")
     }
 
     fun loadSampleData() {

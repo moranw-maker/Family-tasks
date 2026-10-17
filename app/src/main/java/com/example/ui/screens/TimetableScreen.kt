@@ -57,12 +57,12 @@ fun TimetableScreen(
             if (currentMember.isAdmin) {
                 Surface(
                     onClick = onAddPeriod,
-                    shape = RoundedCornerShape(16.dp),
-                    color = GoogleBlue,
+                    shape = RoundedCornerShape(24.dp),
+                    color = VibrantActionBlue,
                     contentColor = Color.White,
                     shadowElevation = 4.dp,
                     modifier = Modifier
-                        .height(40.dp)
+                        .height(46.dp)
                         .testTag("add_period_fab")
                 ) {
                     Row(
@@ -85,7 +85,15 @@ fun TimetableScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .background(MaterialTheme.colorScheme.background)
+                .background(
+                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                        colors = listOf(
+                            androidx.compose.ui.graphics.Color(0xFFEBF3FE),
+                            androidx.compose.ui.graphics.Color(0xFFF7F9FD),
+                            androidx.compose.ui.graphics.Color.White
+                        )
+                    )
+                )
         ) {
             // Quick Screen Help Guide
             Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)) {

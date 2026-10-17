@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.example.model.*
+import com.example.ui.components.TimePickerField
 import com.example.ui.theme.*
 import java.time.LocalDate
 
@@ -46,14 +47,22 @@ fun AddTaskDialog(
     var dateOffsetDays by remember { mutableIntStateOf(0) } // 0 = Today, 1 = Tomorrow, 2 = In 2 days
 
     val scrollState = rememberScrollState()
+    val safeDismiss = {
+        onDismiss()
+    }
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = safeDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false
+        )
+    ) {
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp,
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxWidth(0.92f)
                 .padding(vertical = 16.dp)
                 .testTag("add_task_dialog")
         ) {
@@ -81,7 +90,7 @@ fun AddTaskDialog(
                         )
                     )
 
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = safeDismiss, modifier = Modifier.size(32.dp)) {
                         Icon(imageVector = Icons.Default.Close, contentDescription = "Close")
                     }
                 }
@@ -267,14 +276,14 @@ fun AddTaskDialog(
                 // Time & Points Row
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    OutlinedTextField(
-                        value = dueTime,
-                        onValueChange = { dueTime = it },
-                        label = { Text(if (isHebrew) "שעת יעד" else "Due Time") },
-                        singleLine = true,
-                        shape = RoundedCornerShape(16.dp),
+                    TimePickerField(
+                        label = if (isHebrew) "שעת יעד" else "Due Time",
+                        time = dueTime,
+                        onTimeSelected = { dueTime = it },
+                        isHebrew = isHebrew,
                         modifier = Modifier.weight(1f)
                     )
 
@@ -345,11 +354,12 @@ fun AddTaskDialog(
                             onSaveTask(taskResult)
                         }
                     },
-                    shape = RoundedCornerShape(18.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = GoogleBlue),
+                    shape = RoundedCornerShape(28.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = VibrantActionBlue),
+                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 4.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(48.dp)
+                        .height(52.dp)
                         .testTag("save_task_btn")
                 ) {
                     Text(

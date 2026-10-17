@@ -50,7 +50,15 @@ fun GeminiScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp),
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(
+                androidx.compose.ui.graphics.Brush.verticalGradient(
+                    colors = listOf(
+                        androidx.compose.ui.graphics.Color(0xFFEBF3FE),
+                        androidx.compose.ui.graphics.Color(0xFFF7F9FD),
+                        androidx.compose.ui.graphics.Color.White
+                    )
+                )
+            )
     ) {
         // Quick Screen Help Guide
         item {

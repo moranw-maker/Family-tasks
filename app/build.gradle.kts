@@ -1,4 +1,5 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.time.Duration
 
 plugins {
   alias(libs.plugins.android.application)
@@ -12,12 +13,25 @@ android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
+  // Release Version Management
+  // Logical Step to increment for future releases:
+  // 1. Increment currentVersionCode by +1 (required by Android Package Manager & Google Play)
+  // 2. Bump versionMinor (e.g. 1.0 -> 1.1 -> 1.2) for feature updates, or versionPatch for bugfixes
+  // 3. BuildConfig.VERSION_NAME and BuildConfig.VERSION_CODE will automatically update on build
+  val versionMajor = 1
+  val versionMinor = 1
+  val currentVersionCode = 2
+  val currentVersionName = "$versionMajor.$versionMinor"
+
   defaultConfig {
     applicationId = "com.aistudio.familytasks.qkxmva"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = currentVersionCode
+    versionName = currentVersionName
+
+    buildConfigField("String", "NEXT_RELEASE_VERSION_NAME", "\"$versionMajor.${versionMinor + 1}\"")
+    buildConfigField("int", "NEXT_RELEASE_VERSION_CODE", "${currentVersionCode + 1}")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -108,15 +122,14 @@ dependencies {
   implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
-  // Uncomment to use Firestore:
-  // implementation(libs.firebase.firestore)
+  // Firestore cloud data synchronization
+  implementation(libs.firebase.firestore)
 
-  // Uncomment ALL FOUR of the following dependencies together to use Firebase Auth and Google
-  // Sign-In via Credential Manager:
-  // implementation(libs.firebase.auth)
-  // implementation(libs.androidx.credentials)
-  // implementation(libs.androidx.credentials.play.services)
-  // implementation(libs.googleid)
+  // Firebase Auth and Google Sign-In via Credential Manager
+  implementation(libs.firebase.auth)
+  implementation(libs.androidx.credentials)
+  implementation(libs.androidx.credentials.play.services)
+  implementation(libs.googleid)
   implementation(libs.firebase.appcheck.recaptcha)
   implementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.coroutines.android)
@@ -141,4 +154,12 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
+}
+
+tasks.withType<Test> {
+  failFast = true
+  timeout.set(Duration.ofMinutes(2))
+  testLogging {
+    events("passed", "failed", "skipped")
+  }
 }

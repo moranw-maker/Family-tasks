@@ -25,14 +25,22 @@ fun RenameFileDialog(
     onConfirmRename: (fileId: String, newName: String) -> Unit
 ) {
     var newName by remember { mutableStateOf(file.name) }
+    val safeDismiss = {
+        onDismiss()
+    }
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = safeDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false
+        )
+    ) {
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp,
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxWidth(0.92f)
                 .padding(vertical = 16.dp)
                 .testTag("rename_file_dialog")
         ) {
@@ -67,7 +75,7 @@ fun RenameFileDialog(
                     }
 
                     IconButton(
-                        onClick = onDismiss,
+                        onClick = safeDismiss,
                         modifier = Modifier.size(32.dp)
                     ) {
                         Icon(imageVector = Icons.Default.Close, contentDescription = "Close")
@@ -94,7 +102,7 @@ fun RenameFileDialog(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     OutlinedButton(
-                        onClick = onDismiss,
+                        onClick = safeDismiss,
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier.weight(1f)
                     ) {
@@ -104,8 +112,8 @@ fun RenameFileDialog(
                     Button(
                         onClick = {
                             if (newName.isNotBlank()) {
+                                safeDismiss()
                                 onConfirmRename(file.id, newName.trim())
-                                onDismiss()
                             }
                         },
                         enabled = newName.isNotBlank() && newName.trim() != file.name,

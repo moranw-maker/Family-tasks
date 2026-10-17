@@ -2,6 +2,7 @@ package com.example.ui.components
 
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -41,8 +42,9 @@ fun TopFamilyBar(
     val isHebrew = currentLanguage == AppLanguage.HEBREW
 
     Surface(
-        color = MaterialTheme.colorScheme.surface,
+        color = Color.White,
         tonalElevation = 2.dp,
+        shadowElevation = 2.dp,
         modifier = Modifier.fillMaxWidth()
     ) {
         CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
@@ -50,170 +52,158 @@ fun TopFamilyBar(
                 modifier = Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // Left / Start: Family branding & Google Sync Badge
+                // 1. Left: Profile Avatar with Status Ring (matches reference Image 1)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(Color(currentMember.colorHex).copy(alpha = 0.2f))
+                            .border(2.dp, VibrantActionBlue.copy(alpha = 0.6f), CircleShape)
+                            .clickable { onOpenProfile() }
+                            .testTag("user_profile_avatar_button"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = currentMember.avatarEmoji,
+                            fontSize = 20.sp
+                        )
+                    }
+                }
+
+                // 2. Center: Brand House Icon & "FamilyTasks" Logo (matches reference)
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier
-                        .weight(1f, fill = false)
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable { onOpenProfile() }
+                    modifier = Modifier.clickable { onOpenProfile() }
                 ) {
-                // Family house icon badge
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(GoogleBlueLight),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(text = "🏡", fontSize = 18.sp)
-                }
-
-                Column(modifier = Modifier.weight(1f, fill = false)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = GoogleBlueLight,
+                        modifier = Modifier.size(32.dp)
                     ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(text = "🏡", fontSize = 18.sp)
+                        }
+                    }
+
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "FamilyTasks",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFF1E293B),
+                                letterSpacing = 0.2.sp
+                            )
+                        )
                         Text(
                             text = familyTitle,
-                            style = MaterialTheme.typography.titleSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = TextSecondary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium
                             ),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                    }
+                }
 
-                        // Google Cloud Sync indicator dot
-                        Box(
-                            modifier = Modifier
-                                .size(7.dp)
-                                .clip(CircleShape)
-                                .background(if (isDriveSyncActive) GoogleGreen else GoogleYellow)
+                // 3. Right: Actions (Language Pill, Gemini AI, Notification Bell with red badge)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    // Language quick toggle
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFFF1F5F9),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onLanguageToggle() }
+                            .testTag("language_toggle_button")
+                    ) {
+                        Text(
+                            text = if (isHebrew) "עב" else "EN",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = VibrantActionBlue,
+                                fontSize = 11.sp
+                            ),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
                         )
                     }
 
-                    Text(
-                        text = if (isHebrew) "סונכרן עם Drive ✓" else "Drive Synced ✓",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            color = GoogleGreenDark,
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 10.sp
-                        ),
-                        maxLines = 1
-                    )
-                }
-            }
-
-            // Right / End: Actions (Language toggle, Gemini, Notifications, Settings, Profile Avatar)
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                // Language quick toggle
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable { onLanguageToggle() }
-                        .testTag("language_toggle_button")
-                ) {
-                    Text(
-                        text = if (isHebrew) "🇮🇱 עב" else "🇺🇸 EN",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = GoogleBlue,
-                            fontSize = 11.sp
-                        ),
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
-                    )
-                }
-
-                // Gemini AI button
-                IconButton(
-                    onClick = onOpenGemini,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .testTag("top_gemini_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.AutoAwesome,
-                        contentDescription = "Gemini AI",
-                        tint = GoogleBlue,
-                        modifier = Modifier.size(19.dp)
-                    )
-                }
-
-                // Notification Bell
-                IconButton(
-                    onClick = onOpenNotifications,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .testTag("notification_bell_button")
-                ) {
-                    BadgedBox(
-                        badge = {
-                            if (unreadNotificationsCount > 0) {
-                                Badge(
-                                    containerColor = GoogleRed,
-                                    contentColor = Color.White
-                                ) {
-                                    Text(
-                                        text = unreadNotificationsCount.toString(),
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 9.sp
-                                    )
-                                }
-                            }
-                        }
+                    // Gemini AI button
+                    IconButton(
+                        onClick = onOpenGemini,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .testTag("top_gemini_button")
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Notifications,
-                            contentDescription = if (isHebrew) "התראות" else "Notifications",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(19.dp)
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = "Gemini AI",
+                            tint = VibrantActionBlue,
+                            modifier = Modifier.size(20.dp)
                         )
                     }
-                }
 
-                // Settings icon button
-                IconButton(
-                    onClick = onOpenSettings,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .testTag("top_settings_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Settings,
-                        contentDescription = if (isHebrew) "הגדרות" else "Settings",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(19.dp)
-                    )
-                }
+                    // Notification Bell with Red Badge (matches Image 1 Right phone)
+                    IconButton(
+                        onClick = onOpenNotifications,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .testTag("notification_bell_button")
+                    ) {
+                        BadgedBox(
+                            badge = {
+                                if (unreadNotificationsCount > 0) {
+                                    Badge(
+                                        containerColor = Color(0xFFEF4444),
+                                        contentColor = Color.White
+                                    ) {
+                                        Text(
+                                            text = unreadNotificationsCount.toString(),
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 9.sp
+                                        )
+                                    }
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Notifications,
+                                contentDescription = if (isHebrew) "התראות" else "Notifications",
+                                tint = VibrantActionBlue,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
 
-                // Profile Avatar Button
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(CircleShape)
-                        .background(Color(currentMember.colorHex).copy(alpha = 0.25f))
-                        .clickable { onOpenProfile() }
-                        .testTag("user_profile_avatar_button"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = currentMember.avatarEmoji,
-                        fontSize = 17.sp
-                    )
+                    // Settings icon button
+                    IconButton(
+                        onClick = onOpenSettings,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .testTag("top_settings_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = if (isHebrew) "הגדרות" else "Settings",
+                            tint = TextSecondary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
         }
     }
-}
 }
