@@ -55,19 +55,28 @@ fun TimetableScreen(
     Scaffold(
         floatingActionButton = {
             if (currentMember.isAdmin) {
-                ExtendedFloatingActionButton(
+                Surface(
                     onClick = onAddPeriod,
-                    containerColor = GoogleBlue,
+                    shape = RoundedCornerShape(16.dp),
+                    color = GoogleBlue,
                     contentColor = Color.White,
-                    shape = RoundedCornerShape(20.dp),
-                    modifier = Modifier.testTag("add_period_fab")
+                    shadowElevation = 4.dp,
+                    modifier = Modifier
+                        .height(40.dp)
+                        .testTag("add_period_fab")
                 ) {
-                    Icon(imageVector = Icons.Default.Add, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = if (isHebrew) "הוסף שיעור" else "Add Period",
-                        fontWeight = FontWeight.Bold
-                    )
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Text(
+                            text = if (isHebrew) "הוסף שיעור" else "Add Period",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                    }
                 }
             }
         }
@@ -78,11 +87,30 @@ fun TimetableScreen(
                 .padding(innerPadding)
                 .background(MaterialTheme.colorScheme.background)
         ) {
+            // Quick Screen Help Guide
+            Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)) {
+                com.example.ui.components.ScreenHelpBanner(
+                    title = if (isHebrew) "מערכת שעות ולימודים" else "School Schedule & Periods",
+                    tips = if (isHebrew) listOf(
+                        "בחירת תלמיד/ה: בחרו בלשוניות למעלה בין הילדים לצפייה במערכת האישית.",
+                        "מעבר תצוגות: צפייה יומית מפורטת או טבלה שבועית מלאה.",
+                        "הוספת שיעור: מנהלים יכולים ללחוץ על הכפתור הקומפקטי בתחתית להוספת שיעור.",
+                        "התראות שיעור: כל שיעור שולח התראת הכנה 10 דקות לפני תחילתו."
+                    ) else listOf(
+                        "Select Child: Tap child chips on top to view their schedule.",
+                        "Views: Toggle between Daily view and Weekly table grid.",
+                        "Add Period: Admins can use the compact bottom button to add periods.",
+                        "Alerts: Receive notifications 10 minutes prior to school periods."
+                    ),
+                    isHebrew = isHebrew
+                )
+            }
+
             // Child Selector Pills & View Mode Switcher
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                    .padding(horizontal = 14.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
@@ -233,7 +261,7 @@ fun TimetableScreen(
                     }
                 } else {
                     LazyColumn(
-                        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 90.dp, top = 6.dp),
+                        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 110.dp, top = 6.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {

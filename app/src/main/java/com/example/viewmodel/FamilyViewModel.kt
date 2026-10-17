@@ -335,6 +335,30 @@ class FamilyViewModel(
         repository.uploadDocument(folderId, name, extension, sizeFormatted)
     }
 
+    fun renameFile(fileId: String, newName: String) {
+        repository.renameDocument(fileId, newName)
+        val isHebrew = settings.value.language == AppLanguage.HEBREW
+        showToast(if (isHebrew) "שם הקובץ עודכן ל-\"$newName\" ✓" else "File renamed to \"$newName\" ✓")
+    }
+
+    fun deleteFile(fileId: String) {
+        repository.deleteDocument(fileId)
+        val isHebrew = settings.value.language == AppLanguage.HEBREW
+        showToast(if (isHebrew) "הקובץ נמחק מ-Google Drive" else "File deleted from Google Drive")
+    }
+
+    fun initializeCleanFamily(name: String, email: String, familyName: String, avatar: String) {
+        repository.initializeCleanFamily(name, email, familyName, avatar)
+        val isHebrew = settings.value.language == AppLanguage.HEBREW
+        showToast(if (isHebrew) "ברוכים הבאים $name! המשפחה הוקמה בהצלחה 🌟" else "Welcome $name! Household setup complete 🌟")
+    }
+
+    fun loadSampleData() {
+        repository.loadSampleData()
+        val isHebrew = settings.value.language == AppLanguage.HEBREW
+        showToast(if (isHebrew) "נתוני דוגמה נטענו בהצלחה" else "Sample data loaded")
+    }
+
     fun dismissAlert() {
         repository.dismissLatestAlert()
     }
@@ -345,6 +369,13 @@ class FamilyViewModel(
 
     fun updateSettings(newSettings: AppSettings) {
         repository.updateSettings(newSettings)
+    }
+
+    fun upgradeAppVersion() {
+        repository.upgradeAppVersion()
+        val isHebrew = settings.value.language == AppLanguage.HEBREW
+        val versionStr = settings.value.formattedVersion
+        showToast(if (isHebrew) "התוכנה שודרגה לגרסה חדשה בהצלחה! 🚀" else "App successfully updated! 🚀")
     }
 
     fun syncCloudNow() {

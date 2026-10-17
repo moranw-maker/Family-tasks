@@ -45,6 +45,25 @@ fun SettingsScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
+        // Quick Screen Help Guide
+        item {
+            com.example.ui.components.ScreenHelpBanner(
+                title = if (isHebrew) "מרכז הגדרות והתאמה אישית" else "Settings & Customization",
+                tips = if (isHebrew) listOf(
+                    "שם המשפחה: שינוי שם המשפחה הראשי המוצג בכל המסכים ובקישורי ההזמנה.",
+                    "גרסת התוכנה: התוכנה מתחילה ב-1.0 וניתן לשדרג בלחיצה על כפתור העדכון (+0.1).",
+                    "ערכת צבעים ועיצוב: בחירה בין כחול Google, ירוק, סגול, כתום או מנטה.",
+                    "התחברות Google: ניהול חשבון Google מסונכרן ואיפוס להקמת משפחה נקייה."
+                ) else listOf(
+                    "Family Name: Updates the primary family title shown on top and in invites.",
+                    "App Version: Starts at 1.0 and increments by 0.1 with each update check.",
+                    "Theme Palette: Customize your app colors with M3 Material themes.",
+                    "Google Account: Manage Drive sync or reset to start a clean household."
+                ),
+                isHebrew = isHebrew
+            )
+        }
+
         // Section: Main Family Name (שם המשפחה הראשי)
         item {
             var editingFamilyName by remember(settings.familyName) { mutableStateOf(settings.familyName) }
@@ -511,6 +530,128 @@ fun SettingsScreen(
                                 )
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Section: Software Version & Upgrades (גרסת התוכנה שמתחילה ב-1.0 ועולה ב-0.1)
+        item {
+            SettingsCard(
+                title = if (isHebrew) "גרסת התוכנה ועדכונים" else "Software Version & Updates",
+                icon = Icons.Default.Info,
+                iconColor = GoogleBlue
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(
+                                text = if (isHebrew) "גרסת אפליקציה נוכחית:" else "Current App Version:",
+                                style = MaterialTheme.typography.labelSmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = GoogleBlueLight
+                                ) {
+                                    Text(
+                                        text = "גרסה ${settings.formattedVersion}",
+                                        style = MaterialTheme.typography.titleMedium.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = GoogleBlue
+                                        ),
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                    )
+                                }
+                                Text(
+                                    text = if (isHebrew) "פעיל ומסונכרן ✓" else "Active & Synced ✓",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = GoogleGreenDark, fontWeight = FontWeight.SemiBold)
+                                )
+                            }
+                        }
+
+                        Button(
+                            onClick = {
+                                val nextVersion = (settings.appVersion + 0.1).let {
+                                    Math.round(it * 10.0) / 10.0
+                                }
+                                onUpdateSettings(settings.copy(appVersion = nextVersion))
+                                val verStr = String.format(java.util.Locale.US, "%.1f", nextVersion)
+                                onShowToast(
+                                    if (isHebrew)
+                                        "התוכנה שודרגה בהצלחה לגרסה $verStr! 🚀"
+                                    else
+                                        "Software successfully updated to version $verStr! 🚀"
+                                )
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = GoogleBlue),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier.testTag("check_update_version_btn")
+                        ) {
+                            Icon(imageVector = Icons.Default.SystemUpdate, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isHebrew) "שדרג גרסה (+0.1)" else "Update (+0.1)",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = if (isHebrew)
+                            "הגרסה התחילה ב-1.0 ועם כל עדכון עולה ב-0.1. כולל סנכרון רציף מול Google Drive ו-Workspace."
+                        else
+                            "Starts at 1.0 and increases by 0.1 per update. Continuous Google Drive sync enabled.",
+                        style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    )
+                }
+            }
+        }
+
+        // Section: Google Sign In Reset / Re-login
+        item {
+            SettingsCard(
+                title = if (isHebrew) "חשבון Google והקמת משפחה" else "Google Account & Setup",
+                icon = Icons.Default.AccountCircle,
+                iconColor = GoogleGreen
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = if (isHebrew)
+                            "מחובר כעת עם: ${settings.googleAccountEmail}\nניתן לצאת ולהיכנס מחדש להקמת משפחה נקייה או החלפת משתמש:"
+                        else
+                            "Connected as: ${settings.googleAccountEmail}\nSwitch account or re-enter clean family setup:",
+                        style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    OutlinedButton(
+                        onClick = {
+                            onUpdateSettings(settings.copy(hasCompletedGoogleSignIn = false))
+                            onShowToast(if (isHebrew) "מעבר למסך התחברות Google..." else "Opening Google Sign-in...")
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("reset_google_login_btn")
+                    ) {
+                        Text(
+                            text = if (isHebrew) "התנתק והיכנס עם חשבון Google מחדש 🔄" else "Sign Out & Reconnect Google 🔄",
+                            fontWeight = FontWeight.Bold,
+                            color = GoogleBlue
+                        )
                     }
                 }
             }

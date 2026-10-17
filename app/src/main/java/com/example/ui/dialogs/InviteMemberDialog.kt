@@ -28,11 +28,18 @@ import com.example.model.FamilyMember
 import com.example.model.UserRole
 import com.example.ui.theme.*
 
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+
 @Composable
 fun InviteMemberDialog(
     currentMemberCount: Int,
     isHebrew: Boolean,
     memberToEdit: FamilyMember? = null,
+    familyTitle: String = if (isHebrew) "משפחת וקסלר" else "Wexler Family",
+    inviteCode: String = "FAM-WEXLER-7749",
+    inviteLink: String = "https://familytasks.app/join/$inviteCode",
     onDismiss: () -> Unit,
     onConfirm: (name: String, email: String, role: UserRole, avatarEmoji: String, schoolGrade: String?) -> Unit,
     onDeleteMember: ((String) -> Unit)? = null
@@ -225,6 +232,62 @@ fun InviteMemberDialog(
 
                 if (!isEditMode) {
                     val context = androidx.compose.ui.platform.LocalContext.current
+                    val clipboardManager = LocalClipboardManager.current
+
+                    // Dynamic Family Code Card
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = if (isHebrew) "קוד הזמנה ייחודי ל-$familyTitle:" else "Invite Code for $familyTitle:",
+                                        style = MaterialTheme.typography.labelSmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    )
+                                    Text(
+                                        text = inviteCode,
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = GoogleBlue
+                                        )
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(inviteLink))
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            if (isHebrew) "הקישור הועתק ללוח! $inviteLink" else "Invite link copied! $inviteLink",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ContentCopy,
+                                        contentDescription = "Copy",
+                                        tint = GoogleBlue,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
                     Surface(
                         shape = RoundedCornerShape(14.dp),
                         color = GoogleBlueLight,
@@ -232,15 +295,17 @@ fun InviteMemberDialog(
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(14.dp))
                             .clickable {
+                                val shareText = if (isHebrew) {
+                                    "הצטרף למרכז המשימות והניהול של $familyTitle! הורד את האפליקציה או התחבר דרך הקוד: $inviteCode\nקישור ישיר: $inviteLink"
+                                } else {
+                                    "Join the task and family hub for $familyTitle! Connect with code: $inviteCode\nDirect link: $inviteLink"
+                                }
                                 val sendIntent = android.content.Intent().apply {
                                     action = android.content.Intent.ACTION_SEND
-                                    putExtra(
-                                        android.content.Intent.EXTRA_TEXT,
-                                        "הצטרף למרכז המשימות והניהול של המשפחה שלנו! הורד את האפליקציה או התחבר דרך הקוד: FAM-WEXLER-7749 https://familytasks.app/join/FAM-WEXLER-7749"
-                                    )
+                                    putExtra(android.content.Intent.EXTRA_TEXT, shareText)
                                     type = "text/plain"
                                 }
-                                context.startActivity(android.content.Intent.createChooser(sendIntent, "שתף הזמנה למשפחה"))
+                                context.startActivity(android.content.Intent.createChooser(sendIntent, if (isHebrew) "שתף הזמנה למשפחה" else "Share Family Invite"))
                             }
                             .testTag("share_invite_link_btn")
                     ) {

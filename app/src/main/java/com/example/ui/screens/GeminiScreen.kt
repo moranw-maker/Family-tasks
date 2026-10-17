@@ -52,6 +52,25 @@ fun GeminiScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
+        // Quick Screen Help Guide
+        item {
+            com.example.ui.components.ScreenHelpBanner(
+                title = if (isHebrew) "עוזר ה-AI של Gemini" else "Gemini AI Family Assistant",
+                tips = if (isHebrew) listOf(
+                    "הצעת משימות: שאלו את Gemini לרעיונות למטלות שבועיות מותאמות לגילאי הילדים.",
+                    "חלוקה שווה: בקשו חלוקת תורנויות מאוזנת בין כל בני המשפחה.",
+                    "הוספה בקליק: משימות ש-Gemini מציע ניתנות להוספה ישירה לרשימת המשימות.",
+                    "סיוע בלימודים: עזרה ברעיונות לפרויקטים ושיעורי בית."
+                ) else listOf(
+                    "Task Suggestions: Ask Gemini for chore suggestions tailored to your kids.",
+                    "Fair Balance: Request equal chore distributions across the family.",
+                    "One-Tap Add: Add suggested tasks directly to your household list.",
+                    "Homework Ideas: Get school project and schedule tips."
+                ),
+                isHebrew = isHebrew
+            )
+        }
+
         // Hero Header Card
         item {
             Surface(

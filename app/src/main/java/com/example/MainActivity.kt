@@ -88,6 +88,21 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
     val unreadCount = notifications.count { !it.isRead }
     val familyTitle = settings.getFamilyTitle(isHebrew)
 
+    // 1. Initial Google Login & Clean Household Setup Gate
+    if (!settings.hasCompletedGoogleSignIn) {
+        GoogleOnboardingScreen(
+            initialEmail = settings.googleAccountEmail,
+            isHebrew = isHebrew,
+            onStartCleanFamily = { name, email, famName, avatar ->
+                viewModel.initializeCleanFamily(name, email, famName, avatar)
+            },
+            onJoinWithCode = { code ->
+                viewModel.completeGoogleSignIn("user_${code.lowercase().replace("-", "_")}@gmail.com")
+            }
+        )
+        return
+    }
+
     // Handle back button on sub-screens
     BackHandler(enabled = currentScreen != AppScreen.TASKS) {
         viewModel.navigateTo(AppScreen.TASKS)
@@ -312,6 +327,8 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
                         onUploadFile = { folderId, name, ext, size ->
                             viewModel.uploadDocument(folderId, name, ext, size)
                         },
+                        onRenameFile = { fileId, newName -> viewModel.renameFile(fileId, newName) },
+                        onDeleteFile = { fileId -> viewModel.deleteFile(fileId) },
                         onShowToast = { viewModel.showToast(it) }
                     )
                 }
@@ -372,6 +389,9 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
             currentMemberCount = members.size,
             isHebrew = isHebrew,
             memberToEdit = memberToEdit,
+            familyTitle = familyTitle,
+            inviteCode = settings.getDynamicInviteCode(),
+            inviteLink = settings.getDynamicInviteLink(),
             onDismiss = { viewModel.closeInviteMemberDialog() },
             onConfirm = { name, email, role, emoji, grade ->
                 viewModel.saveMember(memberToEdit?.id, name, email, role, emoji, grade)
@@ -381,7 +401,7 @@ fun FamilyTasksApp(viewModel: FamilyViewModel) {
     }
 
     if (showAddPeriodDialog) {
-        val activeKid = members.find { it.id == selectedChildTimetableId } ?: members.first()
+        val activeKid = members.find { it.id == selectedChildTimetableId } ?: members.firstOrNull() ?: currentMember
         AddPeriodDialog(
             childId = activeKid.id,
             childName = activeKid.name,

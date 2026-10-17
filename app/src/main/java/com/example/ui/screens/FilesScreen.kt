@@ -29,7 +29,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.example.model.*
+import com.example.ui.components.ScreenHelpBanner
 import com.example.ui.dialogs.CameraScannerDialog
+import com.example.ui.dialogs.FilePreviewDialog
+import com.example.ui.dialogs.RenameFileDialog
 import com.example.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -45,11 +48,15 @@ fun FilesScreen(
     onViewModeChange: (FilesViewMode) -> Unit,
     onAddFolder: () -> Unit,
     onUploadFile: (folderId: String, name: String, extension: String, sizeFormatted: String) -> Unit,
+    onRenameFile: (fileId: String, newName: String) -> Unit = { _, _ -> },
+    onDeleteFile: (fileId: String) -> Unit = {},
     onShowToast: (String) -> Unit
 ) {
     var showUploadSourceSheet by remember { mutableStateOf(false) }
     var showDrivePickerDialog by remember { mutableStateOf(false) }
     var showCameraScannerDialog by remember { mutableStateOf(false) }
+    var fileToPreview by remember { mutableStateOf<FamilyDocument?>(null) }
+    var fileToRename by remember { mutableStateOf<FamilyDocument?>(null) }
 
     val activeFolder = folders.find { it.id == selectedFolderId }
     val filteredFiles = files.filter {
@@ -104,19 +111,32 @@ fun FilesScreen(
 
     Scaffold(
         floatingActionButton = {
-            ExtendedFloatingActionButton(
+            Surface(
                 onClick = { showUploadSourceSheet = true },
-                containerColor = GoogleBlue,
+                shape = RoundedCornerShape(16.dp),
+                color = GoogleBlue,
                 contentColor = Color.White,
-                shape = RoundedCornerShape(20.dp),
-                modifier = Modifier.testTag("upload_file_fab")
+                shadowElevation = 4.dp,
+                modifier = Modifier
+                    .height(40.dp)
+                    .testTag("upload_file_fab")
             ) {
-                Icon(imageVector = Icons.Default.CloudUpload, contentDescription = null)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = if (isHebrew) "העלאת קובץ / צילום" else "Upload / Camera",
-                    fontWeight = FontWeight.Bold
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CloudUpload,
+                        contentDescription = "Upload",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = if (isHebrew) "העלאת קבצים" else "Upload File",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
             }
         }
     ) { innerPadding ->
@@ -126,13 +146,33 @@ fun FilesScreen(
                 .padding(innerPadding)
                 .background(MaterialTheme.colorScheme.background)
         ) {
+            // Quick Screen Help Guide
+            Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)) {
+                ScreenHelpBanner(
+                    title = if (isHebrew) "תיקיית מסמכים ו-Google Drive" else "Files & Drive Guide",
+                    tips = if (isHebrew) listOf(
+                        "פתיחת קבצים: לחצו על כל מסמך PDF או תמונה לצפייה מקדימה מיידית.",
+                        "עריכה ומחיקה: לחצו על ✏️ לשינוי שם קובץ, או על 🗑️ למחיקה מה-Drive.",
+                        "סריקה ומצלמה: לחצו על כפתור העלאה ☁️ בתחתית לצילום שיעורי בית או אישורים.",
+                        "שיתוף: במסך הצפייה בקובץ ניתן לשתף ישירות ל-WhatsApp או להוריד למכשיר."
+                    ) else listOf(
+                        "Preview files: Tap any PDF or image to open the interactive viewer.",
+                        "Rename & Delete: Use the action buttons to manage files in your Drive.",
+                        "Camera Scanner: Tap the ☁️ button to scan homework or medical notes.",
+                        "Share: Share files directly to WhatsApp or download to device from preview."
+                    ),
+                    isHebrew = isHebrew,
+                    testTag = "files_help_banner"
+                )
+            }
+
             // Google Drive Sync Header Card
             Surface(
                 shape = RoundedCornerShape(22.dp),
                 color = GoogleBlueLight,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 6.dp)
+                    .padding(horizontal = 14.dp, vertical = 4.dp)
             ) {
                 Row(
                     modifier = Modifier
@@ -312,7 +352,7 @@ fun FilesScreen(
                 when (viewMode) {
                     FilesViewMode.FOLDERS, FilesViewMode.LIST -> {
                         LazyColumn(
-                            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 90.dp, top = 4.dp),
+                            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 115.dp, top = 4.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
@@ -320,9 +360,9 @@ fun FilesScreen(
                                 FileCardItem(
                                     file = file,
                                     isHebrew = isHebrew,
-                                    onClick = {
-                                        onShowToast(if (isHebrew) "פותח קובץ: ${file.name}" else "Opening: ${file.name}")
-                                    }
+                                    onClick = { fileToPreview = file },
+                                    onRename = { fileToRename = file },
+                                    onDelete = { onDeleteFile(file.id) }
                                 )
                             }
                         }
@@ -330,7 +370,7 @@ fun FilesScreen(
                     FilesViewMode.GRID -> {
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(2),
-                            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 90.dp, top = 4.dp),
+                            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 115.dp, top = 4.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier.fillMaxSize()
@@ -339,9 +379,9 @@ fun FilesScreen(
                                 FileGridCard(
                                     file = file,
                                     isHebrew = isHebrew,
-                                    onClick = {
-                                        onShowToast(if (isHebrew) "פותח קובץ: ${file.name}" else "Opening: ${file.name}")
-                                    }
+                                    onClick = { fileToPreview = file },
+                                    onRename = { fileToRename = file },
+                                    onDelete = { onDeleteFile(file.id) }
                                 )
                             }
                         }
@@ -513,6 +553,37 @@ fun FilesScreen(
             onShowToast = onShowToast
         )
     }
+
+    // Interactive File Preview Viewer (PDF page reader, image viewer, share, rename, delete)
+    if (fileToPreview != null) {
+        FilePreviewDialog(
+            file = fileToPreview!!,
+            isHebrew = isHebrew,
+            onDismiss = { fileToPreview = null },
+            onRename = {
+                fileToPreview = null
+                fileToRename = it
+            },
+            onDelete = {
+                fileToPreview = null
+                onDeleteFile(it.id)
+            },
+            onShowToast = onShowToast
+        )
+    }
+
+    // Rename File Dialog
+    if (fileToRename != null) {
+        RenameFileDialog(
+            file = fileToRename!!,
+            isHebrew = isHebrew,
+            onDismiss = { fileToRename = null },
+            onConfirmRename = { id, newName ->
+                onRenameFile(id, newName)
+                fileToRename = null
+            }
+        )
+    }
 }
 
 @Composable
@@ -587,7 +658,9 @@ fun UploadOptionCard(
 fun FileCardItem(
     file: FamilyDocument,
     isHebrew: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onRename: () -> Unit = {},
+    onDelete: () -> Unit = {}
 ) {
     Surface(
         shape = RoundedCornerShape(18.dp),
@@ -601,9 +674,9 @@ fun FileCardItem(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp),
+                .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             val (badgeColor, bgColor) = when (file.extension.uppercase()) {
                 "PDF" -> GoogleRed to GoogleRedLight
@@ -669,11 +742,51 @@ fun FileCardItem(
                 }
             }
 
-            Icon(
-                imageVector = Icons.Default.ChevronRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            // Quick actions: Open/View, Rename, Delete
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                IconButton(
+                    onClick = onClick,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .testTag("view_file_${file.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Visibility,
+                        contentDescription = "View",
+                        tint = GoogleBlue,
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onRename,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .testTag("rename_file_${file.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Rename",
+                        tint = GoogleBlue,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .testTag("delete_file_${file.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteOutline,
+                        contentDescription = "Delete",
+                        tint = GoogleRed,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
         }
     }
 }
@@ -682,7 +795,9 @@ fun FileCardItem(
 fun FileGridCard(
     file: FamilyDocument,
     isHebrew: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onRename: () -> Unit = {},
+    onDelete: () -> Unit = {}
 ) {
     Surface(
         shape = RoundedCornerShape(18.dp),
@@ -741,6 +856,23 @@ fun FileGridCard(
                     text = file.sizeFormatted,
                     style = MaterialTheme.typography.labelSmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 9.sp)
                 )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center
+            ) {
+                IconButton(onClick = onClick, modifier = Modifier.size(28.dp)) {
+                    Icon(imageVector = Icons.Default.Visibility, contentDescription = "View", tint = GoogleBlue, modifier = Modifier.size(15.dp))
+                }
+                IconButton(onClick = onRename, modifier = Modifier.size(28.dp)) {
+                    Icon(imageVector = Icons.Default.Edit, contentDescription = "Rename", tint = GoogleBlue, modifier = Modifier.size(15.dp))
+                }
+                IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
+                    Icon(imageVector = Icons.Default.DeleteOutline, contentDescription = "Delete", tint = GoogleRed, modifier = Modifier.size(15.dp))
+                }
             }
         }
     }

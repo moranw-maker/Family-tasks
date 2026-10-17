@@ -220,7 +220,17 @@ class FamilyRepository {
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
     val currentMember: FamilyMember
-        get() = _members.value.find { it.isCurrentUser } ?: _members.value.first()
+        get() = _members.value.find { it.isCurrentUser }
+            ?: _members.value.firstOrNull()
+            ?: FamilyMember(
+                id = "user_default_admin",
+                name = if (_settings.value.language == AppLanguage.HEBREW) "מנהל ראשי" else "Primary Admin",
+                email = _settings.value.googleAccountEmail,
+                role = UserRole.PRIMARY_ADMIN,
+                avatarEmoji = "👩‍💻",
+                colorHex = 0xFF1A73E8L,
+                isCurrentUser = true
+            )
 
     fun switchCurrentUser(memberId: String) {
         _members.value = _members.value.map {
@@ -449,6 +459,21 @@ class FamilyRepository {
         )
     }
 
+    fun renameDocument(fileId: String, newName: String) {
+        val trimmed = newName.trim()
+        if (trimmed.isNotEmpty()) {
+            _files.value = _files.value.map { file ->
+                if (file.id == fileId) {
+                    file.copy(name = trimmed)
+                } else file
+            }
+        }
+    }
+
+    fun deleteDocument(fileId: String) {
+        _files.value = _files.value.filter { it.id != fileId }
+    }
+
     // Nudge Reminder (Admin reminds a kid)
     fun sendNudge(task: FamilyTask) {
         val member = _members.value.find { it.id == task.assignedToMemberId }
@@ -506,9 +531,30 @@ class FamilyRepository {
         _notifications.value = emptyList()
     }
 
-    // Settings
     fun updateSettings(newSettings: AppSettings) {
         _settings.value = newSettings
+    }
+
+    fun upgradeAppVersion() {
+        val nextVersion = (_settings.value.appVersion + 0.1).let {
+            Math.round(it * 10.0) / 10.0
+        }
+        _settings.value = _settings.value.copy(appVersion = nextVersion)
+        val formatted = String.format(java.util.Locale.US, "%.1f", nextVersion)
+        val title = if (_settings.value.language == AppLanguage.HEBREW) "שדרוג גרסה הושלם! 🚀" else "Update Installed! 🚀"
+        val msg = if (_settings.value.language == AppLanguage.HEBREW)
+            "האפליקציה שודרגה בהצלחה לגרסה $formatted"
+        else
+            "App successfully updated to version $formatted"
+        pushNotification(
+            AppNotification(
+                id = "notif_version_${System.currentTimeMillis()}",
+                title = title,
+                message = msg,
+                timestampMillis = System.currentTimeMillis(),
+                type = NotificationType.TASK_ASSIGNED
+            )
+        )
     }
 
     fun updateFamilyName(newName: String) {
@@ -537,6 +583,53 @@ class FamilyRepository {
             hasCompletedGoogleSignIn = completed,
             googleAccountEmail = email
         )
+    }
+
+    fun initializeCleanFamily(
+        adminName: String,
+        adminEmail: String,
+        familyName: String,
+        adminAvatar: String = "👩‍💻"
+    ) {
+        val primaryAdmin = FamilyMember(
+            id = "user_admin_${System.currentTimeMillis() % 10000}",
+            name = adminName.trim().ifBlank { "מורן" },
+            email = adminEmail.trim().ifBlank { "Moranw@gmail.com" },
+            role = UserRole.PRIMARY_ADMIN,
+            avatarEmoji = adminAvatar,
+            colorHex = 0xFF1A73E8,
+            earnedPoints = 100,
+            completedTasksCount = 0,
+            isCurrentUser = true
+        )
+        _members.value = listOf(primaryAdmin)
+        _tasks.value = emptyList()
+        _files.value = emptyList()
+        _periods.value = emptyList()
+        _settings.value = _settings.value.copy(
+            familyName = familyName.trim().ifBlank { "וקסלר" },
+            hasCompletedGoogleSignIn = true,
+            googleAccountEmail = adminEmail.trim().ifBlank { "Moranw@gmail.com" }
+        )
+        pushNotification(
+            AppNotification(
+                id = "notif_welcome_${System.currentTimeMillis()}",
+                title = if (_settings.value.language == AppLanguage.HEBREW) "ברוכים הבאים ל-Family Hub! 🌟" else "Welcome to Family Hub! 🌟",
+                message = if (_settings.value.language == AppLanguage.HEBREW)
+                    "המשפחה הוקמה בהצלחה נקייה מנתונים. שתפו את קוד ההזמנה עם שאר בני הבית"
+                else
+                    "Household initialized clean. Share your invite link with family members",
+                timestampMillis = System.currentTimeMillis(),
+                type = NotificationType.MEMBER_INVITED
+            )
+        )
+    }
+
+    fun loadSampleData() {
+        _members.value = initialMembers
+        _tasks.value = initialTasks
+        _files.value = initialFiles
+        _periods.value = initialPeriods
     }
 
     fun syncCloudNow() {

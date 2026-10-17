@@ -55,22 +55,32 @@ fun CalendarScreen(
 
     Scaffold(
         floatingActionButton = {
-            ExtendedFloatingActionButton(
+            Surface(
                 onClick = onAddNewTask,
-                containerColor = GoogleBlue,
+                shape = RoundedCornerShape(16.dp),
+                color = GoogleBlue,
                 contentColor = Color.White,
-                shape = RoundedCornerShape(20.dp),
-                modifier = Modifier.testTag("calendar_add_task_fab")
+                shadowElevation = 4.dp,
+                modifier = Modifier
+                    .height(40.dp)
+                    .testTag("calendar_add_task_fab")
             ) {
-                Icon(
-                    imageVector = Icons.Default.Add,
-                    contentDescription = null
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = if (isHebrew) "משימה לתאריך" else "Add Task",
-                    fontWeight = FontWeight.Bold
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = if (isHebrew) "משימה לתאריך" else "Add Task",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
             }
         }
     ) { innerPadding ->
@@ -80,6 +90,25 @@ fun CalendarScreen(
                 .padding(innerPadding)
                 .background(MaterialTheme.colorScheme.background)
         ) {
+            // Quick Screen Help Guide
+            Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)) {
+                com.example.ui.components.ScreenHelpBanner(
+                    title = if (isHebrew) "לוח שנה ויומן משפחתי" else "Family Shared Calendar",
+                    tips = if (isHebrew) listOf(
+                        "תצוגות יומן: עברו בין תצוגה חודשית, שבועית או יומית בראש המסך.",
+                        "בחירת יום: לחצו על תאריך בלוח לצפייה בכל המטלות והאירועים של אותו יום.",
+                        "משימה לתאריך: לחצו על הכפתור בתחתית לתזמון משימה מדויקת ליום הנבחר.",
+                        "סנכרון Drive: כל אירוע מסונכרן אוטומטית לענן המשפחתי המשותף."
+                    ) else listOf(
+                        "Calendar Views: Switch between Month, Week, and Day views on top.",
+                        "Select Date: Tap any date to view scheduled chores and events.",
+                        "Schedule Chores: Tap the compact bottom button to schedule for selected date.",
+                        "Drive Sync: Changes automatically sync with your family calendar."
+                    ),
+                    isHebrew = isHebrew
+                )
+            }
+
             // View Mode Selector & Today Button Header
             Row(
                 modifier = Modifier
@@ -394,7 +423,7 @@ fun MonthCalendarView(
                 }
             } else {
                 LazyColumn(
-                    contentPadding = PaddingValues(bottom = 90.dp),
+                    contentPadding = PaddingValues(bottom = 110.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
@@ -600,7 +629,7 @@ fun WeekCalendarView(
                 }
             } else {
                 LazyColumn(
-                    contentPadding = PaddingValues(bottom = 90.dp),
+                    contentPadding = PaddingValues(bottom = 110.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
@@ -667,7 +696,7 @@ fun DayCalendarView(
         Spacer(modifier = Modifier.height(10.dp))
 
         LazyColumn(
-            contentPadding = PaddingValues(bottom = 90.dp),
+            contentPadding = PaddingValues(bottom = 110.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier.fillMaxSize()
         ) {

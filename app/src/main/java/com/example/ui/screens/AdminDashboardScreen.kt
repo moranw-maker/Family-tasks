@@ -47,16 +47,43 @@ fun AdminDashboardScreen(
     val completionRate = if (totalTasks > 0) (completedTasks * 100) / totalTasks else 100
 
     val kids = members.filter { it.role == UserRole.MEMBER_KID }.sortedByDescending { it.earnedPoints }
-    val inviteCode = "FAM-WEXLER-7749"
+    val cleanFamilyTag = familyTitle
+        .replace("משפחת", "")
+        .replace("Family", "", ignoreCase = true)
+        .trim()
+        .replace(Regex("[^A-Za-z0-9א-ת]"), "")
+        .uppercase()
+    val familyCodePrefix = if (cleanFamilyTag.isNotBlank()) cleanFamilyTag else "HOUSE"
+    val inviteCode = "FAM-$familyCodePrefix-7749"
     val inviteLink = "https://familytasks.app/join/$inviteCode"
 
     LazyColumn(
-        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 90.dp),
+        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 110.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
+        // Quick Screen Help Guide
+        item {
+            com.example.ui.components.ScreenHelpBanner(
+                title = if (isHebrew) "ניהול חברי המשפחה והרשאות" else "Household Admin Guide",
+                tips = if (isHebrew) listOf(
+                    "הזמנת חברים חדשים: שלחו את קוד ההזמנה או לחצו על 'הזמן' לשיתוף ב-WhatsApp.",
+                    "הגדרת הרשאות: מנהל ראשי, מנהל משני (עריכה ואישור) וילדים (צבירת נקודות).",
+                    "שינוי שם המשפחה: ניתן לעדכן את שם המשפחה הראשי המוצג בכל חלקי האפליקציה.",
+                    "תזכורות (Nudge): לחצו על כפתור התזכורת כדי לשלוח התראה מיידית לבני הבית."
+                ) else listOf(
+                    "Invite members: Share the unique household code or tap 'Invite' to share via WhatsApp.",
+                    "Role permissions: Primary Admin, Co-Admin, and Kids.",
+                    "Rename family: Change the main household name displayed across the entire app.",
+                    "Send nudges: Remind family members about due tasks instantly."
+                ),
+                isHebrew = isHebrew,
+                testTag = "admin_help_banner"
+            )
+        }
+
         // Dashboard Overview Card
         item {
             Surface(

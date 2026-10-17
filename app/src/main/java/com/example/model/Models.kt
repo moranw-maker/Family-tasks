@@ -227,7 +227,7 @@ enum class FirstDayOfWeek {
 
 data class AppSettings(
     val familyName: String = "וקסלר",
-    val hasCompletedGoogleSignIn: Boolean = true,
+    val hasCompletedGoogleSignIn: Boolean = false,
     val googleAccountEmail: String = "Moranw@gmail.com",
     val language: AppLanguage = AppLanguage.HEBREW,
     val biometricEnabled: Boolean = true,
@@ -239,8 +239,12 @@ data class AppSettings(
     val lastSyncFormatted: String = "לפני דקה",
     val themeColor: AppThemeColor = AppThemeColor.GOOGLE_BLUE,
     val filesViewMode: FilesViewMode = FilesViewMode.FOLDERS,
-    val timetableViewMode: TimetableViewMode = TimetableViewMode.DAILY_LIST
+    val timetableViewMode: TimetableViewMode = TimetableViewMode.DAILY_LIST,
+    val appVersion: Double = 1.0
 ) {
+    val formattedVersion: String
+        get() = String.format(java.util.Locale.US, "%.1f", appVersion)
+
     fun getFamilyTitle(isHebrew: Boolean): String {
         val trimmed = familyName.trim()
         return if (isHebrew) {
@@ -252,6 +256,21 @@ data class AppSettings(
                 "$trimmed Family"
             }
         }
+    }
+
+    fun getDynamicInviteCode(): String {
+        val cleanName = familyName
+            .replace("משפחת", "")
+            .replace("Family", "", ignoreCase = true)
+            .trim()
+            .replace(Regex("[^A-Za-z0-9א-ת]"), "")
+            .uppercase()
+        val tag = if (cleanName.isNotBlank()) cleanName else "HOUSE"
+        return "FAM-$tag-7749"
+    }
+
+    fun getDynamicInviteLink(): String {
+        return "https://familytasks.app/join/${getDynamicInviteCode()}"
     }
 }
 

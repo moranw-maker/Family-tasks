@@ -51,22 +51,32 @@ fun TasksScreen(
 
     Scaffold(
         floatingActionButton = {
-            ExtendedFloatingActionButton(
+            Surface(
                 onClick = onAddNewTask,
-                containerColor = GoogleBlue,
+                shape = RoundedCornerShape(16.dp),
+                color = GoogleBlue,
                 contentColor = Color.White,
-                shape = RoundedCornerShape(20.dp),
-                modifier = Modifier.testTag("add_task_fab")
+                shadowElevation = 4.dp,
+                modifier = Modifier
+                    .height(40.dp)
+                    .testTag("add_task_fab")
             ) {
-                Icon(
-                    imageVector = Icons.Default.Add,
-                    contentDescription = null
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = if (isHebrew) "משימה חדשה" else "New Task",
-                    fontWeight = FontWeight.Bold
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = if (isHebrew) "משימה חדשה" else "New Task",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
             }
         }
     ) { innerPadding ->
@@ -127,6 +137,27 @@ fun TasksScreen(
                     )
                 }
             }
+
+            // Quick Screen Help Guide
+            Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)) {
+                com.example.ui.components.ScreenHelpBanner(
+                    title = if (isHebrew) "מטלות ומשימות הבית" else "Tasks & Household Chores",
+                    tips = if (isHebrew) listOf(
+                        "סימון השלמה: לחצו על עיגול ה-V לסימון משימה שבוצעה וצבירת נקודות.",
+                        "הקצאה לבני משפחה: סננו לפי אימוג'י בן המשפחה בראש המסך.",
+                        "משימה חדשה: לחצו על הכפתור בתחתית להוספת משימה יומית או חד-פעמית.",
+                        "עריכה ומחיקה: לחצו על שלוש הנקודות או כרטיס המשימה לפרטים נוספים."
+                    ) else listOf(
+                        "Complete chore: Tap the checkmark circle to earn points.",
+                        "Filter by member: Tap family avatars on top to filter chores.",
+                        "New Task: Tap the compact bottom button to assign a new chore.",
+                        "Edit or Delete: Tap the chore card to view or adjust details."
+                    ),
+                    isHebrew = isHebrew
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
 
             // Pending vs Completed Segmented Tabs
             Row(
@@ -216,7 +247,7 @@ fun TasksScreen(
                 }
             } else {
                 LazyColumn(
-                    contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 90.dp, top = 6.dp),
+                    contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 110.dp, top = 6.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
