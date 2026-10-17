@@ -16,4 +16,10 @@
 local.properties
 .env
 debug.keystore
+debug.keystore.base64
+*.keystore
+*.keystore.base64
+*.jks
+*.p12
 *-debug.log
+

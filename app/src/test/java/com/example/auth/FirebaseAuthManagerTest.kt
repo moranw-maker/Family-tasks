@@ -206,6 +206,31 @@ class FirebaseAuthManagerTest : FirestoreEmulatorTestBase() {
             "Project debug keystore (D7:BB...) must be recognized",
             known.contains("d7bba84fe705a15371084a0fc5152dc12750cec9")
         )
+
+        // Verify a newly generated private signing key (custom SHA-1 registered in Firebase)
+        // is never rejected by runtime verification or exception classification
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val manager = FirebaseAuthManager(auth)
+        val newPrivateKeyCert = manager.verifyApkSigningCertificate(
+            context = context,
+            overrideActualSha1Hex = "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD"
+        )
+        assertFalse(
+            "New private signing key must not be flagged as a mismatch",
+            newPrivateKeyCert.hasPackageMismatch
+        )
+        assertEquals("aabbccdd", newPrivateKeyCert.shortActualSha1)
+
+        val cancelWithNewKey = manager.classifyAuthException(
+            e = GetCredentialCancellationException("User cancelled selector"),
+            stage = AuthStage.CREDENTIAL_REQUEST,
+            certVerification = newPrivateKeyCert
+        )
+        assertEquals(
+            "Genuine user cancellation with a new private signing key must remain CANCELLED, not CONFIGURATION_ERROR",
+            AuthFailureReason.CANCELLED,
+            cancelWithNewKey.reason
+        )
     }
 
     @Test

@@ -1,4 +1,3 @@
-
 name: Build FamilyTasks APK
 
 on:
@@ -40,39 +39,35 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Restore project debug signing key
+      - name: Restore signing keystore from GitHub Secrets
         env:
           SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
         run: |
-          if [ -n "$SIGNING_KEYSTORE_BASE64" ]; then
-            echo "Restoring signing key from GitHub Actions Secret (ANDROID_DEBUG_KEYSTORE_BASE64)..."
-            echo "$SIGNING_KEYSTORE_BASE64" | base64 -d > debug.keystore
-          elif [ -f debug.keystore.base64 ]; then
-            echo "Restoring fallback signing key from repository (debug.keystore.base64)..."
-            base64 -d debug.keystore.base64 > debug.keystore
-          elif [ -f debug.keystore ]; then
-            echo "Using existing workspace debug.keystore..."
-          else
+          rm -f debug.keystore
+          if [ -z "$SIGNING_KEYSTORE_BASE64" ]; then
             echo "::error::No signing keystore provided! Configure the ANDROID_DEBUG_KEYSTORE_BASE64 secret in GitHub repository settings."
             exit 1
           fi
 
+          echo "Restoring signing keystore from GitHub Actions Secret (ANDROID_DEBUG_KEYSTORE_BASE64)..."
+          printf '%s' "$SIGNING_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > debug.keystore
+
           if [ ! -s debug.keystore ]; then
-            echo "::error::debug.keystore is empty or failed to decode."
+            echo "::error::Restored debug.keystore is empty or failed to decode from Base64."
             exit 1
           fi
 
-          echo "=== Configured Keystore Certificate Fingerprints ==="
+          echo "=== Restored Keystore Certificate Fingerprints (keytool) ==="
           keytool -list -v \
             -keystore debug.keystore \
             -alias androiddebugkey \
             -storepass android \
-            -keypass android | grep -E "Alias name:|SHA1:|SHA256:"
+            -keypass android | grep -E "Alias name:|Owner:|SHA1:|SHA256:"
 
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
 
-      - name: Verify and print final APK certificate fingerprints
+      - name: Verify final APK signature and print SHA-1 / SHA-256 fingerprints
         run: |
           APK_PATH=$(ls app/build/outputs/apk/debug/*.apk 2>/dev/null | head -n 1)
           if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
@@ -80,7 +75,7 @@ jobs:
             exit 1
           fi
           echo "=== Final APK Signing Verification ($APK_PATH) ==="
-          $ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs "$APK_PATH"
+          $ANDROID_HOME/build-tools/36.0.0/apksigner verify --verbose --print-certs "$APK_PATH"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
