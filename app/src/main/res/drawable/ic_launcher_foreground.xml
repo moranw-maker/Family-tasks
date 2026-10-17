@@ -1,0 +1,38 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:pivotX="54"
+        android:pivotY="54">
+        <!-- House Base / Family Hub -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M54,26 L28,49 L33,49 L33,78 C33,80.2 34.8,82 37,82 L71,82 C73.2,82 75,80.2 75,78 L75,49 L80,49 Z" />
+        
+        <!-- House Roof Accent -->
+        <path
+            android:fillColor="#E8F0FE"
+            android:pathData="M54,23 L24,49.5 L28,54 L54,31 L80,54 L84,49.5 Z" />
+
+        <!-- Door / Heart Center -->
+        <path
+            android:fillColor="#4285F4"
+            android:pathData="M48,82 L48,64 C48,60.7 50.7,58 54,58 C57.3,58 60,60.7 60,64 L60,82 Z" />
+
+        <!-- Vibrant Green Checkmark Badge -->
+        <path
+            android:fillColor="#34A853"
+            android:pathData="M70,42 C76.6,42 82,47.4 82,54 C82,60.6 76.6,66 70,66 C63.4,66 58,60.6 58,54 C58,47.4 63.4,42 70,42 Z" />
+
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M65.5,54.5 L68.5,57.5 L75.5,50.5 L77.5,52.5 L68.5,61.5 L63.5,56.5 Z" />
+
+        <!-- Golden Star on Top -->
+        <path
+            android:fillColor="#FBBC04"
+            android:pathData="M54,16 L56,21.5 L61.5,21.8 L57.2,25.2 L58.7,30.5 L54,27.3 L49.3,30.5 L50.8,25.2 L46.5,21.8 L52,21.5 Z" />
+    </group>
+</vector>

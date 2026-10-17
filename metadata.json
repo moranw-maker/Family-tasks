@@ -1,0 +1,6 @@
+{
+  "name": "FamilyTasks",
+  "description": "Collaborative family chore and task manager with Google sign-in, shared calendar, school timetables, cloud sync, document hub, and admin dashboard",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
