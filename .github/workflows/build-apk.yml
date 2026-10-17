@@ -40,21 +40,29 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Restore project debug signing key and print SHA fingerprints
+      - name: Restore project debug signing key
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
         run: |
-          if [ -f debug.keystore.base64 ]; then
+          if [ -n "$SIGNING_KEYSTORE_BASE64" ]; then
+            echo "Restoring signing key from GitHub Actions Secret (ANDROID_DEBUG_KEYSTORE_BASE64)..."
+            echo "$SIGNING_KEYSTORE_BASE64" | base64 -d > debug.keystore
+          elif [ -f debug.keystore.base64 ]; then
+            echo "Restoring fallback signing key from repository (debug.keystore.base64)..."
             base64 -d debug.keystore.base64 > debug.keystore
-          elif [ ! -f debug.keystore ]; then
-            keytool -genkeypair \
-              -keystore debug.keystore \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
+          elif [ -f debug.keystore ]; then
+            echo "Using existing workspace debug.keystore..."
+          else
+            echo "::error::No signing keystore provided! Configure the ANDROID_DEBUG_KEYSTORE_BASE64 secret in GitHub repository settings."
+            exit 1
           fi
+
+          if [ ! -s debug.keystore ]; then
+            echo "::error::debug.keystore is empty or failed to decode."
+            exit 1
+          fi
+
+          echo "=== Configured Keystore Certificate Fingerprints ==="
           keytool -list -v \
             -keystore debug.keystore \
             -alias androiddebugkey \
@@ -63,6 +71,16 @@ jobs:
 
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
+
+      - name: Verify and print final APK certificate fingerprints
+        run: |
+          APK_PATH=$(ls app/build/outputs/apk/debug/*.apk 2>/dev/null | head -n 1)
+          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
+            echo "::error::Built APK not found in app/build/outputs/apk/debug/!"
+            exit 1
+          fi
+          echo "=== Final APK Signing Verification ($APK_PATH) ==="
+          $ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs "$APK_PATH"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
