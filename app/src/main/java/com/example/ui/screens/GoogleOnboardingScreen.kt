@@ -107,6 +107,14 @@ fun GoogleOnboardingScreen(
         else -> null
     }
 
+    val recoverableDiagnosticBadge: String? = when {
+        startupState is StartupState.RecoverableError && !startupState.errorCode.isNullOrBlank() ->
+            listOfNotNull(startupState.errorCode, startupState.stage).joinToString(" • ")
+        membershipState is FamilyMembershipState.RecoverableError && !membershipState.errorCode.isNullOrBlank() ->
+            listOfNotNull(membershipState.errorCode, membershipState.stage).joinToString(" • ")
+        else -> null
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -281,6 +289,14 @@ fun GoogleOnboardingScreen(
                             textAlign = TextAlign.Center,
                             modifier = Modifier.testTag("startup_recoverable_error_message")
                         )
+                        if (recoverableDiagnosticBadge != null) {
+                            Text(
+                                text = recoverableDiagnosticBadge,
+                                style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary.copy(alpha = 0.75f)),
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.testTag("startup_recoverable_error_diagnostic")
+                            )
+                        }
                         Button(
                             onClick = onRetryStartupLoading,
                             shape = RoundedCornerShape(16.dp),

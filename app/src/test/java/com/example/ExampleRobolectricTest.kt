@@ -363,5 +363,89 @@ class ExampleRobolectricTest {
         assertEquals("Must preserve existing familyName", "משפחת ברק", secondCreate.familyName)
         assertEquals("Must preserve existing FATHER identity", com.example.model.FamilyIdentity.FATHER, secondCreate.familyIdentity)
     }
+
+    @Test
+    fun `test named Firestore database ID is configured and never falls back to default`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val resDatabaseId = context.getString(R.string.firestore_database_id)
+        assertEquals(
+            "ai-studio-android-familyta-a054dbd1-9c2d-4a83-ad6d-dcfe6fb0d2ca",
+            resDatabaseId
+        )
+
+        val resolvedWithContext = FamilyRepository.resolveConfiguredDatabaseId(context)
+        val resolvedWithoutContext = FamilyRepository.resolveConfiguredDatabaseId(null)
+        assertEquals(
+            "ai-studio-android-familyta-a054dbd1-9c2d-4a83-ad6d-dcfe6fb0d2ca",
+            resolvedWithContext
+        )
+        assertEquals(
+            "ai-studio-android-familyta-a054dbd1-9c2d-4a83-ad6d-dcfe6fb0d2ca",
+            resolvedWithoutContext
+        )
+        assertNotEquals("(default)", resolvedWithContext)
+        assertNotEquals("(default)", resolvedWithoutContext)
+    }
+
+    @Test
+    fun `test FirestoreErrorHandler distinguishes PERMISSION_DENIED UNAVAILABLE NOT_FOUND and redacts sensitive data`() {
+        val permDenied = com.google.firebase.firestore.FirebaseFirestoreException(
+            "PERMISSION_DENIED: Missing or insufficient permissions for user@example.com with inviteCode=AB12CD and token=eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9",
+            com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED
+        )
+        val classifiedPerm = com.example.util.FirestoreErrorHandler.classifyStartupFailure(
+            error = permDenied,
+            stage = com.example.util.FirestoreErrorHandler.StartupStage.LOAD_USER_PROFILE,
+            collectionPath = "users",
+            documentId = "secret_uid_12345"
+        )
+        assertEquals(
+            com.example.util.FirestoreErrorHandler.StartupFailureCategory.PERMISSION_DENIED,
+            classifiedPerm.category
+        )
+        assertEquals("PERMISSION_DENIED", classifiedPerm.errorCode)
+        assertEquals("LOAD_USER_PROFILE", classifiedPerm.stage.stageName)
+        assertEquals("users/{redacted}", classifiedPerm.documentPath)
+        assertEquals(
+            "ai-studio-android-familyta-a054dbd1-9c2d-4a83-ad6d-dcfe6fb0d2ca",
+            classifiedPerm.databaseId
+        )
+        assertFalse("Must redact email from diagnostic message", classifiedPerm.sanitizedMessage.contains("user@example.com"))
+        assertFalse("Must redact invite code from diagnostic message", classifiedPerm.sanitizedMessage.contains("AB12CD"))
+        assertFalse("Must redact JWT token from diagnostic message", classifiedPerm.sanitizedMessage.contains("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"))
+
+        val unavailable = com.google.firebase.firestore.FirebaseFirestoreException(
+            "UNAVAILABLE: Unable to resolve host firestore.googleapis.com",
+            com.google.firebase.firestore.FirebaseFirestoreException.Code.UNAVAILABLE
+        )
+        val classifiedUnavailable = com.example.util.FirestoreErrorHandler.classifyStartupFailure(
+            error = unavailable,
+            stage = com.example.util.FirestoreErrorHandler.StartupStage.LOAD_FAMILY_MEMBER,
+            collectionPath = "families/fam_1/members",
+            documentId = "secret_uid_12345"
+        )
+        assertEquals(
+            com.example.util.FirestoreErrorHandler.StartupFailureCategory.UNAVAILABLE,
+            classifiedUnavailable.category
+        )
+        assertEquals("UNAVAILABLE", classifiedUnavailable.errorCode)
+
+        val notFound = com.google.firebase.firestore.FirebaseFirestoreException(
+            "NOT_FOUND: Document does not exist",
+            com.google.firebase.firestore.FirebaseFirestoreException.Code.NOT_FOUND
+        )
+        val classifiedNotFound = com.example.util.FirestoreErrorHandler.classifyStartupFailure(
+            error = notFound,
+            stage = com.example.util.FirestoreErrorHandler.StartupStage.LOAD_FAMILY_DOCUMENT,
+            collectionPath = "families",
+            documentId = "fam_1"
+        )
+        assertEquals(
+            com.example.util.FirestoreErrorHandler.StartupFailureCategory.NOT_FOUND,
+            classifiedNotFound.category
+        )
+        assertEquals("NOT_FOUND", classifiedNotFound.errorCode)
+    }
 }
+
 

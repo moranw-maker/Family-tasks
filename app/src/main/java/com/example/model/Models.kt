@@ -225,11 +225,14 @@ sealed class StartupState {
         val familyIdentity: FamilyIdentity
     ) : StartupState()
 
-    /** Step 4c: Transient/offline error while loading existing user/family; allows safe retry without resetting data. */
+    /** Step 4c: Transient/offline or Firestore error while loading existing user/family; allows safe retry without resetting data. */
     data class RecoverableError(
         val uid: String? = null,
         val messageHe: String,
-        val messageEn: String = messageHe
+        val messageEn: String = messageHe,
+        val errorCode: String = "UNAVAILABLE",
+        val stage: String = "",
+        val databaseId: String = ""
     ) : StartupState()
 }
 
@@ -283,7 +286,10 @@ sealed class FamilyMembershipState {
      */
     data class RecoverableError(
         val messageHe: String,
-        val messageEn: String = messageHe
+        val messageEn: String = messageHe,
+        val errorCode: String = "UNAVAILABLE",
+        val stage: String = "",
+        val databaseId: String = ""
     ) : FamilyMembershipState()
 }
 

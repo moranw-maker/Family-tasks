@@ -152,6 +152,12 @@ class FamilyViewModel(
      */
     fun restoreExistingGoogleSession() {
         val user = firebaseCurrentUser.value
+        com.example.util.FirestoreErrorHandler.logStartupMilestone(
+            stage = com.example.util.FirestoreErrorHandler.StartupStage.RESTORE_AUTH_SESSION,
+            collectionPath = "auth",
+            databaseId = repository.configuredDatabaseId,
+            note = if (user != null) "Restoring existing FirebaseAuth session" else "No existing FirebaseAuth session found"
+        )
         if (user != null) {
             repository.onGoogleSignInSuccess(
                 email = user.email.orEmpty(),

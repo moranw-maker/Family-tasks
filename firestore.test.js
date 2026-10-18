@@ -1264,7 +1264,72 @@ test("Regression: Child task completion sends only permitted completion fields a
   );
 });
 
+test("Regression V1.6: User can get own non-existent member doc and V1.5 legacy creator can migrate to PARENT without allowing child self-promotion", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
 
+  // 1. Authenticated user reading their own non-existent /families/{familyId}/members/{uid} succeeds (returns exists=false instead of PERMISSION_DENIED)
+  await assertSucceeds(
+    aliceDb.collection("families").doc("fam_nonexistent_check").collection("members").doc(ALICE_UID).get()
+  );
 
+  // 2. Seed a legacy V1.5 family where Alice is createdBy and Bob is a MEMBER_KID
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const db = context.firestore();
+    await db.collection("families").doc("fam_v15_legacy").set({
+      familyId: "fam_v15_legacy",
+      name: "משפחת לוי",
+      createdBy: ALICE_UID,
+      memberIds: [ALICE_UID, BOB_UID],
+    });
+    await db.collection("users").doc(ALICE_UID).set({
+      uid: ALICE_UID,
+      familyId: "fam_v15_legacy",
+      role: "ADMIN",
+      familyIdentity: "FATHER",
+    });
+    await db.collection("families").doc("fam_v15_legacy").collection("members").doc(BOB_UID).set({
+      id: BOB_UID,
+      uid: BOB_UID,
+      name: "Bob",
+      role: "MEMBER_KID",
+      earnedPoints: 20,
+      spentPoints: 0,
+    });
+  });
 
+  // 3. Alice (verified V1.5 family creator) can migrate/create her missing /members/{uid} doc as PARENT with FATHER identity
+  await assertSucceeds(
+    aliceDb.collection("families").doc("fam_v15_legacy").collection("members").doc(ALICE_UID).set({
+      id: ALICE_UID,
+      uid: ALICE_UID,
+      familyId: "fam_v15_legacy",
+      name: "אבא לוי",
+      role: "PARENT",
+      familyIdentity: "FATHER",
+      earnedPoints: 0,
+      spentPoints: 0,
+    })
+  );
+
+  // 4. Alice can normalize her /users/{uid} role from legacy 'ADMIN' to canonical 'PARENT'
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      role: "PARENT",
+      familyName: "משפחת לוי",
+    })
+  );
+
+  // 5. Bob (legacy MEMBER_KID) can normalize his own member role to canonical 'CHILD', but CANNOT escalate to 'PARENT'
+  await assertFails(
+    bobDb.collection("families").doc("fam_v15_legacy").collection("members").doc(BOB_UID).update({
+      role: "PARENT",
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("families").doc("fam_v15_legacy").collection("members").doc(BOB_UID).update({
+      role: "CHILD",
+    })
+  );
+});
 

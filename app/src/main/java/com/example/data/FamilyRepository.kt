@@ -7,6 +7,9 @@ import com.example.data.local.OfflineSyncDao
 import com.example.data.local.OfflineSyncQueueEntity
 import com.example.data.local.TaskDao
 import com.example.model.*
+import com.example.util.FirestoreErrorHandler
+import com.example.util.FirestoreErrorHandler.StartupFailureCategory
+import com.example.util.FirestoreErrorHandler.StartupStage
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
@@ -41,7 +44,9 @@ import java.util.UUID
  * - Enforces a strict two-role permission model: PARENT and CHILD
  * - Preserves personal family identity (FATHER / MOTHER) distinct from authorization role (PARENT / CHILD)
  * - Implements an explicit startup state machine (LoadingAuthentication -> LoadingUserProfile -> LoadingFamilyMembership -> OnboardingRequired / ReadyToEnterDashboard / RecoverableError)
+ * - Always targets the provisioned named Firestore database (`ai-studio-android-familyta-a054dbd1-9c2d-4a83-ad6d-dcfe6fb0d2ca`) and never silently falls back to `(default)`
  * - Validates actual Firestore membership on Google Sign-In and session restoration without overwriting existing profiles or families
+ * - Explicitly migrates legacy V1.5 family/member/user records to the V1.6 PARENT/CHILD + FamilyIdentity schema
  * - Implements role-specific, domain-free invitations (/family_invites/{code}) with expiration & atomic redemption
  * - Maintains real-time Firestore snapshot listeners for active family members and pending invitations
  * - Protects the last remaining PARENT from removal or demotion
@@ -50,8 +55,9 @@ class FamilyRepository(
     context: Context? = null,
     private val taskDao: TaskDao? = context?.let { AppDatabase.getInstance(it).taskDao() },
     private val offlineSyncDao: OfflineSyncDao? = context?.let { AppDatabase.getInstance(it).offlineSyncDao() },
+    val configuredDatabaseId: String = resolveConfiguredDatabaseId(context),
     private val firestoreProvider: () -> FirebaseFirestore? = {
-        runCatching { FirebaseFirestore.getInstance() }.getOrNull()
+        resolveNamedFirestore(context)
     },
     private val authProvider: () -> FirebaseAuth? = {
         runCatching { FirebaseAuth.getInstance() }.getOrNull()
@@ -64,15 +70,47 @@ class FamilyRepository(
         context = null,
         taskDao = null,
         offlineSyncDao = null,
+        configuredDatabaseId = NAMED_FIRESTORE_DATABASE_ID,
         firestoreProvider = { firestore },
         authProvider = { auth }
     )
 
     companion object {
         private const val TAG = "FamilyRepository"
+        const val NAMED_FIRESTORE_DATABASE_ID = FirestoreErrorHandler.NAMED_DATABASE_ID
         private const val INVITE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         private const val INVITE_CODE_LENGTH = 6
         private val secureRandom = SecureRandom()
+
+        /**
+         * Resolves the canonical named Firestore database ID from `R.string.firebase_database_id`
+         * or [NAMED_FIRESTORE_DATABASE_ID]. Rejects blank or `(default)` values so the repository
+         * never silently falls back to the unprovisioned `(default)` database.
+         */
+        fun resolveConfiguredDatabaseId(context: Context? = null): String {
+            val fromRes = runCatching {
+                context?.getString(com.example.R.string.firestore_database_id)?.trim()
+            }.getOrNull()
+            return if (!fromRes.isNullOrBlank() && fromRes != "(default)") {
+                fromRes
+            } else {
+                NAMED_FIRESTORE_DATABASE_ID
+            }
+        }
+
+        /**
+         * Obtains the [FirebaseFirestore] instance for the provisioned named database
+         * (`ai-studio-android-familyta-a054dbd1-9c2d-4a83-ad6d-dcfe6fb0d2ca`).
+         * Never calls `FirebaseFirestore.getInstance()` without the named database ID.
+         */
+        fun resolveNamedFirestore(context: Context? = null): FirebaseFirestore? {
+            val databaseId = resolveConfiguredDatabaseId(context)
+            return runCatching {
+                FirebaseFirestore.getInstance(databaseId)
+            }.onFailure { err ->
+                Log.w(TAG, "FirebaseFirestore.getInstance($databaseId) unavailable in current environment: ${err.message}")
+            }.getOrNull()
+        }
 
         /**
          * Generates a cryptographically random 6-character alphanumeric invitation code
@@ -98,6 +136,11 @@ class FamilyRepository(
 
     @Volatile
     var simulateOfflineNetworkFailure: Boolean = false
+
+    /** Last classified startup error for diagnostics and automated tests. */
+    @Volatile
+    var lastClassifiedStartupFailure: FirestoreErrorHandler.ClassifiedStartupFailure? = null
+        private set
 
     private var tasksListenerRegistration: ListenerRegistration? = null
     private var membersListenerRegistration: ListenerRegistration? = null
@@ -553,15 +596,39 @@ class FamilyRepository(
     }
 
     /**
-     * Reads a Firestore document with automatic fallback to local offline cache (`Source.CACHE`)
-     * when the network is temporarily unavailable. Throws if both server and cache fail.
+     * Reads a Firestore document with diagnostic logging and selective fallback to `Source.CACHE`
+     * ONLY when the error is `UNAVAILABLE` (offline / network timeout).
+     * Never falls back to `Source.CACHE` on `PERMISSION_DENIED` or `NOT_FOUND`, which previously
+     * masked security rule and database-ID errors with a misleading cache miss exception.
      */
-    private suspend fun getDocumentWithCacheFallback(docRef: DocumentReference): DocumentSnapshot {
+    private suspend fun getDocumentWithCacheFallback(
+        docRef: DocumentReference,
+        stage: StartupStage = StartupStage.LOAD_USER_PROFILE,
+        collectionPath: String = docRef.parent.path,
+        documentId: String = docRef.id
+    ): DocumentSnapshot {
         return try {
             docRef.get().await()
-        } catch (networkError: Exception) {
-            Log.w(TAG, "Primary get() failed for ${docRef.path}, attempting Source.CACHE: ${networkError.message}")
-            docRef.get(Source.CACHE).await()
+        } catch (primaryError: Exception) {
+            val classified = FirestoreErrorHandler.classifyStartupFailure(
+                error = primaryError,
+                stage = stage,
+                collectionPath = collectionPath,
+                documentId = documentId,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedStartupFailure = classified
+
+            if (classified.category == StartupFailureCategory.UNAVAILABLE) {
+                Log.w(TAG, "Network UNAVAILABLE at stage=${stage.stageName} collection=$collectionPath, attempting Source.CACHE fallback")
+                return try {
+                    docRef.get(Source.CACHE).await()
+                } catch (_: Exception) {
+                    // Rethrow the original server/network error so the caller sees UNAVAILABLE rather than a cache error
+                    throw primaryError
+                }
+            }
+            throw primaryError
         }
     }
 
@@ -586,14 +653,61 @@ class FamilyRepository(
     }
 
     /**
-     * V1.6 Requirement 2 + Safe Startup State Machine:
+     * Resolves a user's canonical V1.6 [UserRole] (`PARENT` or `CHILD`) strictly from authoritative
+     * family documents (`/families/{familyId}/members/{uid}` and `/families/{familyId}`).
+     *
+     * SECURITY INVARIANT (V1.6 Task 6):
+     * - NEVER grants [UserRole.PARENT] based only on a user-controlled `/users/{uid}` profile field.
+     * - Grants [UserRole.PARENT] ONLY when:
+     *   1. `/families/{familyId}/members/{uid}` exists and has `role` in `['PARENT', 'ADMIN', 'PARENT_ADMIN', 'FATHER', 'MOTHER']`, OR
+     *   2. `/families/{familyId}` verifies the user is the family creator/admin (`createdBy == uid`, `ownerUid == uid`, or `adminUids` contains `uid`).
+     * - Otherwise returns [UserRole.CHILD].
+     */
+    internal fun resolveAuthoritativeMembershipRole(
+        uid: String,
+        memberSnap: DocumentSnapshot?,
+        familySnap: DocumentSnapshot?
+    ): UserRole {
+        val memberRoleRaw = memberSnap?.takeIf { it.exists() }
+            ?.getString("role")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+
+        if (memberRoleRaw != null) {
+            return UserRole.fromFirestoreValue(memberRoleRaw)
+        }
+
+        val isVerifiedCreatorOrAdminOnFamily = familySnap?.exists() == true && (
+            familySnap.getString("createdBy") == uid ||
+                familySnap.getString("ownerUid") == uid ||
+                (familySnap.get("adminUids") as? List<*>)?.contains(uid) == true
+            )
+
+        return if (isVerifiedCreatorOrAdminOnFamily) {
+            UserRole.PARENT
+        } else {
+            UserRole.CHILD
+        }
+    }
+
+    /**
+     * Checks whether a canonical V1.6 role string (`"PARENT"` or `"CHILD"`) is already stored.
+     */
+    private fun isCanonicalV16RoleString(rawRole: String?): Boolean {
+        return rawRole == "PARENT" || rawRole == "CHILD"
+    }
+
+    /**
+     * V1.6 Requirement 2 + Safe Startup State Machine + V1.5 -> V1.6 Migration:
      * Checks actual user profile and family membership in Firestore after Google authentication.
      * - Serialized via [startupMutex] so concurrent auth callbacks never race.
-     * - Reads `/users/{uid}` and `/families/{familyId}/members/{uid}` without EVER overwriting
-     *   existing profile fields (`displayName`, `familyIdentity`, `role`, `avatarEmoji`, `familyName`).
+     * - Reads `/users/{uid}`, `/families/{familyId}`, and `/families/{familyId}/members/{uid}` from the
+     *   provisioned named database (`ai-studio-android-familyta-a054dbd1-9c2d-4a83-ad6d-dcfe6fb0d2ca`)
+     *   without EVER overwriting existing profile fields (`displayName`, `familyIdentity`, `role`, `avatarEmoji`, `familyName`).
      * - Preserves `FATHER` vs `MOTHER` identity (never defaults an existing user to `MOTHER`).
-     * - Distinguishes genuinely missing membership (`OnboardingRequired` / `NoMembership`) from
-     *   transient/offline errors (`RecoverableError`).
+     * - Safely migrates legacy V1.5 records (`ADMIN`, `FATHER`, `MOTHER`, `MEMBER`, `name`, `createdBy`, `ownerUid`)
+     *   to the V1.6 `PARENT` / `CHILD` + `FamilyIdentity` schema without granting `PARENT` from user-controlled `/users/{uid}` fields.
+     * - Distinguishes `PERMISSION_DENIED`, `UNAVAILABLE`, `NOT_FOUND`, missing membership, legacy profile, and unexpected exceptions.
      */
     suspend fun checkAuthenticatedUserMembership(
         uid: String,
@@ -627,23 +741,84 @@ class FamilyRepository(
             return@withLock FamilyMembershipState.NoMembership
         }
 
+        var currentStage = StartupStage.LOAD_USER_PROFILE
+        var currentCollectionPath = "users"
+        var currentDocumentId = uid
+
         return@withLock try {
+            if (simulatedFirestoreLatencyMs > 0L) {
+                delay(simulatedFirestoreLatencyMs)
+            }
+            if (simulateOfflineNetworkFailure) {
+                throw FirebaseFirestoreException(
+                    "Simulated offline network failure",
+                    FirebaseFirestoreException.Code.UNAVAILABLE
+                )
+            }
+
+            FirestoreErrorHandler.logStartupMilestone(
+                stage = StartupStage.LOAD_USER_PROFILE,
+                collectionPath = "users",
+                databaseId = configuredDatabaseId,
+                note = "Reading user profile document"
+            )
+
             val userDocRef = db.collection("users").document(uid)
-            val userSnap = getDocumentWithCacheFallback(userDocRef)
+            val userSnap = getDocumentWithCacheFallback(
+                docRef = userDocRef,
+                stage = StartupStage.LOAD_USER_PROFILE,
+                collectionPath = "users",
+                documentId = uid
+            )
 
             val storedUserDisplayName = userSnap.getString("displayName")?.takeIf { it.isNotBlank() }
                 ?: userSnap.getString("name")?.takeIf { it.isNotBlank() }
-            val storedUserRoleStr = userSnap.getString("role")?.takeIf { it.isNotBlank() }
-            val storedUserIdentityStr = userSnap.getString("familyIdentity")?.takeIf { it.isNotBlank() }
+            val storedUserRoleStr = (userSnap.getString("role") ?: userSnap.getString("userRole"))
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+            val storedUserIdentityStr = (
+                userSnap.getString("familyIdentity")
+                    ?: userSnap.getString("parentIdentity")
+                    ?: userSnap.getString("identity")
+                )?.trim()?.takeIf { it.isNotBlank() }
+                ?: storedUserRoleStr?.takeIf {
+                    val upper = it.uppercase()
+                    upper == "FATHER" || upper == "MOTHER" || upper == "SON" || upper == "DAUGHTER"
+                }
             val storedUserEmoji = userSnap.getString("avatarEmoji")?.takeIf { it.isNotBlank() }
             val storedUserPhotoUrl = userSnap.getString("photoUrl")?.takeIf { it.isNotBlank() }
-            val storedUserFamilyName = userSnap.getString("familyName")?.takeIf { it.isNotBlank() }
+            val storedUserFamilyName = (
+                userSnap.getString("familyName")
+                    ?: userSnap.getString("groupName")
+                )?.takeIf { it.isNotBlank() }
 
-            var existingFamilyId = userSnap.getString("familyId")?.takeIf { it.isNotBlank() }
+            var existingFamilyId = (
+                userSnap.getString("familyId")
+                    ?: userSnap.getString("activeFamilyId")
+                    ?: userSnap.getString("groupId")
+                )?.takeIf { it.isNotBlank() }
 
-            // Fallback discovery: if /users/{uid} has no familyId, check if a family in /families already lists this uid
+            // Fallback discovery for legacy V1.5 users whose /users/{uid} document had no familyId
             if (existingFamilyId == null) {
+                currentStage = StartupStage.LOAD_FAMILY_DOCUMENT
+                currentCollectionPath = "families"
                 val discoveredFamilyDoc = runCatching {
+                    db.collection("families")
+                        .whereEqualTo("createdBy", uid)
+                        .limit(1)
+                        .get()
+                        .await()
+                        .documents
+                        .firstOrNull()
+                }.getOrNull() ?: runCatching {
+                    db.collection("families")
+                        .whereEqualTo("ownerUid", uid)
+                        .limit(1)
+                        .get()
+                        .await()
+                        .documents
+                        .firstOrNull()
+                }.getOrNull() ?: runCatching {
                     db.collection("families")
                         .whereArrayContains("memberUids", uid)
                         .limit(1)
@@ -653,7 +828,7 @@ class FamilyRepository(
                         .firstOrNull()
                 }.getOrNull() ?: runCatching {
                     db.collection("families")
-                        .whereEqualTo("ownerUid", uid)
+                        .whereArrayContains("memberIds", uid)
                         .limit(1)
                         .get()
                         .await()
@@ -675,31 +850,109 @@ class FamilyRepository(
                 val familyRef = db.collection("families").document(existingFamilyId)
                 val memberRef = familyRef.collection("members").document(uid)
 
-                val memberSnap = getDocumentWithCacheFallback(memberRef)
-                val familySnap = runCatching { getDocumentWithCacheFallback(familyRef) }.getOrNull()
+                // Step 1: Read /families/{familyId} FIRST (permitted for all signed-in users in V1.6 rules)
+                currentStage = StartupStage.LOAD_FAMILY_DOCUMENT
+                currentCollectionPath = "families"
+                currentDocumentId = existingFamilyId
+                FirestoreErrorHandler.logStartupMilestone(
+                    stage = StartupStage.LOAD_FAMILY_DOCUMENT,
+                    collectionPath = "families",
+                    databaseId = configuredDatabaseId,
+                    note = "Reading family metadata document"
+                )
+                val familySnap = try {
+                    getDocumentWithCacheFallback(
+                        docRef = familyRef,
+                        stage = StartupStage.LOAD_FAMILY_DOCUMENT,
+                        collectionPath = "families",
+                        documentId = existingFamilyId
+                    )
+                } catch (familyErr: FirebaseFirestoreException) {
+                    if (familyErr.code == FirebaseFirestoreException.Code.UNAVAILABLE) {
+                        throw familyErr
+                    }
+                    null
+                }
 
-                val isOwnerOfFamily = familySnap?.exists() == true &&
-                    (familySnap.getString("ownerUid") == uid ||
-                        (familySnap.get("memberUids") as? List<*>)?.contains(uid) == true)
+                // Step 2: Read /families/{familyId}/members/{uid}
+                // Note: Under the live V1.6 rules where `allow get: if isFamilyMember(familyId)`,
+                // if `/families/{familyId}/members/{uid}` does not exist yet (e.g., legacy V1.5 family),
+                // `memberRef.get()` throws PERMISSION_DENIED instead of returning exists() == false.
+                // We distinguish PERMISSION_DENIED (missing member doc -> check familySnap for verified V1.5 migration)
+                // from UNAVAILABLE (transient offline failure -> rethrow to RecoverableError).
+                currentStage = StartupStage.LOAD_FAMILY_MEMBER
+                currentCollectionPath = "families/$existingFamilyId/members"
+                currentDocumentId = uid
+                FirestoreErrorHandler.logStartupMilestone(
+                    stage = StartupStage.LOAD_FAMILY_MEMBER,
+                    collectionPath = currentCollectionPath,
+                    databaseId = configuredDatabaseId,
+                    note = "Reading family member document"
+                )
+                val memberSnap: DocumentSnapshot? = try {
+                    getDocumentWithCacheFallback(
+                        docRef = memberRef,
+                        stage = StartupStage.LOAD_FAMILY_MEMBER,
+                        collectionPath = currentCollectionPath,
+                        documentId = uid
+                    )
+                } catch (memberErr: FirebaseFirestoreException) {
+                    if (memberErr.code == FirebaseFirestoreException.Code.UNAVAILABLE) {
+                        throw memberErr
+                    }
+                    if (memberErr.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                        memberErr.code == FirebaseFirestoreException.Code.NOT_FOUND
+                    ) {
+                        Log.i(
+                            TAG,
+                            "Member document not directly readable or absent at families/$existingFamilyId/members (code=${memberErr.code}); checking verified family ownership/membership for V1.5 migration."
+                        )
+                        null
+                    } else {
+                        throw memberErr
+                    }
+                }
 
-                if (memberSnap.exists() || isOwnerOfFamily) {
-                    val rawRole = memberSnap.getString("role")?.takeIf { it.isNotBlank() }
-                        ?: storedUserRoleStr
-                        ?: if (familySnap?.getString("ownerUid") == uid) UserRole.PARENT.name else null
-                    val validatedRole = UserRole.fromFirestoreValue(rawRole)
+                val isVerifiedInFamilyDoc = familySnap?.exists() == true && (
+                    familySnap.getString("createdBy") == uid ||
+                        familySnap.getString("ownerUid") == uid ||
+                        (familySnap.get("adminUids") as? List<*>)?.contains(uid) == true ||
+                        (familySnap.get("memberUids") as? List<*>)?.contains(uid) == true ||
+                        (familySnap.get("memberIds") as? List<*>)?.contains(uid) == true
+                    )
+
+                val memberExists = memberSnap?.exists() == true
+
+                if (memberExists || isVerifiedInFamilyDoc) {
+                    currentStage = StartupStage.VERIFY_MEMBERSHIP
+
+                    // Authoritative role resolution: NEVER grants PARENT based only on /users/{uid}
+                    val validatedRole = resolveAuthoritativeMembershipRole(
+                        uid = uid,
+                        memberSnap = memberSnap,
+                        familySnap = familySnap
+                    )
 
                     val resolvedFamilyName = familySnap?.getString("familyName")?.takeIf { it.isNotBlank() }
+                        ?: familySnap?.getString("name")?.takeIf { it.isNotBlank() }
                         ?: storedUserFamilyName
                         ?: _familyName.value
 
-                    val persistedName = memberSnap.getString("name")?.takeIf { it.isNotBlank() }
+                    val persistedName = memberSnap?.getString("name")?.takeIf { it.isNotBlank() }
+                        ?: memberSnap?.getString("displayName")?.takeIf { it.isNotBlank() }
                         ?: storedUserDisplayName
                         ?: displayName.takeIf { it.isNotBlank() }
                         ?: if (validatedRole == UserRole.PARENT) "אבא" else "ילד/ה"
 
-                    val rawIdentity = memberSnap.getString("familyIdentity")?.takeIf { it.isNotBlank() }
+                    val memberRoleStr = memberSnap?.getString("role")?.trim()?.takeIf { it.isNotBlank() }
+                    val rawIdentity = memberSnap?.getString("familyIdentity")?.takeIf { it.isNotBlank() }
+                        ?: memberSnap?.getString("parentIdentity")?.takeIf { it.isNotBlank() }
+                        ?: memberRoleStr?.takeIf {
+                            val upper = it.uppercase()
+                            upper == "FATHER" || upper == "MOTHER" || upper == "SON" || upper == "DAUGHTER"
+                        }
                         ?: storedUserIdentityStr
-                    val rawEmoji = memberSnap.getString("avatarEmoji")?.takeIf { it.isNotBlank() }
+                    val rawEmoji = memberSnap?.getString("avatarEmoji")?.takeIf { it.isNotBlank() }
                         ?: storedUserEmoji
 
                     // Resolve FamilyIdentity (FATHER / MOTHER / CHILD) without EVER defaulting an existing FATHER to MOTHER
@@ -720,16 +973,69 @@ class FamilyRepository(
                     )
 
                     val resolvedEmoji = rawEmoji ?: validatedIdentity.defaultEmoji
-                    val resolvedPhotoUrl = memberSnap.getString("photoUrl")?.takeIf { it.isNotBlank() }
+                    val resolvedPhotoUrl = memberSnap?.getString("photoUrl")?.takeIf { it.isNotBlank() }
                         ?: storedUserPhotoUrl
                         ?: photoUrl
-                    val resolvedEmail = memberSnap.getString("googleEmail")?.takeIf { it.isNotBlank() }
+                    val resolvedEmail = memberSnap?.getString("googleEmail")?.takeIf { it.isNotBlank() }
                         ?: userSnap.getString("email")?.takeIf { it.isNotBlank() }
                         ?: email
+                    val preservedEarnedPoints = (memberSnap?.getLong("earnedPoints") ?: 0L).toInt()
+                    val preservedSpentPoints = (memberSnap?.getLong("spentPoints") ?: 0L).toInt()
 
-                    // Self-heal missing canonical fields using non-destructive merge ONLY if missing
+                    // Detect whether this record is a legacy V1.5 profile/family/member needing V1.6 normalization
+                    val needsFamilyMigration = familySnap?.exists() == true && (
+                        familySnap.getString("familyName").isNullOrBlank() ||
+                            familySnap.getString("createdBy").isNullOrBlank() ||
+                            familySnap.getString("name").isNullOrBlank()
+                        )
+                    val needsMemberMigration = !memberExists ||
+                        !isCanonicalV16RoleString(memberRoleStr) ||
+                        memberSnap?.getString("familyIdentity").isNullOrBlank()
+                    val needsUserMigration = !userSnap.exists() ||
+                        userSnap.getString("familyId").isNullOrBlank() ||
+                        !isCanonicalV16RoleString(storedUserRoleStr) ||
+                        userSnap.getString("familyIdentity").isNullOrBlank() ||
+                        userSnap.getString("familyName").isNullOrBlank()
+
+                    if (needsFamilyMigration || needsMemberMigration || needsUserMigration) {
+                        currentStage = StartupStage.MIGRATE_LEGACY_V15_DATA
+                        FirestoreErrorHandler.logLegacyMigration(
+                            databaseId = configuredDatabaseId,
+                            legacyRole = memberRoleStr ?: storedUserRoleStr,
+                            migratedRole = validatedRole.toFirestoreValue(),
+                            preservedIdentity = validatedIdentity.toFirestoreValue(),
+                            hadMemberDoc = memberExists,
+                            hadUserDoc = userSnap.exists()
+                        )
+                    }
+
+                    // 1. Safe V1.5 -> V1.6 family document normalization (only if user is PARENT and fields are missing)
+                    if (validatedRole == UserRole.PARENT && familySnap?.exists() == true && needsFamilyMigration) {
+                        val familyUpdates = mutableMapOf<String, Any>()
+                        if (familySnap.getString("familyName").isNullOrBlank()) {
+                            familyUpdates["familyName"] = resolvedFamilyName
+                        }
+                        if (familySnap.getString("name").isNullOrBlank()) {
+                            familyUpdates["name"] = resolvedFamilyName
+                        }
+                        if (familySnap.getString("createdBy").isNullOrBlank()) {
+                            val creator = familySnap.getString("ownerUid")?.takeIf { it.isNotBlank() } ?: uid
+                            familyUpdates["createdBy"] = creator
+                        }
+                        if (familySnap.getString("ownerUid").isNullOrBlank()) {
+                            val owner = familySnap.getString("createdBy")?.takeIf { it.isNotBlank() } ?: uid
+                            familyUpdates["ownerUid"] = owner
+                        }
+                        if (familyUpdates.isNotEmpty()) {
+                            runCatching {
+                                familyRef.set(familyUpdates, SetOptions.merge()).await()
+                            }
+                        }
+                    }
+
+                    // 2. Safe V1.5 -> V1.6 member document migration using non-destructive merge
                     val memberMissingFields = mutableMapOf<String, Any>()
-                    if (!memberSnap.exists()) {
+                    if (!memberExists) {
                         memberMissingFields["id"] = uid
                         memberMissingFields["uid"] = uid
                         memberMissingFields["familyId"] = existingFamilyId
@@ -738,16 +1044,23 @@ class FamilyRepository(
                         memberMissingFields["role"] = validatedRole.toFirestoreValue()
                         memberMissingFields["familyIdentity"] = validatedIdentity.toFirestoreValue()
                         memberMissingFields["avatarEmoji"] = resolvedEmoji
+                        memberMissingFields["earnedPoints"] = preservedEarnedPoints
+                        memberMissingFields["spentPoints"] = preservedSpentPoints
                         memberMissingFields["invitationPending"] = false
                         memberMissingFields["invitationAccepted"] = true
+                        if (resolvedEmail.isNotBlank()) memberMissingFields["googleEmail"] = resolvedEmail
+                        if (!resolvedPhotoUrl.isNullOrBlank()) memberMissingFields["photoUrl"] = resolvedPhotoUrl
                     } else {
-                        if (memberSnap.getString("familyIdentity").isNullOrBlank()) {
+                        if (!isCanonicalV16RoleString(memberRoleStr)) {
+                            memberMissingFields["role"] = validatedRole.toFirestoreValue()
+                        }
+                        if (memberSnap?.getString("familyIdentity").isNullOrBlank()) {
                             memberMissingFields["familyIdentity"] = validatedIdentity.toFirestoreValue()
                         }
-                        if (memberSnap.getString("googleEmail").isNullOrBlank() && resolvedEmail.isNotBlank()) {
+                        if (memberSnap?.getString("googleEmail").isNullOrBlank() && resolvedEmail.isNotBlank()) {
                             memberMissingFields["googleEmail"] = resolvedEmail
                         }
-                        if (memberSnap.getString("photoUrl").isNullOrBlank() && !resolvedPhotoUrl.isNullOrBlank()) {
+                        if (memberSnap?.getString("photoUrl").isNullOrBlank() && !resolvedPhotoUrl.isNullOrBlank()) {
                             memberMissingFields["photoUrl"] = resolvedPhotoUrl
                         }
                     }
@@ -757,6 +1070,7 @@ class FamilyRepository(
                         }
                     }
 
+                    // 3. Safe V1.5 -> V1.6 user profile migration using non-destructive merge
                     val userMissingFields = mutableMapOf<String, Any>()
                     if (!userSnap.exists() || userSnap.getString("familyId").isNullOrBlank()) {
                         userMissingFields["uid"] = uid
@@ -764,11 +1078,22 @@ class FamilyRepository(
                         userMissingFields["role"] = validatedRole.toFirestoreValue()
                         userMissingFields["familyIdentity"] = validatedIdentity.toFirestoreValue()
                         userMissingFields["displayName"] = persistedName
+                        userMissingFields["name"] = persistedName
                         userMissingFields["avatarEmoji"] = resolvedEmoji
                         userMissingFields["familyName"] = resolvedFamilyName
                         if (resolvedEmail.isNotBlank()) userMissingFields["email"] = resolvedEmail
-                    } else if (userSnap.getString("familyIdentity").isNullOrBlank()) {
-                        userMissingFields["familyIdentity"] = validatedIdentity.toFirestoreValue()
+                        if (!resolvedPhotoUrl.isNullOrBlank()) userMissingFields["photoUrl"] = resolvedPhotoUrl
+                    } else {
+                        // Also normalize user profile role to match the authoritative family membership role
+                        if (storedUserRoleStr != validatedRole.toFirestoreValue()) {
+                            userMissingFields["role"] = validatedRole.toFirestoreValue()
+                        }
+                        if (userSnap.getString("familyIdentity").isNullOrBlank()) {
+                            userMissingFields["familyIdentity"] = validatedIdentity.toFirestoreValue()
+                        }
+                        if (userSnap.getString("familyName").isNullOrBlank()) {
+                            userMissingFields["familyName"] = resolvedFamilyName
+                        }
                     }
                     if (userMissingFields.isNotEmpty()) {
                         runCatching {
@@ -779,16 +1104,20 @@ class FamilyRepository(
                     val restoredMember = FamilyMember(
                         id = uid,
                         name = persistedName,
-                        nameEn = memberSnap.getString("nameEn")?.takeIf { it.isNotBlank() } ?: persistedName,
+                        nameEn = memberSnap?.getString("nameEn")?.takeIf { it.isNotBlank() } ?: persistedName,
                         avatarEmoji = resolvedEmoji,
                         role = validatedRole,
                         familyIdentity = validatedIdentity,
-                        colorHex = memberSnap.getLong("colorHex")
-                            ?: if (validatedRole == UserRole.PARENT) 0xFF1A73E8 else 0xFF34A853,
+                        colorHex = memberSnap?.getLong("colorHex")
+                            ?: if (validatedRole == UserRole.PARENT) {
+                                if (validatedIdentity == FamilyIdentity.FATHER) 0xFF1A73E8 else 0xFF9334E6
+                            } else {
+                                0xFF34A853
+                            },
                         googleEmail = resolvedEmail,
                         photoUrl = resolvedPhotoUrl,
-                        schoolGrade = memberSnap.getString("schoolGrade"),
-                        earnedPoints = (memberSnap.getLong("earnedPoints") ?: 0L).toInt(),
+                        schoolGrade = memberSnap?.getString("schoolGrade"),
+                        earnedPoints = preservedEarnedPoints,
                         invitationPending = false,
                         invitationAccepted = true
                     )
@@ -815,6 +1144,7 @@ class FamilyRepository(
                         familyIdentity = validatedIdentity,
                         member = restoredMember
                     )
+                    lastClassifiedStartupFailure = null
                     _membershipState.value = activeState
                     _startupState.value = StartupState.ReadyToEnterDashboard(
                         uid = uid,
@@ -824,28 +1154,18 @@ class FamilyRepository(
                         familyIdentity = validatedIdentity
                     )
                     return@withLock activeState
-                }
-            }
-
-            // Create-if-absent semantics ONLY when /users/{uid} genuinely does not exist yet
-            if (!userSnap.exists()) {
-                val initialUserDoc = mutableMapOf<String, Any>(
-                    "uid" to uid,
-                    "email" to email,
-                    "createdAt" to System.currentTimeMillis()
-                )
-                if (displayName.isNotBlank()) {
-                    initialUserDoc["displayName"] = displayName
-                }
-                if (!photoUrl.isNullOrBlank()) {
-                    initialUserDoc["photoUrl"] = photoUrl
-                }
-                runCatching {
-                    userDocRef.set(initialUserDoc, SetOptions.merge()).await()
+                } else {
+                    FirestoreErrorHandler.logStartupMilestone(
+                        stage = StartupStage.VERIFY_MEMBERSHIP,
+                        collectionPath = "families/$existingFamilyId/members",
+                        databaseId = configuredDatabaseId,
+                        note = "No active membership found for user in referenced familyId; routing to onboarding"
+                    )
                 }
             }
 
             // Genuinely no family membership in Firestore -> require onboarding ("Create" or "Join")
+            lastClassifiedStartupFailure = null
             _startupState.value = StartupState.OnboardingRequired(
                 uid = uid,
                 email = email,
@@ -854,17 +1174,29 @@ class FamilyRepository(
             _membershipState.value = FamilyMembershipState.NoMembership
             FamilyMembershipState.NoMembership
         } catch (e: Exception) {
-            Log.w(TAG, "checkAuthenticatedUserMembership recoverable error: ${e.message}")
-            val errHe = "לא ניתן לטעון את נתוני המשפחה מהענן כרגע. בדקו את החיבור ונסו שוב."
-            val errEn = "Unable to load family data from the cloud right now. Please check your connection and retry."
+            val classified = FirestoreErrorHandler.classifyStartupFailure(
+                error = e,
+                stage = currentStage,
+                collectionPath = currentCollectionPath,
+                documentId = currentDocumentId,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedStartupFailure = classified
+
             _startupState.value = StartupState.RecoverableError(
                 uid = uid,
-                messageHe = errHe,
-                messageEn = errEn
+                messageHe = classified.messageHe,
+                messageEn = classified.messageEn,
+                errorCode = classified.errorCode,
+                stage = classified.stage.stageName,
+                databaseId = classified.databaseId
             )
             val recoverable = FamilyMembershipState.RecoverableError(
-                messageHe = errHe,
-                messageEn = errEn
+                messageHe = classified.messageHe,
+                messageEn = classified.messageEn,
+                errorCode = classified.errorCode,
+                stage = classified.stage.stageName,
+                databaseId = classified.databaseId
             )
             _membershipState.value = recoverable
             recoverable
@@ -877,6 +1209,7 @@ class FamilyRepository(
      * - Protects against accidentally overwriting an existing family if `/users/{uid}` already belongs to one.
      * - Persists `familyIdentity` (`FATHER` or `MOTHER`) alongside `role = PARENT` in both
      *   `/families/{familyId}/members/{uid}` and `/users/{uid}` using `SetOptions.merge()`.
+     * - Writes both `createdBy` and `ownerUid`, and both `name` and `familyName`, for full V1.6 Firestore rule compliance.
      */
     suspend fun createFamilyAsParent(
         familyNameInput: String,
@@ -915,17 +1248,39 @@ class FamilyRepository(
         if (db != null && authProvider()?.currentUser != null && !allowCreateIfAlreadyInFamily) {
             // Create-if-absent guard: check if user already has a valid family in Firestore before creating a replacement
             val existingUserSnap = runCatching {
-                getDocumentWithCacheFallback(db.collection("users").document(uid))
+                getDocumentWithCacheFallback(
+                    docRef = db.collection("users").document(uid),
+                    stage = StartupStage.LOAD_USER_PROFILE,
+                    collectionPath = "users",
+                    documentId = uid
+                )
             }.getOrNull()
             val existingFamId = existingUserSnap?.getString("familyId")?.takeIf { it.isNotBlank() }
             if (existingFamId != null) {
-                val existingMemberSnap = runCatching {
+                val existingFamilySnap = runCatching {
                     getDocumentWithCacheFallback(
-                        db.collection("families").document(existingFamId).collection("members").document(uid)
+                        docRef = db.collection("families").document(existingFamId),
+                        stage = StartupStage.LOAD_FAMILY_DOCUMENT,
+                        collectionPath = "families",
+                        documentId = existingFamId
                     )
                 }.getOrNull()
-                if (existingMemberSnap?.exists() == true) {
-                    Log.i(TAG, "createFamilyAsParent guard: user $uid already belongs to family $existingFamId; restoring instead of overwriting.")
+                val existingMemberSnap = runCatching {
+                    getDocumentWithCacheFallback(
+                        docRef = db.collection("families").document(existingFamId).collection("members").document(uid),
+                        stage = StartupStage.LOAD_FAMILY_MEMBER,
+                        collectionPath = "families/$existingFamId/members",
+                        documentId = uid
+                    )
+                }.getOrNull()
+                val isExistingOwnerOrMember = existingMemberSnap?.exists() == true || (
+                    existingFamilySnap?.exists() == true && (
+                        existingFamilySnap.getString("createdBy") == uid ||
+                            existingFamilySnap.getString("ownerUid") == uid
+                        )
+                    )
+                if (isExistingOwnerOrMember) {
+                    Log.i(TAG, "createFamilyAsParent guard: user already belongs to an existing family; restoring instead of overwriting.")
                     val restored = checkAuthenticatedUserMembership(
                         uid = uid,
                         email = email,
@@ -969,7 +1324,9 @@ class FamilyRepository(
                     familyRef,
                     mapOf(
                         "familyId" to newFamilyId,
+                        "name" to cleanFamilyName,
                         "familyName" to cleanFamilyName,
+                        "createdBy" to uid,
                         "ownerUid" to uid,
                         "ownerEmail" to email,
                         "adminUids" to listOf(uid),
@@ -991,6 +1348,7 @@ class FamilyRepository(
                     "colorHex" to creatorMember.colorHex,
                     "googleEmail" to email,
                     "earnedPoints" to 0,
+                    "spentPoints" to 0,
                     "invitationPending" to false,
                     "invitationAccepted" to true,
                     "joinedAt" to now
@@ -1019,7 +1377,13 @@ class FamilyRepository(
 
                 batch.commit().await()
             } catch (e: Exception) {
-                Log.e(TAG, "createFamilyAsParent Firestore write failed: ${e.message}", e)
+                FirestoreErrorHandler.classifyStartupFailure(
+                    error = e,
+                    stage = StartupStage.LOAD_FAMILY_DOCUMENT,
+                    collectionPath = "families",
+                    documentId = newFamilyId,
+                    databaseId = configuredDatabaseId
+                )
                 return Result.failure(e)
             }
         }
@@ -1106,15 +1470,19 @@ class FamilyRepository(
             try {
                 val inviteMap = mapOf(
                     "code" to invitation.code,
+                    "inviteCode" to invitation.code,
                     "familyId" to invitation.familyId,
                     "familyName" to invitation.familyName,
                     "invitedRole" to invitation.invitedRole.toFirestoreValue(), // "PARENT" or "CHILD"
                     "invitingParentUid" to invitation.invitingParentUid,
+                    "createdById" to invitation.invitingParentUid,
                     "invitingParentName" to invitation.invitingParentName,
                     "invitedNickname" to invitation.invitedNickname,
                     "createdAt" to invitation.createdAt,
                     "expiresAt" to invitation.expiresAt,
-                    "status" to InvitationStatus.PENDING.name
+                    "expiresAtMillis" to invitation.expiresAt,
+                    "status" to InvitationStatus.PENDING.name,
+                    "isUsed" to false
                 )
                 db.collection("family_invites").document(code).set(inviteMap).await()
             } catch (e: Exception) {
@@ -1169,7 +1537,7 @@ class FamilyRepository(
                     invitationsByCode[normalized] = invitation
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Firestore lookup for invite $normalized failed: ${e.message}")
+                Log.w(TAG, "Firestore lookup for invite code failed: ${e.javaClass.simpleName}")
             }
         }
 
@@ -1243,9 +1611,9 @@ class FamilyRepository(
      * V1.6 Requirement 5:
      * Redeems a validated invitation code and joins the existing family with the exact immutable
      * role specified by the invitation (`PARENT` or `CHILD`).
-     * - Marks the invitation as `REDEEMED` so it cannot be reused
+     * - Marks the invitation as `REDEEMED` (`isUsed = true`) so it cannot be reused
      * - Creates the member document in `/families/{familyId}/members/{uid}` with `role = invitation.invitedRole`
-     * - Updates `/families/{familyId}` and `/users/{uid}`
+     * - Updates `/users/{uid}` and `/families/{familyId}`
      * - Attaches real-time listeners so both child and parent immediately see the updated family
      */
     suspend fun redeemInvitationAndJoinFamily(
@@ -1325,26 +1693,27 @@ class FamilyRepository(
                 val memberRef = familyRef.collection("members").document(uid)
                 val userRef = db.collection("users").document(uid)
 
+                var lockedRoleForFamilyUpdate = assignedRole
+
                 db.runTransaction { transaction ->
                     val freshInviteSnap = transaction.get(inviteRef)
                     if (!freshInviteSnap.exists()) {
                         throw IllegalStateException("קוד ההזמנה אינו קיים.")
                     }
                     val freshStatus = InvitationStatus.fromFirestoreValue(freshInviteSnap.getString("status"))
-                    val freshExpiresAt = freshInviteSnap.getLong("expiresAt") ?: 0L
-                    if (freshStatus != InvitationStatus.PENDING) {
+                    val isAlreadyUsed = freshInviteSnap.getBoolean("isUsed") ?: false
+                    val freshExpiresAt = freshInviteSnap.getLong("expiresAt")
+                        ?: freshInviteSnap.getLong("expiresAtMillis")
+                        ?: 0L
+                    if (freshStatus != InvitationStatus.PENDING || isAlreadyUsed) {
                         throw IllegalStateException("קוד הזמנה זה כבר נוצל או בוטל.")
                     }
                     if (nowMillis > freshExpiresAt) {
                         throw IllegalStateException("פג תוקפו של קוד ההזמנה.")
                     }
 
-                    val existingMemberSnap = transaction.get(memberRef)
-                    if (existingMemberSnap.exists()) {
-                        throw IllegalStateException("אתם כבר חברים במשפחה זו.")
-                    }
-
                     val lockedRole = UserRole.fromFirestoreValue(freshInviteSnap.getString("invitedRole"))
+                    lockedRoleForFamilyUpdate = lockedRole
                     val roleValue = lockedRole.toFirestoreValue() // "PARENT" or "CHILD"
                     val txIdentity = if (lockedRole == UserRole.PARENT) {
                         if (resolvedIdentity.isParentIdentity) resolvedIdentity else FamilyIdentity.MOTHER
@@ -1352,12 +1721,14 @@ class FamilyRepository(
                         if (!resolvedIdentity.isParentIdentity) resolvedIdentity else FamilyIdentity.CHILD
                     }
 
-                    // 1. Mark invitation as REDEEMED
+                    // 1. Mark invitation as REDEEMED (with isUsed = true for V1.6 security rules)
                     transaction.update(
                         inviteRef,
                         mapOf(
                             "status" to InvitationStatus.REDEEMED.name,
+                            "isUsed" to true,
                             "redeemedByUid" to uid,
+                            "usedByUid" to uid,
                             "redeemedByName" to cleanName,
                             "redeemedAt" to nowMillis
                         )
@@ -1376,6 +1747,7 @@ class FamilyRepository(
                         "colorHex" to if (lockedRole == UserRole.PARENT) 0xFF9334E6L else 0xFF34A853L,
                         "googleEmail" to email,
                         "earnedPoints" to 0,
+                        "spentPoints" to 0,
                         "invitationPending" to false,
                         "invitationAccepted" to true,
                         "inviteCode" to invite.code,
@@ -1387,17 +1759,7 @@ class FamilyRepository(
                     }
                     transaction.set(memberRef, memberDocData, SetOptions.merge())
 
-                    // 3. Update root family document memberUids (and adminUids ONLY if PARENT)
-                    val familyUpdates = mutableMapOf<String, Any>(
-                        "memberUids" to FieldValue.arrayUnion(uid),
-                        "updatedAt" to nowMillis
-                    )
-                    if (lockedRole == UserRole.PARENT) {
-                        familyUpdates["adminUids"] = FieldValue.arrayUnion(uid)
-                    }
-                    transaction.update(familyRef, familyUpdates)
-
-                    // 4. Save user's active familyId, validated role, and familyIdentity
+                    // 3. Save user's active familyId, validated role, and familyIdentity
                     val userDocData = mutableMapOf<String, Any>(
                         "uid" to uid,
                         "email" to email,
@@ -1415,6 +1777,18 @@ class FamilyRepository(
                     }
                     transaction.set(userRef, userDocData, SetOptions.merge())
                 }.await()
+
+                // 4. Best-effort update to root family document memberUids (and adminUids ONLY if PARENT)
+                val familyUpdates = mutableMapOf<String, Any>(
+                    "memberUids" to FieldValue.arrayUnion(uid),
+                    "updatedAt" to nowMillis
+                )
+                if (lockedRoleForFamilyUpdate == UserRole.PARENT) {
+                    familyUpdates["adminUids"] = FieldValue.arrayUnion(uid)
+                }
+                runCatching {
+                    familyRef.update(familyUpdates).await()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "redeemInvitationAndJoinFamily transaction failed: ${e.message}", e)
                 return Result.failure(e)

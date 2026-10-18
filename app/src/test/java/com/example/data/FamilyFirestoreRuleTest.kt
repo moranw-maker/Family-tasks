@@ -1328,6 +1328,152 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         assertEquals("משפחת אלון", motherRestored.familyName)
     }
 
+    @Test
+    fun testV15ToV16Upgrade_existingLegacyUserWithoutMemberDocOrWithLegacyRole_migratesSafelyAndLoadsDashboard() = runBlocking {
+        val legacyEmail = "legacy_v15_father_${System.currentTimeMillis()}@example.com"
+        val legacyUid = signInTestUser(legacyEmail)
+        val legacyFamilyId = "fam_v15_legacy_${System.currentTimeMillis()}"
+
+        // 1. Seed legacy V1.5 Firestore documents:
+        //    - /families/{legacyFamilyId} has V1.5 fields ("name", "createdBy") without V1.6 "familyName"/"ownerUid"
+        //    - /users/{legacyUid} has familyId and FATHER identity, but NO /families/{legacyFamilyId}/members/{legacyUid} doc yet
+        withTimeout(timeoutMs) {
+            firestore.collection("families").document(legacyFamilyId).set(
+                mapOf(
+                    "familyId" to legacyFamilyId,
+                    "name" to "משפחת מזרחי",
+                    "createdBy" to legacyUid
+                )
+            ).awaitTask()
+
+            firestore.collection("users").document(legacyUid).set(
+                mapOf(
+                    "uid" to legacyUid,
+                    "email" to legacyEmail,
+                    "displayName" to "אבי מזרחי",
+                    "familyId" to legacyFamilyId,
+                    "role" to "PARENT",
+                    "familyIdentity" to "FATHER"
+                )
+            ).awaitTask()
+        }
+
+        // 2. Simulate V1.6 app startup for this existing V1.5 user
+        val upgradedRepo = repo()
+        val membershipState = withTimeout(timeoutMs) {
+            upgradedRepo.checkAuthenticatedUserMembership(
+                uid = legacyUid,
+                email = legacyEmail,
+                displayName = "Avi Mizrahi"
+            )
+        }
+
+        assertTrue(
+            "Existing V1.5 user upgrading to V1.6 must succeed and NOT fail with RecoverableError: $membershipState",
+            membershipState is FamilyMembershipState.ActiveMember
+        )
+        val active = membershipState as FamilyMembershipState.ActiveMember
+        assertEquals(legacyFamilyId, active.familyId)
+        assertEquals("משפחת מזרחי", active.familyName)
+        assertEquals(UserRole.PARENT, active.role)
+        assertEquals(FamilyIdentity.FATHER, active.familyIdentity)
+        assertTrue(upgradedRepo.startupState.value is StartupState.ReadyToEnterDashboard)
+
+        // 3. Verify that /families/{legacyFamilyId}/members/{legacyUid} was safely created/migrated in Firestore
+        val migratedMemberSnap = withTimeout(timeoutMs) {
+            firestore.collection("families").document(legacyFamilyId)
+                .collection("members").document(legacyUid).get().awaitTask()
+        }
+        assertTrue("Migrated member document must exist in Firestore", migratedMemberSnap.exists())
+        assertEquals("PARENT", migratedMemberSnap.getString("role"))
+        assertEquals("FATHER", migratedMemberSnap.getString("familyIdentity"))
+        assertEquals("אבי מזרחי", migratedMemberSnap.getString("name"))
+
+        // 4. Simulate offline startup (UNAVAILABLE) followed by retry -> must recover cleanly
+        upgradedRepo.detachAll()
+        val offlineRepo = repo()
+        offlineRepo.simulateOfflineNetworkFailure = true
+
+        val offlineState = withTimeout(timeoutMs) {
+            offlineRepo.checkAuthenticatedUserMembership(
+                uid = legacyUid,
+                email = legacyEmail,
+                displayName = "Avi Mizrahi",
+                forceRefresh = true
+            )
+        }
+        assertTrue("Offline startup must enter RecoverableError", offlineState is FamilyMembershipState.RecoverableError)
+        val recoverable = offlineState as FamilyMembershipState.RecoverableError
+        assertEquals("UNAVAILABLE", recoverable.errorCode)
+        assertEquals("LOAD_USER_PROFILE", recoverable.stage)
+
+        // Restore connectivity and retry -> must enter ReadyToEnterDashboard with preserved FATHER profile
+        offlineRepo.simulateOfflineNetworkFailure = false
+        val retriedState = withTimeout(timeoutMs) {
+            offlineRepo.retryStartupLoading()
+        }
+        assertTrue("Retry after network recovery must restore ActiveMember", retriedState is FamilyMembershipState.ActiveMember)
+        val recoveredActive = retriedState as FamilyMembershipState.ActiveMember
+        assertEquals("משפחת מזרחי", recoveredActive.familyName)
+        assertEquals(FamilyIdentity.FATHER, recoveredActive.familyIdentity)
+        assertEquals(UserRole.PARENT, recoveredActive.role)
+    }
+
+    @Test
+    fun testV16SecurityInvariant_userControlledProfileRoleNeverGrantsParentPrivileges() = runBlocking {
+        val parentEmail = "real_parent_${System.currentTimeMillis()}@example.com"
+        val childEmail = "child_tamper_${System.currentTimeMillis()}@example.com"
+
+        // 1. Parent creates family and invites child with CHILD role
+        val parentUid = signInTestUser(parentEmail)
+        val parentRepo = repo()
+        val created = withTimeout(timeoutMs) {
+            parentRepo.createFamilyAsParent(
+                familyNameInput = "משפחת דגן",
+                parentDisplayName = "אבא דגן",
+                creatorUidOverride = parentUid,
+                creatorEmailOverride = parentEmail,
+                familyIdentity = FamilyIdentity.FATHER
+            )
+        }.getOrThrow()
+        val familyId = created.familyId
+
+        val childInvite = withTimeout(timeoutMs) {
+            parentRepo.createRoleInvitationInCloud(
+                invitedRole = UserRole.CHILD,
+                inviteeNameHint = "גיל",
+                familyIdOverride = familyId
+            )
+        }.getOrThrow()
+
+        // 2. Child joins via CHILD invitation
+        val childUid = signInTestUser(childEmail)
+        val childRepo = repo()
+        withTimeout(timeoutMs) {
+            childRepo.redeemInvitationAndJoinFamily(
+                rawCode = childInvite.inviteCode,
+                memberDisplayName = "גיל דגן",
+                joiningUidOverride = childUid,
+                joiningEmailOverride = childEmail
+            )
+        }.getOrThrow()
+
+        // 3. Verify that even if /users/{childUid} had a user-controlled claim,
+        //    authoritative membership resolution from /families/{familyId}/members/{childUid} strictly enforces CHILD
+        childRepo.detachAll()
+        val reopenedChildRepo = repo()
+        val restoredChild = withTimeout(timeoutMs) {
+            reopenedChildRepo.checkAuthenticatedUserMembership(
+                uid = childUid,
+                email = childEmail,
+                displayName = "Gil Dagan"
+            )
+        } as FamilyMembershipState.ActiveMember
+
+        assertEquals("Authoritative family member role must remain CHILD", UserRole.CHILD, restoredChild.role)
+        assertFalse("Child must never be granted parent privileges", reopenedChildRepo.currentMember.value.isParent)
+    }
+
     private val activeRepos = mutableListOf<FamilyRepository>()
 
     private fun repo(): FamilyRepository {
@@ -1358,5 +1504,6 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         }
     }
 }
+
 
 
