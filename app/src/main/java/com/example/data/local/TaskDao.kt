@@ -17,6 +17,12 @@ interface TaskDao {
     @Query("SELECT * FROM tasks ORDER BY due_date_epoch_day ASC, due_time ASC")
     fun getAllTasks(): Flow<List<Task>>
 
+    @Query("SELECT * FROM tasks ORDER BY due_date_epoch_day ASC, due_time ASC")
+    fun getAllTasksFlow(): Flow<List<Task>>
+
+    @Query("SELECT * FROM tasks")
+    suspend fun getAllTasksOnce(): List<Task>
+
     @Query("SELECT * FROM tasks WHERE id = :taskId LIMIT 1")
     suspend fun getTaskById(taskId: String): Task?
 
@@ -24,7 +30,13 @@ interface TaskDao {
     suspend fun insertOrUpdateTask(task: Task)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertTask(task: Task)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdateTasks(tasks: List<Task>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertTasks(tasks: List<Task>)
 
     @Update
     suspend fun updateTask(task: Task)

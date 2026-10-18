@@ -293,7 +293,7 @@ fun TasksScreen(
                 }
             }
 
-            // 4. Section Title & Prominent Primary "+ הוסף משימה" Button
+            // 4. Section Title & Role-Appropriate Action Banner (PARENT can create tasks; CHILD views assigned tasks)
             item {
                 Column {
                     Text(
@@ -305,24 +305,62 @@ fun TasksScreen(
                         modifier = Modifier.padding(bottom = 10.dp)
                     )
 
-                    Button(
-                        onClick = onAddNewTask,
-                        shape = RoundedCornerShape(28.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = VibrantActionBlue),
-                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 4.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(54.dp)
-                            .testTag("add_task_primary_button")
-                    ) {
-                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (isHebrew) "+ הוסף משימה" else "+ Add Task",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 16.sp,
-                            color = Color.White
-                        )
+                    if (currentMember.isParent) {
+                        Button(
+                            onClick = onAddNewTask,
+                            shape = RoundedCornerShape(28.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = VibrantActionBlue),
+                            elevation = ButtonDefaults.buttonElevation(defaultElevation = 4.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(54.dp)
+                                .testTag("add_task_primary_button")
+                        ) {
+                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (isHebrew) "+ הוסף משימה" else "+ Add Task",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp,
+                                color = Color.White
+                            )
+                        }
+                    } else {
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = PastelGreenBackground,
+                            border = BorderStroke(1.dp, PastelGreenBorder),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("child_role_info_banner")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(text = "🌟", fontSize = 22.sp)
+                                Column {
+                                    Text(
+                                        text = if (isHebrew)
+                                            "מחובר כילד/ה (${currentMember.name})"
+                                        else
+                                            "Signed in as Child (${currentMember.name})",
+                                        style = MaterialTheme.typography.labelLarge.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = PastelGreenDark
+                                        )
+                                    )
+                                    Text(
+                                        text = if (isHebrew)
+                                            "סמנו כבוצע את המשימות שמשויכות אליכם כדי לצבור נקודות לפרסים!"
+                                        else
+                                            "Complete tasks assigned to you to earn reward points!",
+                                        style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

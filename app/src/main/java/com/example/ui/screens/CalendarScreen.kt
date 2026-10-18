@@ -55,31 +55,33 @@ fun CalendarScreen(
 
     Scaffold(
         floatingActionButton = {
-            Surface(
-                onClick = onAddNewTask,
-                shape = RoundedCornerShape(24.dp),
-                color = VibrantActionBlue,
-                contentColor = Color.White,
-                shadowElevation = 4.dp,
-                modifier = Modifier
-                    .height(46.dp)
-                    .testTag("calendar_add_task_fab")
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+            if (currentMember.isParent) {
+                Surface(
+                    onClick = onAddNewTask,
+                    shape = RoundedCornerShape(24.dp),
+                    color = VibrantActionBlue,
+                    contentColor = Color.White,
+                    shadowElevation = 4.dp,
+                    modifier = Modifier
+                        .height(46.dp)
+                        .testTag("calendar_add_task_fab")
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Text(
-                        text = if (isHebrew) "משימה לתאריך" else "Add Task",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp
-                    )
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = if (isHebrew) "משימה לתאריך" else "Add Task",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                    }
                 }
             }
         }

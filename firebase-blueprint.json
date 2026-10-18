@@ -1,84 +1,145 @@
 {
   "entities": {
-    "FamilyGroup": {
-      "title": "FamilyGroup",
-      "description": "Represents a family account grouping parents and children with an invitation code",
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user's profile and active family mapping",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "description": "Unique family identifier" },
-        "familyName": { "type": "string", "description": "Display name of the family" },
-        "createdById": { "type": "string", "description": "Firebase Auth UID of parent creator" },
-        "inviteCode": { "type": "string", "description": "Dynamic invite code for children or co-parents" },
-        "memberIds": { "type": "array", "description": "List of user UIDs belonging to this family" },
-        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp" },
-        "updatedAt": { "type": "string", "format": "date-time", "description": "Server last update timestamp" }
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "description": "User email address" },
+        "displayName": { "type": "string", "description": "User display name" },
+        "photoUrl": { "type": "string", "description": "Google profile photo URL" },
+        "familyId": { "type": "string", "description": "Currently active family ID" },
+        "role": { "type": "string", "enum": ["PARENT", "CHILD"], "description": "Validated family role (PARENT or CHILD)" },
+        "updatedAt": { "type": "integer", "description": "Epoch timestamp in milliseconds" }
       },
-      "required": ["id", "familyName", "createdById", "inviteCode", "memberIds", "createdAt"]
+      "required": ["uid", "familyId", "role"]
+    },
+    "Family": {
+      "title": "Family",
+      "description": "Household family workspace shared across multiple devices",
+      "type": "object",
+      "properties": {
+        "familyId": { "type": "string", "description": "Unique family identifier" },
+        "familyName": { "type": "string", "description": "Display name of the family" },
+        "ownerUid": { "type": "string", "description": "UID of the creator parent" },
+        "ownerEmail": { "type": "string", "description": "Email of the creator parent" },
+        "adminUids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of UIDs with PARENT role"
+        },
+        "memberUids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of all validated family member UIDs (both PARENT and CHILD)"
+        },
+        "updatedAt": { "type": "integer", "description": "Last modified epoch millis" }
+      },
+      "required": ["familyId", "familyName", "ownerUid", "adminUids", "memberUids"]
+    },
+    "FamilyInvitation": {
+      "title": "FamilyInvitation",
+      "description": "Role-specific, domain-free family invitation record",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "description": "Unique 6-character invitation code" },
+        "familyId": { "type": "string", "description": "Target family ID" },
+        "familyName": { "type": "string", "description": "Target family display name" },
+        "invitedRole": { "type": "string", "enum": ["PARENT", "CHILD"], "description": "Immutable role assigned upon redemption" },
+        "invitingParentUid": { "type": "string", "description": "UID of the inviting parent" },
+        "invitingParentName": { "type": "string", "description": "Display name of the inviting parent" },
+        "invitedNickname": { "type": "string", "description": "Optional nickname for pending list display" },
+        "createdAt": { "type": "integer", "description": "Creation timestamp in milliseconds" },
+        "expiresAt": { "type": "integer", "description": "Expiration timestamp in milliseconds" },
+        "status": { "type": "string", "enum": ["PENDING", "REDEEMED", "EXPIRED", "REVOKED"], "description": "Current invitation lifecycle status" },
+        "redeemedByUid": { "type": "string", "description": "UID of the user who redeemed the invitation" },
+        "redeemedByName": { "type": "string", "description": "Name of the user who redeemed the invitation" },
+        "redeemedAt": { "type": "integer", "description": "Redemption timestamp in milliseconds" }
+      },
+      "required": ["code", "familyId", "familyName", "invitedRole", "invitingParentUid", "createdAt", "expiresAt", "status"]
     },
     "FamilyMember": {
       "title": "FamilyMember",
-      "description": "Profile of a family member, either parent or child",
+      "description": "Validated member within a family (PARENT or CHILD)",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "description": "Unique member identifier or user UID" },
-        "familyId": { "type": "string", "description": "ID of the family group" },
-        "userId": { "type": "string", "description": "Firebase Auth UID if user has logged in" },
-        "name": { "type": "string", "description": "Name of the family member" },
-        "email": { "type": "string", "description": "Email address" },
-        "role": { "type": "string", "description": "PRIMARY_ADMIN, SECONDARY_ADMIN, or MEMBER_KID" },
-        "avatarEmoji": { "type": "string", "description": "Avatar emoji" },
-        "colorHex": { "type": "integer", "description": "Theme color hex" },
-        "earnedPoints": { "type": "integer", "description": "Total earned reward points" },
-        "completedTasksCount": { "type": "integer", "description": "Total completed tasks" },
-        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp" }
+        "id": { "type": "string", "description": "Member ID (matches Firebase Auth UID)" },
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "familyId": { "type": "string", "description": "Family ID" },
+        "name": { "type": "string", "description": "Display name in Hebrew/Default" },
+        "nameEn": { "type": "string", "description": "Display name in English" },
+        "avatarEmoji": { "type": "string", "description": "Avatar emoji fallback" },
+        "photoUrl": { "type": "string", "description": "Google profile picture URL" },
+        "role": { "type": "string", "enum": ["PARENT", "CHILD"], "description": "Role in the family (PARENT or CHILD)" },
+        "colorHex": { "type": "integer", "description": "Member badge color" },
+        "googleEmail": { "type": "string", "description": "Linked Google email" },
+        "schoolGrade": { "type": "string", "description": "Optional grade for children" },
+        "earnedPoints": { "type": "integer", "description": "Accumulated reward points" },
+        "inviteCode": { "type": "string", "description": "Invitation code used when joining" },
+        "joinedAt": { "type": "integer", "description": "Epoch timestamp when joined" }
       },
-      "required": ["id", "familyId", "name", "role", "earnedPoints", "createdAt"]
+      "required": ["id", "name", "role", "earnedPoints"]
     },
-    "FamilyTask": {
-      "title": "FamilyTask",
-      "description": "A chore or task assigned to a family member with points, priority, due date, and completion status",
+    "Task": {
+      "title": "Task",
+      "description": "Household chore or task assigned to a family member",
       "type": "object",
       "properties": {
         "id": { "type": "string", "description": "Unique task ID" },
-        "familyId": { "type": "string", "description": "ID of the family group" },
-        "title": { "type": "string", "description": "Title/name of the task" },
-        "description": { "type": "string", "description": "Optional details or instructions" },
-        "dueDate": { "type": "string", "description": "Formatted due date or time string" },
-        "dateEpochDay": { "type": "integer", "description": "Due date in epoch days" },
-        "dueTimeFormatted": { "type": "string", "description": "Due time string like 18:00" },
-        "assignedMemberId": { "type": "string", "description": "ID of the assigned member" },
-        "assignedMemberName": { "type": "string", "description": "Display name of assigned member" },
-        "createdById": { "type": "string", "description": "UID of creator" },
-        "isCompleted": { "type": "boolean", "description": "Whether the task has been marked complete" },
-        "completedAtMillis": { "type": "integer", "description": "Epoch timestamp in ms when task was completed" },
-        "completedByMemberId": { "type": "string", "description": "Member ID of person who completed task" },
-        "approvedByParent": { "type": "boolean", "description": "Whether completion has been verified by parent" },
-        "points": { "type": "integer", "description": "Reward points earned on completion" },
-        "priority": { "type": "string", "description": "LOW, MEDIUM, or HIGH" },
-        "category": { "type": "string", "description": "TaskCategory enum name" },
-        "recurrence": { "type": "string", "description": "ONCE, DAILY, WEEKLY, or SCHOOL_DAYS" },
-        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp" },
-        "updatedAt": { "type": "string", "format": "date-time", "description": "Server last update timestamp" }
+        "title": { "type": "string", "description": "Task title" },
+        "description": { "type": "string", "description": "Detailed task instructions" },
+        "assignedUid": { "type": "string", "description": "UID or member ID of the assigned child/member" },
+        "pointsValue": { "type": "integer", "description": "Points awarded upon completion" },
+        "isCompleted": { "type": "boolean", "description": "Whether the task has been marked done" },
+        "dueDate": { "type": "integer", "description": "Due date epoch milliseconds" },
+        "familyId": { "type": "string", "description": "Owning family ID" },
+        "approvedByParent": { "type": "boolean", "description": "Whether a parent approved completion" },
+        "category": { "type": "string", "description": "Task category enum name" },
+        "priority": { "type": "string", "description": "Task priority enum name" },
+        "recurrence": { "type": "string", "description": "Task recurrence enum name" },
+        "dueTimeFormatted": { "type": "string", "description": "Formatted time HH:mm" }
       },
-      "required": ["id", "familyId", "title", "assignedMemberId", "isCompleted", "points", "createdAt"]
+      "required": ["id", "title", "assignedUid", "pointsValue", "isCompleted", "familyId"]
     },
     "RewardItem": {
       "title": "RewardItem",
-      "description": "Rewards purchasable with earned points",
+      "description": "Reward redeemable by kids using earned task points",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "description": "Unique reward ID" },
-        "familyId": { "type": "string", "description": "ID of the family group" },
-        "title": { "type": "string", "description": "Title of the reward" },
-        "description": { "type": "string", "description": "Reward details" },
-        "pointsCost": { "type": "integer", "description": "Points cost to claim" },
-        "iconEmoji": { "type": "string", "description": "Reward icon emoji" },
-        "isClaimed": { "type": "boolean", "description": "Whether claimed by child" },
-        "claimedByMemberId": { "type": "string", "description": "Member ID who claimed" },
-        "approvedByParent": { "type": "boolean", "description": "Parent approval" },
-        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp" }
+        "id": { "type": "string", "description": "Reward ID" },
+        "familyId": { "type": "string", "description": "Owning family ID" },
+        "title": { "type": "string", "description": "Reward title" },
+        "pointsCost": { "type": "integer", "description": "Points required to redeem" },
+        "iconEmoji": { "type": "string", "description": "Emoji icon" }
       },
-      "required": ["id", "familyId", "title", "pointsCost", "isClaimed", "createdAt"]
+      "required": ["id", "familyId", "title", "pointsCost"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Per-user profile storing active familyId and validated role"
+    },
+    "/family_invites/{inviteCode}": {
+      "schema": { "$ref": "#/entities/FamilyInvitation" },
+      "description": "Role-specific family invitation lookup table"
+    },
+    "/families/{familyId}": {
+      "schema": { "$ref": "#/entities/Family" },
+      "description": "Root family document"
+    },
+    "/families/{familyId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/FamilyMember" },
+      "description": "Validated family members subcollection"
+    },
+    "/families/{familyId}/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/Task" },
+      "description": "Real-time family tasks subcollection"
+    },
+    "/families/{familyId}/rewards/{rewardId}": {
+      "schema": { "$ref": "#/entities/RewardItem" },
+      "description": "Family rewards catalog subcollection"
     }
   }
 }

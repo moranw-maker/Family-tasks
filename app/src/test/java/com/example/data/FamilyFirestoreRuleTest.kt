@@ -530,7 +530,7 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
             firestore.collection("families").document(famId).collection("members").document(bobUid).get().awaitTask()
         }
         assertTrue("Bob member document must exist after joining", memDoc.exists())
-        assertEquals("MEMBER_KID", memDoc.getString("role"))
+        assertEquals("CHILD", memDoc.getString("role"))
 
         val famDoc = withTimeout(timeoutMs) {
             firestore.collection("families").document(famId).get().awaitTask()
@@ -1054,6 +1054,280 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         assertEquals("Parent's updated points must be preserved", 35, finalTask.points)
     }
 
+    @Test
+    fun testV16FirstTimeLoginWithoutMembership_returnsNoMembershipAndDoesNotAutoCreateFamily() = runBlocking {
+        val freshEmail = "fresh_user_${System.currentTimeMillis()}@example.com"
+        val freshUid = signInTestUser(freshEmail)
+        val freshRepo = repo()
+
+        val state = withTimeout(timeoutMs) {
+            freshRepo.checkAuthenticatedUserMembership(
+                uid = freshUid,
+                email = freshEmail,
+                displayName = "Fresh User"
+            )
+        }
+        assertTrue(
+            "First-time login without family membership must return NoMembership state, not auto-create family",
+            state is FamilyMembershipState.NoMembership
+        )
+
+        // Verify user document was not given a familyId
+        val userDoc = withTimeout(timeoutMs) {
+            firestore.collection("users").document(freshUid).get().awaitTask()
+        }
+        assertFalse("Fresh user without family must not have auto-created user doc with familyId", userDoc.exists() && !userDoc.getString("familyId").isNullOrBlank())
+    }
+
+    @Test
+    fun testV16CreateFamilyAndRoleSpecificInvitations_parentAndChildFlows() = runBlocking {
+        val parentEmail = "parent_v16_${System.currentTimeMillis()}@example.com"
+        val childEmail = "child_v16_${System.currentTimeMillis()}@example.com"
+        val secondParentEmail = "parent2_v16_${System.currentTimeMillis()}@example.com"
+
+        // 1. First parent signs in and explicitly creates a family -> receives PARENT role
+        val parentUid = signInTestUser(parentEmail)
+        val parentRepo = repo()
+        val createFamRes = withTimeout(timeoutMs) {
+            parentRepo.createFamilyInCloud(
+                familyName = "משפחת כהן",
+                creatorName = "יעל כהן",
+                creatorEmail = parentEmail,
+                photoUrl = "https://example.com/yael.jpg"
+            )
+        }
+        assertTrue("Explicit family creation must succeed: ${createFamRes.exceptionOrNull()}", createFamRes.isSuccess)
+        val createdMembership = createFamRes.getOrThrow()
+        assertEquals("Creator must be assigned PARENT role", UserRole.PARENT, createdMembership.role)
+        val familyId = createdMembership.familyId
+
+        // 2. Parent generates a CHILD invitation -> stores CHILD
+        val childInviteRes = withTimeout(timeoutMs) {
+            parentRepo.createRoleInvitationInCloud(
+                invitedRole = UserRole.CHILD,
+                inviteeNameHint = "נועה",
+                familyIdOverride = familyId
+            )
+        }
+        assertTrue("Parent creating CHILD invitation must succeed: ${childInviteRes.exceptionOrNull()}", childInviteRes.isSuccess)
+        val childInvite = childInviteRes.getOrThrow()
+        assertEquals(FamilyRole.CHILD, childInvite.invitedRole)
+        assertEquals(InvitationStatus.PENDING, childInvite.status)
+
+        // 3. Parent generates a PARENT invitation -> stores PARENT
+        val parentInviteRes = withTimeout(timeoutMs) {
+            parentRepo.createRoleInvitationInCloud(
+                invitedRole = UserRole.PARENT,
+                inviteeNameHint = "דוד",
+                familyIdOverride = familyId
+            )
+        }
+        assertTrue("Parent creating PARENT invitation must succeed", parentInviteRes.isSuccess)
+        val parentInvite = parentInviteRes.getOrThrow()
+        assertEquals(FamilyRole.PARENT, parentInvite.invitedRole)
+
+        // 4. Child signs in, validates the invitation, sees family name & CHILD role, and redeems it
+        val childUid = signInTestUser(childEmail)
+        val childRepo = repo()
+        val validation = withTimeout(timeoutMs) {
+            childRepo.validateInvitationCodeInCloud(childInvite.inviteCode)
+        }
+        assertTrue("Child invitation validation must succeed", validation is InvitationValidationResult.Valid)
+        val validPreview = validation as InvitationValidationResult.Valid
+        assertEquals("משפחת כהן", validPreview.familyName)
+        assertEquals(UserRole.CHILD, validPreview.invitedRole)
+
+        // Child attempts to spoof role = PARENT while redeeming a CHILD invitation -> MUST FAIL security rules!
+        val spoofParentAttempt = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyId).collection("members").document(childUid).set(
+                    hashMapOf(
+                        "id" to childUid,
+                        "uid" to childUid,
+                        "name" to "Spoofed Child",
+                        "role" to "PARENT",
+                        "inviteCode" to childInvite.inviteCode
+                    )
+                ).awaitTask()
+            }
+        }
+        assertTrue("Recipient of CHILD invitation must not be able to elevate role to PARENT", spoofParentAttempt.isFailure)
+
+        // Legitimate redemption of CHILD invitation -> assigns CHILD and never PARENT
+        val redeemChildRes = withTimeout(timeoutMs) {
+            childRepo.redeemInvitationAndJoinFamilyInCloud(
+                inviteCode = childInvite.inviteCode,
+                memberDisplayName = "נועה כהן",
+                photoUrl = "https://example.com/noa.jpg"
+            )
+        }
+        assertTrue("Redeeming valid CHILD invitation must succeed: ${redeemChildRes.exceptionOrNull()}", redeemChildRes.isSuccess)
+        val childMemberState = redeemChildRes.getOrThrow()
+        assertEquals("Redeemed CHILD invitation must assign CHILD role", UserRole.CHILD, childMemberState.role)
+
+        // Verify in Firestore that child is in memberIds/memberUids, NOT in adminUids, and has role = CHILD
+        val famDocAfterChild = withTimeout(timeoutMs) {
+            firestore.collection("families").document(familyId).get().awaitTask()
+        }
+        val adminUidsAfterChild = (famDocAfterChild.get("adminUids") as? List<*>)?.filterIsInstance<String>() ?: emptyList()
+        assertFalse("Child UID must never be added to adminUids", adminUidsAfterChild.contains(childUid))
+
+        // 5. Child cannot create tasks, delete tasks, invite members, or promote self to PARENT in Firestore
+        val illegalChildTask = FamilyTask(
+            id = "task_illegal_by_child_${System.currentTimeMillis()}",
+            familyId = familyId,
+            title = "Child Created Task",
+            category = TaskCategory.OTHER,
+            assignedToMemberId = parentUid,
+            dateEpochDay = LocalDate.now().toEpochDay()
+        )
+        val childCreateTaskRes = withTimeout(timeoutMs) { childRepo.createTaskInCloud(illegalChildTask) }
+        assertTrue("CHILD creating a task in Firestore must fail", childCreateTaskRes.isFailure)
+
+        val childCreateInviteRes = withTimeout(timeoutMs) {
+            childRepo.createRoleInvitationInCloud(UserRole.CHILD, "Friend", familyId)
+        }
+        assertTrue("CHILD creating an invitation in Firestore must fail", childCreateInviteRes.isFailure)
+
+        val childSelfPromoteAttempt = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyId).collection("members").document(childUid)
+                    .update("role", "PARENT").awaitTask()
+            }
+        }
+        assertTrue("CHILD promoting self to PARENT in Firestore must fail", childSelfPromoteAttempt.isFailure)
+
+        // 6. Second parent redeems the PARENT invitation -> receives PARENT role and is added to adminUids
+        val secondParentUid = signInTestUser(secondParentEmail)
+        val secondParentRepo = repo()
+        val redeemParentRes = withTimeout(timeoutMs) {
+            secondParentRepo.redeemInvitationAndJoinFamilyInCloud(
+                inviteCode = parentInvite.inviteCode,
+                memberDisplayName = "דוד כהן",
+                familyIdentity = FamilyIdentity.FATHER
+            )
+        }
+        assertTrue("Redeeming valid PARENT invitation must succeed: ${redeemParentRes.exceptionOrNull()}", redeemParentRes.isSuccess)
+        assertEquals(UserRole.PARENT, redeemParentRes.getOrThrow().role)
+        assertEquals(FamilyIdentity.FATHER, redeemParentRes.getOrThrow().familyIdentity)
+    }
+
+    @Test
+    fun testV16FatherAndMotherProfilePersistenceAcrossAppRestartsAndAntiOverwrite() = runBlocking {
+        val fatherEmail = "father_persist_${System.currentTimeMillis()}@example.com"
+        val motherEmail = "mother_persist_${System.currentTimeMillis()}@example.com"
+
+        // 1. Father signs in, configures family name "משפחת אלון" and personal profile as FATHER
+        val fatherUid = signInTestUser(fatherEmail)
+        val firstLaunchRepo = repo()
+
+        val createdState = withTimeout(timeoutMs) {
+            firstLaunchRepo.createFamilyAsParent(
+                familyNameInput = "משפחת אלון",
+                parentDisplayName = "דני (אבא)",
+                creatorUidOverride = fatherUid,
+                creatorEmailOverride = fatherEmail,
+                familyIdentity = FamilyIdentity.FATHER
+            )
+        }.getOrThrow()
+
+        val familyId = createdState.familyId
+        assertEquals("משפחת אלון", createdState.familyName)
+        assertEquals(UserRole.PARENT, createdState.role)
+        assertEquals(FamilyIdentity.FATHER, createdState.familyIdentity)
+
+        // Verify Firestore /users/{uid} and /families/{familyId}/members/{uid} both persisted familyIdentity = FATHER
+        val userDocSnap = withTimeout(timeoutMs) {
+            firestore.collection("users").document(fatherUid).get().awaitTask()
+        }
+        assertEquals("FATHER", userDocSnap.getString("familyIdentity"))
+        assertEquals("PARENT", userDocSnap.getString("role"))
+        assertEquals("משפחת אלון", userDocSnap.getString("familyName"))
+        assertEquals(familyId, userDocSnap.getString("familyId"))
+
+        val memberDocSnap = withTimeout(timeoutMs) {
+            firestore.collection("families").document(familyId).collection("members").document(fatherUid).get().awaitTask()
+        }
+        assertEquals("FATHER", memberDocSnap.getString("familyIdentity"))
+        assertEquals("PARENT", memberDocSnap.getString("role"))
+        assertEquals("דני (אבא)", memberDocSnap.getString("name"))
+
+        // 2. Simulate closing and reopening FamilyTasks with the existing FirebaseAuth session
+        firstLaunchRepo.detachAll()
+        val reopenedRepo = repo()
+
+        val restoredMembership = withTimeout(timeoutMs) {
+            reopenedRepo.checkAuthenticatedUserMembership(
+                uid = fatherUid,
+                email = fatherEmail,
+                displayName = "Dani Alon"
+            )
+        }
+
+        assertTrue("Reopened app must restore ActiveMember state", restoredMembership is FamilyMembershipState.ActiveMember)
+        val activeFather = restoredMembership as FamilyMembershipState.ActiveMember
+        assertEquals("Family ID must persist across restart", familyId, activeFather.familyId)
+        assertEquals("Family name must persist across restart", "משפחת אלון", activeFather.familyName)
+        assertEquals("Father must remain FATHER after restart", FamilyIdentity.FATHER, activeFather.familyIdentity)
+        assertEquals("Father must retain PARENT authorization role", UserRole.PARENT, activeFather.role)
+        assertEquals("Current member familyIdentity must be FATHER", FamilyIdentity.FATHER, reopenedRepo.currentMember.value.familyIdentity)
+        assertEquals("Current member display name must be preserved", "דני (אבא)", reopenedRepo.currentMember.value.name)
+        assertTrue("StartupState must transition to ReadyToEnterDashboard", reopenedRepo.startupState.value is StartupState.ReadyToEnterDashboard)
+
+        // 3. Ensure createFamilyInCloud / createFamilyAsParent has create-if-absent semantics and does NOT overwrite existing profile
+        val accidentalReinit = withTimeout(timeoutMs) {
+            reopenedRepo.createFamilyInCloud(
+                familyName = "משפחת ישראלי",
+                creatorName = "אמא",
+                creatorEmail = fatherEmail,
+                familyIdentity = FamilyIdentity.MOTHER
+            )
+        }.getOrThrow()
+
+        assertEquals("Must not create duplicate replacement family", familyId, accidentalReinit.familyId)
+        assertEquals("Must not overwrite existing family name", "משפחת אלון", accidentalReinit.familyName)
+        assertEquals("Must not overwrite existing FATHER identity to MOTHER", FamilyIdentity.FATHER, accidentalReinit.familyIdentity)
+
+        // 4. Mother joins via PARENT invitation with FamilyIdentity.MOTHER and persists across restart
+        val motherInvite = withTimeout(timeoutMs) {
+            reopenedRepo.createRoleInvitationInCloud(
+                invitedRole = UserRole.PARENT,
+                inviteeNameHint = "רונית (אמא)",
+                familyIdOverride = familyId
+            )
+        }.getOrThrow()
+
+        val motherUid = signInTestUser(motherEmail)
+        val motherRepo = repo()
+        val motherJoined = withTimeout(timeoutMs) {
+            motherRepo.redeemInvitationAndJoinFamily(
+                rawCode = motherInvite.inviteCode,
+                memberDisplayName = "רונית (אמא)",
+                joiningUidOverride = motherUid,
+                joiningEmailOverride = motherEmail,
+                familyIdentity = FamilyIdentity.MOTHER
+            )
+        }.getOrThrow()
+
+        assertEquals(UserRole.PARENT, motherJoined.role)
+        assertEquals(FamilyIdentity.MOTHER, motherJoined.familyIdentity)
+
+        // Restart Mother's app session -> remains MOTHER with PARENT role
+        motherRepo.detachAll()
+        val motherReopenedRepo = repo()
+        val motherRestored = withTimeout(timeoutMs) {
+            motherReopenedRepo.checkAuthenticatedUserMembership(
+                uid = motherUid,
+                email = motherEmail,
+                displayName = "Ronit Alon"
+            )
+        } as FamilyMembershipState.ActiveMember
+
+        assertEquals(FamilyIdentity.MOTHER, motherRestored.familyIdentity)
+        assertEquals(UserRole.PARENT, motherRestored.role)
+        assertEquals("משפחת אלון", motherRestored.familyName)
+    }
+
     private val activeRepos = mutableListOf<FamilyRepository>()
 
     private fun repo(): FamilyRepository {
@@ -1084,4 +1358,5 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         }
     }
 }
+
 

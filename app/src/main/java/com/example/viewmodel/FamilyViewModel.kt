@@ -1,71 +1,106 @@
 package com.example.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.auth.AuthState
 import com.example.auth.FirebaseAuthManager
 import com.example.data.FamilyRepository
 import com.example.model.*
 import com.google.firebase.auth.FirebaseUser
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.time.LocalDate
-
-enum class AppScreen {
-    TASKS,
-    CALENDAR,
-    TIMETABLE,
-    FILES,
-    ADMIN_DASHBOARD,
-    SETTINGS,
-    GEMINI
-}
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 enum class CalendarViewMode {
-    MONTH, WEEK, DAY
+    MONTH,
+    WEEK,
+    DAY
 }
 
 class FamilyViewModel(
-    private val repository: FamilyRepository = FamilyRepository(),
-    private val geminiService: com.example.data.GeminiService = com.example.data.GeminiService(),
-    val authManager: FirebaseAuthManager = FirebaseAuthManager.getInstance()
+    val repository: FamilyRepository = FamilyRepository(),
+    val authManager: FirebaseAuthManager = FirebaseAuthManager()
 ) : ViewModel() {
 
-    // Auth Manager & Reactive States
-    val authState: StateFlow<AuthState> = authManager.authState
-    val currentFirebaseUser: StateFlow<FirebaseUser?> = authManager.currentUser
-
-    // Main Flows
+    // Core data streams from Repository
+    val familyName: StateFlow<String> = repository.familyName
     val members: StateFlow<List<FamilyMember>> = repository.members
+    val currentMember: StateFlow<FamilyMember> = repository.currentMember
     val tasks: StateFlow<List<FamilyTask>> = repository.tasks
-    val periods: StateFlow<List<SchedulePeriod>> = repository.periods
+    val rewards: StateFlow<List<RewardItem>> = repository.rewards
+    val localRoomTasksFlow: Flow<List<Task>> = repository.localRoomTasksFlow
+    val schedulePeriods: StateFlow<List<SchedulePeriod>> = repository.schedulePeriods
     val folders: StateFlow<List<DocumentFolder>> = repository.folders
-    val files: StateFlow<List<FamilyDocument>> = repository.files
-    val notifications: StateFlow<List<AppNotification>> = repository.notifications
-    val latestAlert: StateFlow<AppNotification?> = repository.latestAlert
-    val settings: StateFlow<AppSettings> = repository.settings
+    val documents: StateFlow<List<FamilyDocument>> = repository.documents
+    val notifications: StateFlow<List<FamilyNotificationAlert>> = repository.notifications
+    val activeBannerAlert: StateFlow<FamilyNotificationAlert?> = repository.activeBannerAlert
 
-    // Navigation and View States
-    private val _currentScreen = MutableStateFlow(AppScreen.TASKS)
+    // V1.6 Membership, Startup State Machine & Role-Specific Invitation streams
+    val startupState: StateFlow<StartupState> = repository.startupState
+    val membershipState: StateFlow<FamilyMembershipState> = repository.membershipState
+    val pendingInvitations: StateFlow<List<FamilyInvitation>> = repository.pendingInvitations
+
+    private val _validatedInvitationPreview = MutableStateFlow<FamilyInvitation?>(null)
+    val validatedInvitationPreview: StateFlow<FamilyInvitation?> = _validatedInvitationPreview.asStateFlow()
+
+    private val _invitationErrorMessage = MutableStateFlow<String?>(null)
+    val invitationErrorMessage: StateFlow<String?> = _invitationErrorMessage.asStateFlow()
+
+    private val _isProcessingFamilyAction = MutableStateFlow(false)
+    val isProcessingFamilyAction: StateFlow<Boolean> = _isProcessingFamilyAction.asStateFlow()
+
+    // Google Auth & Cloud Family Group streams
+    val isGoogleSignedIn: StateFlow<Boolean> = repository.isGoogleSignedIn
+    val googleUserEmail: StateFlow<String> = repository.googleUserEmail
+    val googleUserDisplayName: StateFlow<String> = repository.googleUserDisplayName
+    val googleUserPhotoUrl: StateFlow<String?> = repository.googleUserPhotoUrl
+    val cloudFamilyGroup: StateFlow<CloudFamilyGroup> = repository.cloudFamilyGroup
+    val autoSyncCalendar: StateFlow<Boolean> = repository.autoSyncCalendar
+    val autoSyncDrive: StateFlow<Boolean> = repository.autoSyncDrive
+
+    // Real Firebase Auth state streams
+    val firebaseCurrentUser: StateFlow<FirebaseUser?> = authManager.currentUser
+    private val _isAuthenticating = MutableStateFlow(false)
+    val isAuthenticating: StateFlow<Boolean> = _isAuthenticating.asStateFlow()
+
+    private val _authErrorMessage = MutableStateFlow<String?>(null)
+    val authErrorMessage: StateFlow<String?> = _authErrorMessage.asStateFlow()
+
+    // Preferences
+    val appLanguage: StateFlow<AppLanguage> = repository.appLanguage
+    val themeMode: StateFlow<AppThemeMode> = repository.themeMode
+    val firstDayOfWeek: StateFlow<FirstDayOfWeek> = repository.firstDayOfWeek
+    val biometricLockEnabled: StateFlow<Boolean> = repository.biometricLockEnabled
+    val isAppUnlocked: StateFlow<Boolean> = repository.isAppUnlocked
+    val tenMinuteClassAlertsEnabled: StateFlow<Boolean> = repository.tenMinuteClassAlertsEnabled
+    val timetableViewMode: StateFlow<TimetableViewMode> = repository.timetableViewMode
+    val filesViewMode: StateFlow<FilesViewMode> = repository.filesViewMode
+
+    // Navigation & UI States
+    private val _currentScreen = MutableStateFlow(AppScreen.HOME)
     val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
+
+    private val _selectedDate = MutableStateFlow(LocalDate.now())
+    val selectedDate: StateFlow<LocalDate> = _selectedDate.asStateFlow()
 
     private val _calendarMode = MutableStateFlow(CalendarViewMode.MONTH)
     val calendarMode: StateFlow<CalendarViewMode> = _calendarMode.asStateFlow()
 
-    private val _selectedCalendarDate = MutableStateFlow(LocalDate.now())
-    val selectedCalendarDate: StateFlow<LocalDate> = _selectedCalendarDate.asStateFlow()
-
-    private val _selectedMemberFilter = MutableStateFlow<String?>(null) // null = all members
+    private val _selectedMemberFilter = MutableStateFlow<String?>(null)
     val selectedMemberFilter: StateFlow<String?> = _selectedMemberFilter.asStateFlow()
 
-    private val _selectedChildTimetableId = MutableStateFlow("user_maya")
-    val selectedChildTimetableId: StateFlow<String> = _selectedChildTimetableId.asStateFlow()
+    private val _selectedChildForTimetable = MutableStateFlow("m_kid1")
+    val selectedChildForTimetable: StateFlow<String> = _selectedChildForTimetable.asStateFlow()
 
     private val _selectedFolderId = MutableStateFlow<String?>("f_school")
     val selectedFolderId: StateFlow<String?> = _selectedFolderId.asStateFlow()
 
-    // Dialog & Sheet States
+    // Dialog / BottomSheet Visibility States
     private val _showAddTaskDialog = MutableStateFlow(false)
     val showAddTaskDialog: StateFlow<Boolean> = _showAddTaskDialog.asStateFlow()
 
@@ -75,8 +110,8 @@ class FamilyViewModel(
     private val _showInviteMemberDialog = MutableStateFlow(false)
     val showInviteMemberDialog: StateFlow<Boolean> = _showInviteMemberDialog.asStateFlow()
 
-    private val _memberToEdit = MutableStateFlow<FamilyMember?>(null)
-    val memberToEdit: StateFlow<FamilyMember?> = _memberToEdit.asStateFlow()
+    private val _showEditFamilyNameDialog = MutableStateFlow(false)
+    val showEditFamilyNameDialog: StateFlow<Boolean> = _showEditFamilyNameDialog.asStateFlow()
 
     private val _showAddPeriodDialog = MutableStateFlow(false)
     val showAddPeriodDialog: StateFlow<Boolean> = _showAddPeriodDialog.asStateFlow()
@@ -87,86 +122,90 @@ class FamilyViewModel(
     private val _showAddFolderDialog = MutableStateFlow(false)
     val showAddFolderDialog: StateFlow<Boolean> = _showAddFolderDialog.asStateFlow()
 
-    private val _showNotificationsSheet = MutableStateFlow(false)
-    val showNotificationsSheet: StateFlow<Boolean> = _showNotificationsSheet.asStateFlow()
-
     private val _showGoogleProfileSheet = MutableStateFlow(false)
     val showGoogleProfileSheet: StateFlow<Boolean> = _showGoogleProfileSheet.asStateFlow()
 
-    private val _showEditFamilyNameDialog = MutableStateFlow(false)
-    val showEditFamilyNameDialog: StateFlow<Boolean> = _showEditFamilyNameDialog.asStateFlow()
+    private val _showNotificationHistorySheet = MutableStateFlow(false)
+    val showNotificationHistorySheet: StateFlow<Boolean> = _showNotificationHistorySheet.asStateFlow()
 
     private val _showGoogleSignInDialog = MutableStateFlow(false)
     val showGoogleSignInDialog: StateFlow<Boolean> = _showGoogleSignInDialog.asStateFlow()
 
-    // Gemini AI states
-    private val _geminiLoading = MutableStateFlow(false)
-    val geminiLoading: StateFlow<Boolean> = _geminiLoading.asStateFlow()
+    // AI Assistant States
+    private val _aiMessages = MutableStateFlow<List<Pair<Boolean, String>>>(
+        listOf(
+            false to "שלום! אני העוזר המשפחתי החכם (מופעל ב-Gemini AI) ✨\n" +
+                "אני מחובר ליומן המשפחתי, למערכת השעות ולתיקיית ה-Google Drive שלכם. איך אפשר לעזור היום?"
+        )
+    )
+    val aiMessages: StateFlow<List<Pair<Boolean, String>>> = _aiMessages.asStateFlow()
 
-    private val _geminiResponse = MutableStateFlow<String?>(null)
-    val geminiResponse: StateFlow<String?> = _geminiResponse.asStateFlow()
+    private val _isAiGenerating = MutableStateFlow(false)
+    val isAiGenerating: StateFlow<Boolean> = _isAiGenerating.asStateFlow()
 
-    // Status message / toast
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
 
-    init {
-        // Auto dismiss latest push banner after 4.5 seconds
-        viewModelScope.launch {
-            latestAlert.collectLatest { alert ->
-                if (alert != null) {
-                    delay(4500)
-                    repository.dismissLatestAlert()
-                }
-            }
+    /**
+     * Restores an existing FirebaseAuth session on application launch without restarting
+     * interactive Google Sign-In or overwriting existing Firestore profile/family fields.
+     */
+    fun restoreExistingGoogleSession() {
+        val user = firebaseCurrentUser.value
+        if (user != null) {
+            repository.onGoogleSignInSuccess(
+                email = user.email.orEmpty(),
+                displayName = user.displayName.orEmpty(),
+                photoUrl = user.photoUrl?.toString()
+            )
         }
     }
 
-    val currentMember: FamilyMember
-        get() = repository.currentMember
+    /**
+     * Retries loading the authenticated user's profile and family membership from Firestore
+     * after a transient network error without resetting any profile or family data.
+     */
+    fun retryStartupLoading() {
+        viewModelScope.launch {
+            repository.retryStartupLoading()
+        }
+    }
+
+    // --- Navigation Actions ---
 
     fun navigateTo(screen: AppScreen) {
+        if (screen == AppScreen.ADMIN_DASHBOARD && !currentMember.value.isParent) {
+            _snackbarMessage.value = "גישה לניהול המשפחה מותרת להורים בלבד 🔒"
+            return
+        }
         _currentScreen.value = screen
     }
 
-    fun setCalendarMode(mode: CalendarViewMode) {
-        _calendarMode.value = mode
+    fun selectDate(date: LocalDate) {
+        _selectedDate.value = date
     }
 
-    fun setSelectedCalendarDate(date: LocalDate) {
-        _selectedCalendarDate.value = date
+    fun setCalendarViewMode(mode: CalendarViewMode) {
+        _calendarMode.value = mode
     }
 
     fun setMemberFilter(memberId: String?) {
         _selectedMemberFilter.value = memberId
     }
 
-    fun setSelectedChildTimetable(childId: String) {
-        _selectedChildTimetableId.value = childId
+    fun selectChildForTimetable(childId: String) {
+        _selectedChildForTimetable.value = childId
     }
 
-    fun setSelectedFolder(folderId: String?) {
+    fun selectFolder(folderId: String?) {
         _selectedFolderId.value = folderId
     }
 
-    fun switchUser(memberId: String) {
-        repository.switchCurrentUser(memberId)
-        val member = members.value.find { it.id == memberId }
-        val isHebrew = settings.value.language == AppLanguage.HEBREW
-        val msg = if (isHebrew) "הוחלף משתמש ל: ${member?.name}" else "Switched user to: ${member?.name}"
-        showToast(msg)
-    }
+    // --- Dialog & Sheet Controls ---
 
-    // Dialog controls
-    fun openAddTaskDialog() {
-        _taskToEdit.value = null
-        _showAddTaskDialog.value = true
-    }
-
-    fun openEditTaskDialog(task: FamilyTask) {
-        if (!currentMember.isAdmin) {
-            val isHeb = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHeb) "רק הורים ומנהלים מורשים לערוך משימות" else "Only parents can edit tasks")
+    fun openAddTaskDialog(task: FamilyTask? = null) {
+        if (!currentMember.value.isParent) {
+            _snackbarMessage.value = "רק הורים יכולים ליצור או לערוך משימות משפחתיות 🔒"
             return
         }
         _taskToEdit.value = task
@@ -174,337 +213,686 @@ class FamilyViewModel(
     }
 
     fun closeAddTaskDialog() {
-        _taskToEdit.value = null
         _showAddTaskDialog.value = false
-    }
-
-    fun initContext(context: android.content.Context) {
-        repository.setContext(context)
+        _taskToEdit.value = null
     }
 
     fun openInviteMemberDialog() {
-        if (!currentMember.isAdmin) {
-            val isHeb = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHeb) "רק מנהל ראשי או משני יכול להזמין חברים למשפחה" else "Only household managers can invite members")
+        if (!currentMember.value.isParent) {
+            _snackbarMessage.value = "רק הורים יכולים להזמין חברים למשפחה 🔒"
             return
         }
-        _memberToEdit.value = null
-        _showInviteMemberDialog.value = true
-    }
-
-    fun openEditMemberDialog(member: FamilyMember) {
-        if (!currentMember.isAdmin && member.id != currentMember.id) {
-            val isHeb = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHeb) "רק מנהלי המשפחה מורשים לערוך חברים אחרים" else "Only managers can edit other members")
-            return
-        }
-        _memberToEdit.value = member
         _showInviteMemberDialog.value = true
     }
 
     fun closeInviteMemberDialog() {
-        _memberToEdit.value = null
         _showInviteMemberDialog.value = false
     }
 
-    fun openAddPeriodDialog() {
-        _periodToEdit.value = null
-        _showAddPeriodDialog.value = true
+    fun openEditFamilyNameDialog() {
+        if (!currentMember.value.isParent) {
+            _snackbarMessage.value = "רק הורים יכולים לשנות את שם המשפחה 🔒"
+            return
+        }
+        _showEditFamilyNameDialog.value = true
     }
 
-    fun openEditPeriodDialog(period: SchedulePeriod) {
+    fun closeEditFamilyNameDialog() {
+        _showEditFamilyNameDialog.value = false
+    }
+
+    fun openAddPeriodDialog(period: SchedulePeriod? = null) {
+        if (!currentMember.value.isParent) {
+            _snackbarMessage.value = "רק הורים יכולים לערוך את מערכת השעות 🔒"
+            return
+        }
         _periodToEdit.value = period
         _showAddPeriodDialog.value = true
     }
 
     fun closeAddPeriodDialog() {
-        _periodToEdit.value = null
         _showAddPeriodDialog.value = false
+        _periodToEdit.value = null
     }
 
-    fun openAddFolderDialog() { _showAddFolderDialog.value = true }
-    fun closeAddFolderDialog() { _showAddFolderDialog.value = false }
-
-    fun openNotificationsSheet() {
-        _showNotificationsSheet.value = true
-        repository.markNotificationsRead()
+    fun openAddFolderDialog() {
+        _showAddFolderDialog.value = true
     }
-    fun closeNotificationsSheet() { _showNotificationsSheet.value = false }
 
-    fun openGoogleProfileSheet() { _showGoogleProfileSheet.value = true }
-    fun closeGoogleProfileSheet() { _showGoogleProfileSheet.value = false }
-
-    fun openEditFamilyNameDialog() {
-        if (!currentMember.isAdmin) {
-            val isHeb = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHeb) "רק מנהלי הבית מורשים לעדכן את שם המשפחה" else "Only managers can rename the household")
-            return
-        }
-        _showEditFamilyNameDialog.value = true
+    fun closeAddFolderDialog() {
+        _showAddFolderDialog.value = false
     }
-    fun closeEditFamilyNameDialog() { _showEditFamilyNameDialog.value = false }
+
+    fun openGoogleProfileSheet() {
+        _showGoogleProfileSheet.value = true
+    }
+
+    fun closeGoogleProfileSheet() {
+        _showGoogleProfileSheet.value = false
+    }
+
+    fun openNotificationHistorySheet() {
+        _showNotificationHistorySheet.value = true
+        repository.markAllNotificationsRead()
+    }
+
+    fun closeNotificationHistorySheet() {
+        _showNotificationHistorySheet.value = false
+    }
+
+    fun openGoogleSignInDialog() {
+        _showGoogleSignInDialog.value = true
+    }
+
+    fun closeGoogleSignInDialog() {
+        _showGoogleSignInDialog.value = false
+    }
+
+    // --- Family & Google Account Operations (V1.6) ---
 
     fun updateFamilyName(newName: String) {
-        if (!currentMember.isAdmin) {
-            val isHeb = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHeb) "רק מנהלי הבית מורשים לעדכן את שם המשפחה" else "Only managers can rename the household")
+        if (!currentMember.value.isParent) {
+            _snackbarMessage.value = "רק הורים רשאים לעדכן את שם המשפחה 🔒"
             return
         }
-        val trimmed = newName.trim()
-        if (trimmed.isNotBlank()) {
-            repository.updateFamilyName(trimmed)
-            closeEditFamilyNameDialog()
-            val isHeb = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHeb) "שם המשפחה עודכן ל-\"$trimmed\" בהצלחה! ✨" else "Family name updated to \"$trimmed\"! ✨")
+        repository.updateFamilyName(newName)
+        _showEditFamilyNameDialog.value = false
+        _snackbarMessage.value = "שם המשפחה עודכן ל-\"$newName\" וסונכרן לענן ✓"
+    }
+
+    /**
+     * Updates the current user's personal profile (`name`, `familyIdentity` such as FATHER or MOTHER,
+     * and `avatarEmoji`) and persists it to Firestore without changing their authorization role.
+     */
+    fun updateCurrentUserProfile(
+        newName: String? = null,
+        newIdentity: FamilyIdentity? = null,
+        newAvatarEmoji: String? = null
+    ) {
+        val ok = repository.updateCurrentUserProfile(
+            newName = newName ?: currentMember.value.name,
+            newIdentity = newIdentity,
+            newAvatarEmoji = newAvatarEmoji
+        )
+        if (ok) {
+            val member = currentMember.value
+            val isHe = appLanguage.value == AppLanguage.HEBREW
+            val idLabel = member.familyIdentity.getDisplayName(isHe)
+            _snackbarMessage.value = if (isHe) {
+                "הפרופיל האישי עודכן (${member.name} • $idLabel) ונשמר בענן ✓"
+            } else {
+                "Profile updated (${member.name} • $idLabel) and saved to cloud ✓"
+            }
         }
     }
 
-    fun openGoogleSignInDialog() { _showGoogleSignInDialog.value = true }
-    fun closeGoogleSignInDialog() { _showGoogleSignInDialog.value = false }
-
-    fun completeGoogleSignIn(accountEmail: String) {
-        repository.setGoogleSignInCompleted(true, accountEmail)
-        closeGoogleSignInDialog()
-        val isHeb = settings.value.language == AppLanguage.HEBREW
-        showToast(if (isHeb) "התחברת בהצלחה עם $accountEmail! 🌟" else "Connected with $accountEmail! 🌟")
-    }
-
-    fun setFilesViewMode(mode: FilesViewMode) {
-        repository.updateSettings(settings.value.copy(filesViewMode = mode))
-    }
-
-    fun setTimetableViewMode(mode: TimetableViewMode) {
-        repository.updateSettings(settings.value.copy(timetableViewMode = mode))
-    }
-
-    // Actions
-    fun saveTask(task: FamilyTask) {
-        val exists = tasks.value.any { it.id == task.id }
-        if (exists) {
-            if (!currentMember.isAdmin) {
-                val isHebrew = settings.value.language == AppLanguage.HEBREW
-                showToast(if (isHebrew) "רק הורים ומנהלים מורשים לערוך משימות" else "Only parents can edit tasks")
-                closeAddTaskDialog()
-                return
+    /**
+     * Launches Google Sign-In via Jetpack Credential Manager + Firebase Auth.
+     * V1.6: Does NOT automatically create a family or assign PARENT.
+     * Instead, `repository.onGoogleSignInSuccess` checks Firestore membership and either
+     * restores the user's validated family/role or transitions to `FamilyMembershipState.NoMembership`.
+     */
+    fun launchRealGoogleSignIn(
+        context: Context,
+        familyGroupName: String? = null,
+        onAuthenticated: ((email: String, displayName: String, photoUrl: String?) -> Unit)? = null
+    ) {
+        _isAuthenticating.value = true
+        _authErrorMessage.value = null
+        viewModelScope.launch {
+            val result = authManager.signInWithGoogle(context)
+            _isAuthenticating.value = false
+            result.onSuccess { user ->
+                val email = user.email ?: "user@gmail.com"
+                val name = user.displayName ?: email.substringBefore("@")
+                val photoUrl = user.photoUrl?.toString()
+                repository.onGoogleSignInSuccess(email, name, familyGroupName, photoUrl)
+                _showGoogleSignInDialog.value = false
+                onAuthenticated?.invoke(email, name, photoUrl)
+            }.onFailure { error ->
+                val msg = error.localizedMessage ?: "ההתחברות לחשבון Google נכשלה."
+                _authErrorMessage.value = msg
+                _snackbarMessage.value = msg
             }
-            repository.updateTask(task)
-            val isHebrew = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHebrew) "המשימה עודכנה בהצלחה! ✓" else "Task updated successfully! ✓")
+        }
+    }
+
+    fun clearAuthError() {
+        _authErrorMessage.value = null
+    }
+
+    fun signInWithGoogleAccount(email: String, displayName: String, familyGroupName: String? = null) {
+        repository.onGoogleSignInSuccess(email, displayName, familyGroupName)
+        _showGoogleSignInDialog.value = false
+    }
+
+    /**
+     * V1.6 Requirement 3:
+     * Called when an authenticated user with no family explicitly chooses "Create a family".
+     * Creates the family in Firestore, assigns the creator the PARENT authorization role,
+     * and persists their selected [FamilyIdentity] (`FATHER` or `MOTHER`).
+     */
+    fun createNewFamilyOnFirstLogin(
+        familyNameInput: String,
+        parentDisplayName: String,
+        familyIdentity: FamilyIdentity = FamilyIdentity.FATHER,
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        _isProcessingFamilyAction.value = true
+        _invitationErrorMessage.value = null
+        viewModelScope.launch {
+            val result = repository.createFamilyAsParent(
+                familyNameInput = familyNameInput,
+                parentDisplayName = parentDisplayName,
+                familyIdentity = familyIdentity
+            )
+            _isProcessingFamilyAction.value = false
+            result.onSuccess { active ->
+                _currentScreen.value = AppScreen.HOME
+                val identityLabel = active.familyIdentity.labelHe
+                _snackbarMessage.value = "ברוכים הבאים! משפחת \"${active.familyName}\" נוצרה בהצלחה ($identityLabel • הורה) 🎉"
+                onComplete?.invoke(true)
+            }.onFailure { err ->
+                _invitationErrorMessage.value = err.localizedMessage ?: "יצירת המשפחה נכשלה. נסו שוב."
+                onComplete?.invoke(false)
+            }
+        }
+    }
+
+    /**
+     * V1.6 Requirement 5 (Step 1 of Joining Flow):
+     * Validates an invitation code entered by the user and exposes `validatedInvitationPreview`
+     * showing the family name and the immutable invited role (`PARENT` or `CHILD`).
+     */
+    fun validateInviteCodeForJoining(rawCode: String) {
+        _invitationErrorMessage.value = null
+        _validatedInvitationPreview.value = null
+        val clean = rawCode.trim().uppercase()
+        if (clean.isBlank()) {
+            _invitationErrorMessage.value = "נא להזין קוד הזמנה."
+            return
+        }
+        _isProcessingFamilyAction.value = true
+        viewModelScope.launch {
+            when (val res = repository.validateInvitationCode(clean)) {
+                is InvitationValidationResult.Valid -> {
+                    _isProcessingFamilyAction.value = false
+                    _validatedInvitationPreview.value = res.invitation
+                }
+                is InvitationValidationResult.Invalid -> {
+                    _isProcessingFamilyAction.value = false
+                    _invitationErrorMessage.value = res.messageHe
+                }
+            }
+        }
+    }
+
+    fun clearValidatedInvitationPreview() {
+        _validatedInvitationPreview.value = null
+        _invitationErrorMessage.value = null
+    }
+
+    /**
+     * V1.6 Requirement 5 (Step 2 of Joining Flow):
+     * Confirms joining the family using the validated invitation code.
+     * Creates membership with the exact role specified by the invitation (`CHILD` or `PARENT`),
+     * preserves the user's [FamilyIdentity] (`FATHER`/`MOTHER` for parents),
+     * and marks the invitation as redeemed.
+     */
+    fun confirmJoinFamilyWithValidatedInvite(
+        rawCode: String,
+        memberDisplayName: String,
+        familyIdentity: FamilyIdentity? = null,
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        _isProcessingFamilyAction.value = true
+        _invitationErrorMessage.value = null
+        viewModelScope.launch {
+            val result = repository.redeemInvitationAndJoinFamily(
+                rawCode = rawCode,
+                memberDisplayName = memberDisplayName,
+                familyIdentity = familyIdentity
+            )
+            _isProcessingFamilyAction.value = false
+            result.onSuccess { active ->
+                _validatedInvitationPreview.value = null
+                _currentScreen.value = AppScreen.HOME
+                val roleLabel = if (active.role == UserRole.PARENT) {
+                    "${active.familyIdentity.labelHe} (הורה)"
+                } else {
+                    "ילד/ה (חבר משפחה)"
+                }
+                _snackbarMessage.value = "הצטרפת בהצלחה למשפחת \"${active.familyName}\" בתפקיד $roleLabel! 🎉"
+                onComplete?.invoke(true)
+            }.onFailure { err ->
+                _invitationErrorMessage.value = err.localizedMessage ?: "ההצטרפות למשפחה נכשלה. בדקו את הקוד ונסו שוב."
+                onComplete?.invoke(false)
+            }
+        }
+    }
+
+    fun startNewCleanFamily(
+        familyNameInput: String,
+        adminNameInput: String,
+        emailInput: String,
+        familyIdentity: FamilyIdentity = FamilyIdentity.FATHER
+    ) {
+        repository.initializeCleanFamily(familyNameInput, adminNameInput, emailInput, familyIdentity)
+        _currentScreen.value = AppScreen.HOME
+        _snackbarMessage.value = "ברוכים הבאים! משפחת \"$familyNameInput\" נוצרה בהצלחה 🎉"
+    }
+
+    fun joinCloudFamilyByInviteCode(
+        inviteCode: String,
+        memberName: String,
+        memberEmail: String,
+        familyIdentity: FamilyIdentity? = null
+    ): Boolean {
+        val ok = repository.joinExistingCloudFamilyByCode(inviteCode, memberName, memberEmail, familyIdentity)
+        if (ok) {
+            _showGoogleSignInDialog.value = false
+            _currentScreen.value = AppScreen.HOME
+            _snackbarMessage.value = "הצטרפת למשפחה בענן בהצלחה! (קוד: ${inviteCode.uppercase()}) 🎉"
         } else {
-            repository.addTask(task)
+            _snackbarMessage.value = "קוד ההזמנה אינו תקף או שפג תוקפו"
+        }
+        return ok
+    }
+
+    fun signOutGoogleAccount() {
+        authManager.signOut()
+        repository.signOutGoogle()
+        _validatedInvitationPreview.value = null
+        _invitationErrorMessage.value = null
+        _showGoogleProfileSheet.value = false
+        _snackbarMessage.value = "התנתקת מחשבון Google"
+    }
+
+    fun switchMember(member: FamilyMember) {
+        repository.switchCurrentMember(member)
+        val isHe = appLanguage.value == AppLanguage.HEBREW
+        val identityTitle = "${member.familyIdentity.getDisplayName(isHe)} • ${member.role.getDisplayName(isHe)}"
+        _snackbarMessage.value = "פרופיל פעיל: ${member.name} ($identityTitle)"
+    }
+
+    /**
+     * V1.6 Requirement 4:
+     * Generates a role-specific invitation (`PARENT` or `CHILD`) and persists it in Firestore.
+     */
+    fun createRoleSpecificInvitation(
+        invitedRole: UserRole,
+        invitedNickname: String = "",
+        onCreated: ((FamilyInvitation) -> Unit)? = null
+    ) {
+        if (!currentMember.value.isParent) {
+            _snackbarMessage.value = "רק הורה רשאי ליצור הזמנות למשפחה 🔒"
+            return
+        }
+        viewModelScope.launch {
+            val result = repository.createRoleSpecificInvitation(
+                invitedRole = invitedRole,
+                invitedNickname = invitedNickname
+            )
+            result.onSuccess { invitation ->
+                val roleHe = if (invitation.invitedRole == UserRole.PARENT) "הורה" else "ילד/ה"
+                _snackbarMessage.value = "נוצר קוד הזמנה (${invitation.code}) לתפקיד $roleHe 🔑"
+                onCreated?.invoke(invitation)
+            }.onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "שגיאה ביצירת קוד ההזמנה"
+            }
+        }
+    }
+
+    fun inviteMember(
+        name: String,
+        emoji: String,
+        role: UserRole,
+        googleEmail: String?,
+        schoolGrade: String?
+    ): FamilyInvitation? {
+        val created = repository.inviteNewMember(name, emoji, role, googleEmail, schoolGrade)
+        if (created == null) {
+            _snackbarMessage.value = "רק הורה רשאי להזמין חברים למשפחה 🔒"
+        } else {
+            val roleHe = if (created.invitedRole == UserRole.PARENT) "הורה" else "ילד/ה"
+            _snackbarMessage.value = "נוצרה הזמנה (${created.code}) עבור ${name.ifBlank { roleHe }} בתפקיד $roleHe ✉️"
+        }
+        return created
+    }
+
+    fun revokePendingInvitation(code: String) {
+        if (repository.revokeInvitation(code)) {
+            _snackbarMessage.value = "קוד ההזמנה $code בוטל ✓"
+        } else {
+            _snackbarMessage.value = "רק הורה רשאי לבטל הזמנות 🔒"
+        }
+    }
+
+    fun acceptInvitation(memberIdOrCode: String) {
+        repository.acceptMemberInvitation(memberIdOrCode)
+        _snackbarMessage.value = "ההזמנה אושרה! החבר צורף למשפחה 🎉"
+    }
+
+    fun getWhatsAppInviteShareText(invitation: FamilyInvitation, isHebrew: Boolean): String {
+        return repository.getWhatsAppInviteShareText(invitation, isHebrew)
+    }
+
+    fun getDynamicInviteShareText(memberName: String, role: UserRole, isHebrew: Boolean): String {
+        return repository.getDynamicInviteShareText(memberName, role, isHebrew)
+    }
+
+    fun changeMemberRole(memberId: String, newRole: UserRole) {
+        val ok = repository.changeMemberRole(memberId, newRole)
+        if (ok) {
+            val roleHe = if (newRole.isParentRole) "הורה (מנהל משפחה)" else "ילד/ה (חבר משפחה)"
+            _snackbarMessage.value = "התפקיד עודכן ל-$roleHe ✓"
+        } else {
+            _snackbarMessage.value = "לא ניתן לשנות תפקיד להורה האחרון במשפחה (חייב להישאר לפחות הורה אחד) ⚠️"
+        }
+    }
+
+    fun removeMember(memberId: String) {
+        val ok = repository.removeFamilyMember(memberId)
+        if (ok) {
+            _snackbarMessage.value = "חבר המשפחה הוסר מהקבוצה"
+        } else {
+            _snackbarMessage.value = "לא ניתן להסיר את ההורה האחרון במשפחה ⚠️"
+        }
+    }
+
+    // --- Task Operations ---
+
+    fun toggleTask(taskId: String) {
+        val ok = repository.toggleTaskCompletion(taskId)
+        if (!ok) {
+            _snackbarMessage.value = "ילדים יכולים לסמן כבוצע רק משימות שמשויכות אליהם 🔒"
+        }
+    }
+
+    fun saveTask(
+        id: String?,
+        title: String,
+        description: String,
+        category: TaskCategory,
+        assignedToMemberId: String,
+        dateEpochDay: Long,
+        dueTimeFormatted: String,
+        priority: TaskPriority,
+        recurrence: TaskRecurrence,
+        points: Int
+    ) {
+        if (!currentMember.value.isParent) {
+            _snackbarMessage.value = "רק הורים יכולים ליצור או לערוך משימות 🔒"
+            return
+        }
+        if (id == null) {
+            val newTask = FamilyTask(
+                title = title,
+                description = description,
+                category = category,
+                assignedToMemberId = assignedToMemberId,
+                dateEpochDay = dateEpochDay,
+                dueTimeFormatted = dueTimeFormatted,
+                priority = priority,
+                recurrence = recurrence,
+                points = points
+            )
+            repository.addTask(newTask)
+            _snackbarMessage.value = "משימה חדשה נוספה וסונכרנה ליומן Google ✓"
+        } else {
+            val existing = tasks.value.find { it.id == id }
+            if (existing != null) {
+                repository.updateTask(
+                    existing.copy(
+                        title = title,
+                        description = description,
+                        category = category,
+                        assignedToMemberId = assignedToMemberId,
+                        dateEpochDay = dateEpochDay,
+                        dueTimeFormatted = dueTimeFormatted,
+                        priority = priority,
+                        recurrence = recurrence,
+                        points = points
+                    )
+                )
+                _snackbarMessage.value = "המשימה עודכנה בהצלחה ✓"
+            }
         }
         closeAddTaskDialog()
     }
 
-    fun addTask(task: FamilyTask) {
-        saveTask(task)
-    }
-
-    fun savePeriod(period: SchedulePeriod) {
-        val exists = periods.value.any { it.id == period.id }
-        if (exists) {
-            repository.updatePeriod(period)
-            val isHebrew = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHebrew) "השיעור במערכת עודכן בהצלחה! ✓" else "Period updated successfully! ✓")
-        } else {
-            repository.addPeriod(period)
-        }
-        closeAddPeriodDialog()
-    }
-
-    fun toggleTask(taskId: String) {
-        repository.toggleTask(taskId)
-    }
-
     fun deleteTask(taskId: String) {
-        repository.deleteTask(taskId)
-    }
-
-    fun sendNudge(task: FamilyTask) {
-        repository.sendNudge(task)
-    }
-
-    fun saveMember(memberId: String?, name: String, email: String, role: UserRole, avatarEmoji: String, schoolGrade: String? = null): Boolean {
-        if (!currentMember.isAdmin) {
-            val isHebrew = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHebrew) "רק מנהלי הבית מורשים להוסיף או לערוך חברי משפחה" else "Only managers can add or edit family members")
-            return false
+        if (!repository.deleteTask(taskId)) {
+            _snackbarMessage.value = "רק הורים יכולים למחוק משימות 🔒"
+            return
         }
-        return if (memberId != null) {
-            repository.updateMemberProfile(memberId, name, email, role, avatarEmoji, schoolGrade)
-            val isHebrew = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHebrew) "פרטי המשתמש עודכנו בהצלחה! ✓" else "User profile updated successfully! ✓")
-            closeInviteMemberDialog()
-            true
+        _snackbarMessage.value = "המשימה נמחקה"
+    }
+
+    fun redeemReward(reward: RewardItem) {
+        val ok = repository.redeemReward(reward)
+        if (ok) {
+            _snackbarMessage.value = "איזה כיף! מימשת את הפרס: ${reward.title} 🎁"
         } else {
-            addMember(name, email, role, avatarEmoji, schoolGrade)
+            _snackbarMessage.value = "אין מספיק נקודות למימוש הפרס עדיין 💪"
         }
     }
 
-    fun addMember(name: String, email: String, role: UserRole, avatarEmoji: String, schoolGrade: String? = null): Boolean {
-        if (!currentMember.isAdmin) {
-            val isHebrew = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHebrew) "רק מנהלי הבית מורשים להוסיף חברים חדשים" else "Only managers can add new members")
-            return false
+    fun sendParentNudge(task: FamilyTask) {
+        if (!currentMember.value.isParent) {
+            _snackbarMessage.value = "רק הורים יכולים לשלוח תזכורת לביצוע משימה 🔒"
+            return
         }
-        val success = repository.addMember(name, email, role, avatarEmoji, schoolGrade)
-        if (success) {
-            closeInviteMemberDialog()
-            val isHebrew = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHebrew) "הזמנה נשלחה בהצלחה עבור $name! 💌" else "Invitation sent for $name! 💌")
+        repository.sendParentNudgeForTask(task)
+        _snackbarMessage.value = "נשלחה תזכורת להתראה במכשיר! 👋"
+    }
+
+    // --- School Timetable Operations ---
+
+    fun saveSchedulePeriod(
+        id: String?,
+        childId: String,
+        day: SchoolDay,
+        periodIndex: Int,
+        subjectName: String,
+        roomNumber: String,
+        teacherName: String,
+        startTime: String,
+        endTime: String,
+        colorHex: Long,
+        tenMinuteAlertEnabled: Boolean
+    ) {
+        if (!currentMember.value.isParent) {
+            _snackbarMessage.value = "רק הורים יכולים לערוך את מערכת השעות 🔒"
+            return
+        }
+        val period = SchedulePeriod(
+            id = id ?: "p_${System.currentTimeMillis()}",
+            childId = childId,
+            day = day,
+            periodIndex = periodIndex,
+            subjectName = subjectName,
+            roomNumber = roomNumber,
+            teacherName = teacherName,
+            startTime = startTime,
+            endTime = endTime,
+            colorHex = colorHex,
+            tenMinuteAlertEnabled = tenMinuteAlertEnabled
+        )
+        if (id == null) {
+            repository.addSchedulePeriod(period)
+            _snackbarMessage.value = "שיעור חדש נוסף למערכת השעות (כולל התראת 10 דק') 🔔"
         } else {
-            val isHebrew = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHebrew) "הגעת למגבלת 10 משתמשים במשפחה" else "Maximum 10 family members reached")
+            repository.updateSchedulePeriod(period)
+            _snackbarMessage.value = "השיעור עודכן במערכת השעות ✓"
         }
-        return success
-    }
-
-    fun sendInvitationNotification(inviteeName: String, email: String? = null) {
-        if (!currentMember.isAdmin) {
-            val isHebrew = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHebrew) "רק מנהלי הבית מורשים לשלוח התראות הזמנה" else "Only managers can send invitation alerts")
-            return
-        }
-        repository.sendInvitationNotification(inviteeName, email)
-        val isHebrew = settings.value.language == AppLanguage.HEBREW
-        showToast(if (isHebrew) "נשלחה התראת Push של הזמנה עבור $inviteeName! 📲" else "Push notification invitation sent for $inviteeName! 📲")
-    }
-
-    fun updateMemberRole(memberId: String, newRole: UserRole) {
-        if (!currentMember.isPrimaryAdmin) {
-            val isHebrew = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHebrew) "רק המנהל הראשי יכול לשנות תפקידים והרשאות" else "Only Primary Admin can modify roles")
-            return
-        }
-        repository.updateMemberRole(memberId, newRole)
-    }
-
-    fun removeMember(memberId: String) {
-        if (!currentMember.isAdmin) {
-            val isHebrew = settings.value.language == AppLanguage.HEBREW
-            showToast(if (isHebrew) "רק מנהלי המשפחה מורשים להסיר חברים" else "Only managers can remove members")
-            return
-        }
-        repository.removeMember(memberId)
-        val isHebrew = settings.value.language == AppLanguage.HEBREW
-        showToast(if (isHebrew) "המשתמש הוסר מהמשפחה" else "Member removed from household")
-    }
-
-
-    fun addPeriod(period: SchedulePeriod) {
-        repository.addPeriod(period)
         closeAddPeriodDialog()
     }
 
-    fun deletePeriod(periodId: String) {
-        repository.deletePeriod(periodId)
+    fun deleteSchedulePeriod(periodId: String) {
+        if (repository.deleteSchedulePeriod(periodId)) {
+            _snackbarMessage.value = "השיעור הוסר ממערכת השעות"
+        }
     }
 
-    fun testSchoolAlert(period: SchedulePeriod, childName: String) {
-        repository.testSchoolAlert(period, childName)
+    fun testTenMinuteAlert(period: SchedulePeriod, childName: String) {
+        repository.triggerTenMinuteClassAlertPreview(period, childName)
     }
 
-    fun addFolder(nameHebrew: String, nameEnglish: String, colorHex: Long, iconEmoji: String) {
-        repository.addFolder(nameHebrew, nameEnglish, colorHex, iconEmoji)
+    // --- Google Drive Folders & Files Operations ---
+
+    fun createNewFolder(nameHe: String, nameEn: String, emoji: String, colorHex: Long) {
+        val folder = DocumentFolder(
+            nameHe = nameHe,
+            nameEn = nameEn.ifBlank { nameHe },
+            iconEmoji = emoji,
+            colorHex = colorHex
+        )
+        repository.addFolder(folder)
+        _selectedFolderId.value = folder.id
         closeAddFolderDialog()
+        _snackbarMessage.value = "תיקייה חדשה נוצרה ב-Google Drive 📁"
     }
 
-    fun uploadDocument(folderId: String, name: String, extension: String, sizeFormatted: String) {
-        repository.uploadDocument(folderId, name, extension, sizeFormatted)
+    fun simulateUploadFileToDrive(folderId: String, fileName: String, extension: String, sizeFormatted: String) {
+        val todayStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))
+        val doc = FamilyDocument(
+            folderId = folderId,
+            name = fileName,
+            extension = extension,
+            sizeFormatted = sizeFormatted,
+            uploadedByMemberId = currentMember.value.id,
+            uploadedDateFormatted = todayStr
+        )
+        repository.addDocument(doc)
+        _snackbarMessage.value = "הקובץ \"$fileName\" הועלה וסונכרן ל-Google Drive ☁️"
     }
 
-    fun renameFile(fileId: String, newName: String) {
-        repository.renameDocument(fileId, newName)
-        val isHebrew = settings.value.language == AppLanguage.HEBREW
-        showToast(if (isHebrew) "שם הקובץ עודכן ל-\"$newName\" ✓" else "File renamed to \"$newName\" ✓")
+    fun renameDocument(documentId: String, newName: String) {
+        repository.renameDocument(documentId, newName)
+        _snackbarMessage.value = "שם הקובץ עודכן ל-\"$newName\" ב-Google Drive ✓"
     }
 
-    fun deleteFile(fileId: String) {
-        repository.deleteDocument(fileId)
-        val isHebrew = settings.value.language == AppLanguage.HEBREW
-        showToast(if (isHebrew) "הקובץ נמחק מ-Google Drive" else "File deleted from Google Drive")
+    fun deleteDocument(documentId: String) {
+        repository.deleteDocument(documentId)
+        _snackbarMessage.value = "הקובץ הוסר מתיקיית המשפחה 🗑️"
     }
 
-    fun initializeCleanFamily(name: String, email: String, familyName: String, avatar: String) {
-        repository.initializeCleanFamily(name, email, familyName, avatar)
-        val isHebrew = settings.value.language == AppLanguage.HEBREW
-        showToast(if (isHebrew) "ברוכים הבאים $name! המשפחה הוקמה בהצלחה 🌟" else "Welcome $name! Household setup complete 🌟")
+    fun showCustomSnackbar(message: String) {
+        _snackbarMessage.value = message
     }
 
-    fun joinFamilyWithCode(code: String) {
-        repository.joinFamilyByCode(code)
-        completeGoogleSignIn(settings.value.googleAccountEmail)
-        val isHebrew = settings.value.language == AppLanguage.HEBREW
-        showToast(if (isHebrew) "הצטרפת בהצלחה למשפחה עם הקוד $code 🏠" else "Successfully joined family with code $code 🏠")
+    // --- Notification Banner Controls ---
+
+    fun dismissBannerAlert() {
+        repository.dismissActiveBanner()
     }
 
-    fun loadSampleData() {
-        repository.loadSampleData()
-        val isHebrew = settings.value.language == AppLanguage.HEBREW
-        showToast(if (isHebrew) "נתוני דוגמה נטענו בהצלחה" else "Sample data loaded")
+    // --- Settings & Preferences ---
+
+    fun setLanguage(lang: AppLanguage) {
+        repository.setLanguage(lang)
     }
 
-    fun dismissAlert() {
-        repository.dismissLatestAlert()
+    fun setThemeMode(mode: AppThemeMode) {
+        repository.setThemeMode(mode)
     }
 
-    fun clearAllNotifications() {
-        repository.clearNotifications()
+    fun setFirstDayOfWeek(day: FirstDayOfWeek) {
+        repository.setFirstDayOfWeek(day)
     }
 
-    fun updateSettings(newSettings: AppSettings) {
-        repository.updateSettings(newSettings)
+    fun setTimetableViewMode(mode: TimetableViewMode) {
+        repository.setTimetableViewMode(mode)
     }
 
-    fun upgradeAppVersion() {
-        repository.upgradeAppVersion()
-        val isHebrew = settings.value.language == AppLanguage.HEBREW
-        val versionStr = settings.value.formattedVersion
-        showToast(if (isHebrew) "התוכנה שודרגה לגרסה חדשה בהצלחה! 🚀" else "App successfully updated! 🚀")
+    fun setFilesViewMode(mode: FilesViewMode) {
+        repository.setFilesViewMode(mode)
     }
 
-    fun syncCloudNow() {
-        repository.syncCloudNow()
-        val isHebrew = settings.value.language == AppLanguage.HEBREW
-        showToast(if (isHebrew) "סנכרון ענן התבצע בהצלחה!" else "Cloud sync completed successfully!")
+    fun setBiometricLock(enabled: Boolean) {
+        repository.setBiometricLock(enabled)
     }
 
-    fun showToast(msg: String) {
-        _snackbarMessage.value = msg
-        viewModelScope.launch {
-            delay(3000)
-            if (_snackbarMessage.value == msg) {
-                _snackbarMessage.value = null
+    fun unlockApp() {
+        repository.unlockAppSession()
+    }
+
+    fun lockApp() {
+        repository.lockAppSession()
+    }
+
+    fun setTenMinuteClassAlerts(enabled: Boolean) {
+        repository.setTenMinuteClassAlerts(enabled)
+    }
+
+    fun setAutoSyncCalendar(enabled: Boolean) {
+        repository.setAutoSyncCalendar(enabled)
+    }
+
+    fun setAutoSyncDrive(enabled: Boolean) {
+        repository.setAutoSyncDrive(enabled)
+    }
+
+    // --- Gemini AI Smart Assistant ---
+
+    fun askGeminiAssistant(prompt: String) {
+        if (prompt.isBlank()) return
+        _aiMessages.value = _aiMessages.value + (true to prompt)
+        _isAiGenerating.value = true
+
+        val lower = prompt.lowercase()
+        val pendingCount = tasks.value.count { !it.isCompleted }
+        val kidsNames = members.value.filter { it.role == UserRole.CHILD }.joinToString(", ") { it.name }
+
+        val response = when {
+            lower.contains("משימות") || lower.contains("חלוקה") || lower.contains("תורנות") -> {
+                val canGenerate = currentMember.value.isParent
+                if (canGenerate) {
+                    generateSmartTasksForKids()
+                }
+                "ניתחתי את לוח המשימות של **${familyName.value}** ($pendingCount משימות פתוחות כרגע).\n\n" +
+                    (if (canGenerate) "✨ הוספתי אוטומטית 3 משימות מאוזנות להיום עבור הילדים ($kidsNames):\n" else "✨ הצעה לחלוקת משימות מאוזנת עבור הילדים ($kidsNames):\n") +
+                    "1. **סידור שולחן לימודים ומחברות** (15 נק')\n" +
+                    "2. **פינוי כלים מהכיור למדיח** (15 נק')\n" +
+                    "3. **הוצאת אשפה וטיול ערב עם הכלב** (20 נק')"
+            }
+            lower.contains("מערכת") || lower.contains("שיעור") || lower.contains("בית ספר") -> {
+                "בדקתי את מערכת השעות המשפחתית 🏫:\n" +
+                    "• **נועם (כיתה ז'):** מחר מתחיל ב-08:00 במתמטיקה מוגבר (חדר 204).\n" +
+                    "• **מאיה (כיתה ד'):** שפה וקריאה ב-08:00 ואמנות ב-09:50.\n" +
+                    "• **דניאל (כיתה ב'):** קריאה וכתיבה ב-08:00.\n" +
+                    "🔔 התראות של 10 דקות לפני כל שיעור מופעלות עבור כל הילדים."
+            }
+            else -> {
+                "בשמחה! משפחת **${familyName.value}** מסונכרנת בזמן אמת ☁️.\n" +
+                    "• חברים פעילים: ${members.value.size} (${members.value.count { it.isParent }} הורים, ${members.value.count { it.isChild }} ילדים)\n" +
+                    "• משימות להיום: $pendingCount ממתינות לביצוע\n" +
+                    "אפשר לבקש ממני לחלק משימות שבועיות או לבדוק את מערכת השעות!"
             }
         }
+
+        _aiMessages.value = _aiMessages.value + (false to response)
+        _isAiGenerating.value = false
     }
 
-    fun askGemini(prompt: String) {
-        viewModelScope.launch {
-            _geminiLoading.value = true
-            val familyContext = "Family members: " + members.value.joinToString { "${it.name} (${it.role})" }
-            val result = geminiService.generateFamilyAdvice(prompt, familyContext)
-            result.onSuccess { text ->
-                _geminiResponse.value = text
-            }.onFailure { err ->
-                _geminiResponse.value = "Error: ${err.message}"
-            }
-            _geminiLoading.value = false
+    fun generateSmartTasksForKids() {
+        if (!currentMember.value.isParent) {
+            _snackbarMessage.value = "רק הורים יכולים להוסיף משימות למשפחה 🔒"
+            return
         }
-    }
-
-    fun addGeminiSuggestedTasks() {
-        val todayEpoch = java.time.LocalDate.now().toEpochDay()
-        val maya = members.value.find { it.id == "user_maya" }
-        val noam = members.value.find { it.id == "user_noam" }
-        val daniel = members.value.find { it.id == "user_daniel" }
+        val todayEpoch = LocalDate.now().toEpochDay()
+        val kids = members.value.filter { it.role == UserRole.CHILD }
+        val kid1 = kids.getOrNull(0)
+        val kid2 = kids.getOrNull(1)
+        val kid3 = kids.getOrNull(2)
 
         val task1 = FamilyTask(
             id = "gemini_task_${System.currentTimeMillis()}_1",
             title = "החלפת מצעים וארגון מדפי החדר (הצעת Gemini)",
             description = "לסדר ספרים, צעצועים ומצעים נקיים",
             category = TaskCategory.BEDROOM,
-            assignedToMemberId = maya?.id ?: currentMember.id,
+            assignedToMemberId = kid2?.id ?: currentMember.value.id,
             dateEpochDay = todayEpoch,
             dueTimeFormatted = "17:00",
             priority = TaskPriority.MEDIUM,
@@ -515,7 +903,7 @@ class FamilyViewModel(
             title = "טיול ארוך עם הכלב ומחזור בקבוקים (הצעת Gemini)",
             description = "טיול וסיבוב בפארק",
             category = TaskCategory.PETS,
-            assignedToMemberId = noam?.id ?: currentMember.id,
+            assignedToMemberId = kid1?.id ?: currentMember.value.id,
             dateEpochDay = todayEpoch,
             dueTimeFormatted = "18:00",
             priority = TaskPriority.HIGH,
@@ -526,7 +914,7 @@ class FamilyViewModel(
             title = "איסוף משחקים וצעצועים לקופסאות (הצעת Gemini)",
             description = "לסדר לגו ומשחקי קופסה",
             category = TaskCategory.BEDROOM,
-            assignedToMemberId = daniel?.id ?: currentMember.id,
+            assignedToMemberId = kid3?.id ?: currentMember.value.id,
             dateEpochDay = todayEpoch,
             dueTimeFormatted = "17:30",
             priority = TaskPriority.LOW,
@@ -535,6 +923,11 @@ class FamilyViewModel(
         repository.addTask(task1)
         repository.addTask(task2)
         repository.addTask(task3)
+        _snackbarMessage.value = "3 משימות חדשות נוספו מלוח ההמלצות של Gemini ✓"
+    }
+
+    fun showToastMessage(msg: String) {
+        _snackbarMessage.value = msg
     }
 
     fun clearSnackbar() {

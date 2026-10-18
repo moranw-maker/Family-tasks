@@ -19,8 +19,8 @@ android {
   // 2. Bump versionMinor (e.g. 1.0 -> 1.1 -> 1.2) for feature updates, or versionPatch for bugfixes
   // 3. BuildConfig.VERSION_NAME and BuildConfig.VERSION_CODE will automatically update on build
   val versionMajor = 1
-  val versionMinor = 1
-  val currentVersionCode = 2
+  val versionMinor = 6
+  val currentVersionCode = 6
   val currentVersionName = "$versionMajor.$versionMinor"
 
   defaultConfig {

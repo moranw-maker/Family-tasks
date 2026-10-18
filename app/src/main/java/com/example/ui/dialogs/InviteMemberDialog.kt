@@ -1,86 +1,109 @@
 package com.example.ui.dialogs
 
+import android.content.Intent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.PersonAdd
-import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import com.example.model.FamilyMember
+import com.example.model.FamilyInvitation
 import com.example.model.UserRole
 import com.example.ui.theme.*
 
-import androidx.compose.material.icons.filled.NotificationsActive
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
-
 @Composable
 fun InviteMemberDialog(
-    currentMemberCount: Int,
+    familyName: String,
+    isPrimaryAdmin: Boolean,
     isHebrew: Boolean,
-    memberToEdit: FamilyMember? = null,
-    familyTitle: String = if (isHebrew) "משפחת וקסלר" else "Wexler Family",
-    inviteCode: String = "FAM-WEXLER-7749",
-    inviteLink: String = "https://familytasks.app/join/$inviteCode",
     onDismiss: () -> Unit,
-    onConfirm: (name: String, email: String, role: UserRole, avatarEmoji: String, schoolGrade: String?) -> Unit,
-    onDeleteMember: ((String) -> Unit)? = null,
-    onSendPushInvite: ((String) -> Unit)? = null
+    onGenerateShareText: (name: String, role: UserRole) -> String,
+    onFormatInvitationShareText: ((FamilyInvitation) -> String)? = null,
+    onInvite: (
+        name: String,
+        emoji: String,
+        role: UserRole,
+        googleEmail: String?,
+        schoolGrade: String?
+    ) -> FamilyInvitation?
 ) {
-    val isEditMode = memberToEdit != null
-    var name by remember(memberToEdit) { mutableStateOf(memberToEdit?.name ?: "") }
-    var email by remember(memberToEdit) { mutableStateOf(memberToEdit?.email ?: "") }
-    var selectedRole by remember(memberToEdit) { mutableStateOf(memberToEdit?.role ?: UserRole.MEMBER_KID) }
-    var selectedEmoji by remember(memberToEdit) { mutableStateOf(memberToEdit?.avatarEmoji ?: "🧒") }
-    var schoolGrade by remember(memberToEdit) { mutableStateOf(memberToEdit?.schoolGrade ?: "") }
+    var selectedRole by remember { mutableStateOf(UserRole.CHILD) }
+    var nickname by remember { mutableStateOf("") }
+    var generatedInvitation by remember { mutableStateOf<FamilyInvitation?>(null) }
 
-    val emojis = listOf("🧒", "👧", "👦", "👶", "👨", "👩", "👵", "👴", "🐶", "🐱", "🦁", "🦄", "⚽", "🎨")
-    val scrollState = androidx.compose.foundation.rememberScrollState()
-    val safeDismiss = {
-        onDismiss()
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+
+    fun buildDomainFreeShareMessage(invitation: FamilyInvitation): String {
+        if (onFormatInvitationShareText != null) {
+            return onFormatInvitationShareText(invitation)
+        }
+        val roleHe = if (invitation.invitedRole == UserRole.PARENT) "הורה (מנהל משפחה)" else "ילד/ה (חבר משפחה)"
+        val roleEn = if (invitation.invitedRole == UserRole.PARENT) "Parent (Family Admin)" else "Child (Family Member)"
+        return if (isHebrew) {
+            buildString {
+                appendLine("שלום! הוזמנת להצטרף למשפחת \"${invitation.familyName}\" באפליקציית FamilyTasks 🏠✨")
+                appendLine()
+                appendLine("👤 תפקיד במשפחה: $roleHe")
+                appendLine("🔑 קוד הזמנה אישי: ${invitation.code}")
+                appendLine()
+                appendLine("איך מצטרפים?")
+                appendLine("1. פותחים את אפליקציית FamilyTasks במכשיר.")
+                appendLine("2. מתחברים עם חשבון Google.")
+                appendLine("3. בוחרים ב-\"הצטרפות למשפחה קיימת\".")
+                append("4. מזינים את קוד ההזמנה: ${invitation.code} ומאשרים הצטרפות!")
+            }
+        } else {
+            buildString {
+                appendLine("Hi! You are invited to join \"${invitation.familyName}\" in FamilyTasks 🏠✨")
+                appendLine()
+                appendLine("👤 Invited Role: $roleEn")
+                appendLine("🔑 Invitation Code: ${invitation.code}")
+                appendLine()
+                appendLine("How to join:")
+                appendLine("1. Open FamilyTasks on your device.")
+                appendLine("2. Sign in with your Google account.")
+                appendLine("3. Select \"Join an existing family\".")
+                append("4. Enter invitation code: ${invitation.code} and confirm!")
+            }
+        }
     }
 
-    Dialog(
-        onDismissRequest = safeDismiss,
-        properties = androidx.compose.ui.window.DialogProperties(
-            usePlatformDefaultWidth = false
-        )
-    ) {
+    Dialog(onDismissRequest = onDismiss) {
         Surface(
-            shape = RoundedCornerShape(24.dp),
+            shape = RoundedCornerShape(28.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp,
             modifier = Modifier
-                .fillMaxWidth(0.92f)
-                .padding(vertical = 16.dp)
+                .fillMaxWidth()
+                .padding(vertical = 12.dp)
                 .testTag("invite_member_dialog")
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(20.dp)
-                    .verticalScroll(scrollState)
+                    .verticalScroll(rememberScrollState())
+                    .padding(22.dp)
             ) {
                 // Header
                 Row(
@@ -88,353 +111,352 @@ fun InviteMemberDialog(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Icon(
-                                imageVector = if (isEditMode) Icons.Default.Edit else Icons.Default.PersonAdd,
-                                contentDescription = null,
-                                tint = GoogleBlue,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Text(
-                                text = if (isEditMode) {
-                                    if (isHebrew) "עריכת פרטי משתמש" else "Edit Family Member"
-                                } else {
-                                    if (isHebrew) "הזמנת חבר משפחה חדש" else "Invite Family Member"
-                                },
-                                style = MaterialTheme.typography.titleMedium.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = GoogleBlue
-                                )
-                            )
-                        }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(text = "✉️", fontSize = 22.sp)
                         Text(
-                            text = if (isEditMode) {
-                                if (isHebrew) "עדכון שם, הרשאות תפקיד ואימוג'י" else "Update profile, role permissions & avatar"
-                            } else {
-                                if (isHebrew) "משפחה נוכחית: $currentMemberCount/10 משתמשים" else "Household: $currentMemberCount/10 members"
-                            },
-                            style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            text = if (isHebrew) "הזמנת חבר משפחה" else "Invite Family Member",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold)
                         )
                     }
 
-                    IconButton(onClick = safeDismiss, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = onDismiss) {
                         Icon(imageVector = Icons.Default.Close, contentDescription = "Close")
                     }
                 }
 
+                Text(
+                    text = if (isHebrew)
+                        "בחרו את התפקיד המבוקש (ילד/ה או הורה) וצרו קוד הזמנה חד-פעמי ומאובטח למשפחת \"$familyName\". התפקיד בהזמנה קבוע ואינו ניתן לשינוי על ידי המוזמן."
+                    else
+                        "Choose the invited role (Child or Parent) and generate a secure one-time invitation code for \"$familyName\". The role is locked upon creation.",
+                    style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                )
+
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Name Input
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text(if (isHebrew) "שם מלא (לדוגמה: אורי)" else "Full Name") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("member_name_input")
+                // Step 1: Role Selection (Locked once an invitation is generated)
+                Text(
+                    text = if (isHebrew) "1. בחירת תפקיד במשפחה (קבוע):" else "1. Select Family Role (Immutable):",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
                 )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                val roles = listOf(UserRole.CHILD, UserRole.PARENT)
+                roles.forEach { r ->
+                    val activeRole = generatedInvitation?.invitedRole ?: selectedRole
+                    val isSelected = activeRole == r
+                    val isLocked = generatedInvitation != null
+                    val desc = when (r) {
+                        UserRole.CHILD -> if (isHebrew)
+                            "ילד/ה (חבר משפחה): צפייה במשימות, סימון משימות אישיות כבוצע וצבירת נקודות לפרסים (ללא הרשאות ניהול)"
+                        else
+                            "Child: View tasks, complete assigned tasks, and earn reward points (no admin access)"
+                        UserRole.PARENT -> if (isHebrew)
+                            "הורה (מנהל משפחה): הרשאות ניהול מלאות — יצירת משימות, הזמנת חברים וניהול הגדרות המשפחה"
+                        else
+                            "Parent: Full management permissions — tasks, invitations, members, and family settings"
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (isSelected) GoogleBlueLight else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        border = BorderStroke(
+                            width = if (isSelected) 2.dp else 1.dp,
+                            color = if (isSelected) GoogleBlue else Color.Transparent
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable(enabled = !isLocked) { selectedRole = r }
+                            .testTag("invite_role_${r.name}")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            RadioButton(
+                                selected = isSelected,
+                                onClick = { if (!isLocked) selectedRole = r },
+                                enabled = !isLocked
+                            )
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = r.getDisplayName(isHebrew),
+                                    style = MaterialTheme.typography.labelLarge.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) GoogleBlueDark else MaterialTheme.colorScheme.onSurface
+                                    )
+                                )
+                                Text(
+                                    text = desc,
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 11.sp
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Email Input
+                // Optional nickname / label for the parent's pending invitations list
                 OutlinedTextField(
-                    value = email,
-                    onValueChange = { email = it },
-                    label = { Text(if (isHebrew) "כתובת אימייל (חשבון Google)" else "Email (Google account)") },
+                    value = nickname,
+                    onValueChange = { if (generatedInvitation == null) nickname = it },
+                    enabled = generatedInvitation == null,
+                    label = {
+                        Text(
+                            if (isHebrew) "שם / כינוי המוזמן (אופציונלי, לזיהוי ברשימת ההמתנה)"
+                            else "Invitee Name / Note (optional)"
+                        )
+                    },
                     singleLine = true,
-                    shape = RoundedCornerShape(16.dp),
+                    shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .testTag("member_email_input")
+                        .testTag("invite_member_name_input")
                 )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Role Selector (Kid, Secondary Admin, Primary Admin)
-                Text(
-                    text = if (isHebrew) "תפקיד והרשאות:" else "Role & Permissions:",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val availableRoles = if (memberToEdit?.role == UserRole.PRIMARY_ADMIN) {
-                        listOf(
-                            UserRole.PRIMARY_ADMIN to (if (isHebrew) "מנהל ראשי" else "Primary Admin")
-                        )
-                    } else {
-                        listOf(
-                            UserRole.MEMBER_KID to (if (isHebrew) "ילד / חבר" else "Kid / Member"),
-                            UserRole.SECONDARY_ADMIN to (if (isHebrew) "מנהל משני" else "Co-Admin")
-                        )
-                    }
-
-                    availableRoles.forEach { (role, label) ->
-                        val isSelected = selectedRole == role
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.surfaceVariant,
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(14.dp))
-                                .clickable { selectedRole = role }
-                        ) {
-                            Box(
-                                modifier = Modifier.padding(vertical = 8.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = label,
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // Optional Grade for kids
-                if (selectedRole == UserRole.MEMBER_KID) {
-                    Spacer(modifier = Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = schoolGrade,
-                        onValueChange = { schoolGrade = it },
-                        label = { Text(if (isHebrew) "כיתה / מסגרת (לדוגמה: כיתה ד׳)" else "Grade (optional)") },
-                        singleLine = true,
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Avatar Emoji Selector
-                Text(
-                    text = if (isHebrew) "בחר אייקון / אימוג'י:" else "Pick Avatar:",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    items(emojis) { emoji ->
-                        val isSelected = selectedEmoji == emoji
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(CircleShape)
-                                .background(if (isSelected) GoogleBlueLight else MaterialTheme.colorScheme.surfaceVariant)
-                                .clickable { selectedEmoji = emoji },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(text = emoji, fontSize = 20.sp)
-                        }
-                    }
-                }
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                if (!isEditMode) {
-                    val context = androidx.compose.ui.platform.LocalContext.current
-                    val clipboardManager = LocalClipboardManager.current
-
-                    // Dynamic Family Code Card
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(10.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = if (isHebrew) "קוד הזמנה ייחודי ל-$familyTitle:" else "Invite Code for $familyTitle:",
-                                        style = MaterialTheme.typography.labelSmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    )
-                                    Text(
-                                        text = inviteCode,
-                                        style = MaterialTheme.typography.bodyMedium.copy(
-                                            fontWeight = FontWeight.Bold,
-                                            color = GoogleBlue
-                                        )
-                                    )
-                                }
-
-                                IconButton(
-                                    onClick = {
-                                        clipboardManager.setText(AnnotatedString(inviteLink))
-                                        android.widget.Toast.makeText(
-                                            context,
-                                            if (isHebrew) "הקישור הועתק ללוח! $inviteLink" else "Invite link copied! $inviteLink",
-                                            android.widget.Toast.LENGTH_SHORT
-                                        ).show()
-                                    },
-                                    modifier = Modifier.size(32.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.ContentCopy,
-                                        contentDescription = "Copy",
-                                        tint = GoogleBlue,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Direct Push Notification Invitation Button
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = GoogleGreenLight,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .clickable {
-                                val targetName = name.trim().ifBlank { if (isHebrew) "חבר בית" else "Family Member" }
-                                onSendPushInvite?.invoke(targetName)
-                            }
-                            .testTag("send_push_invite_btn")
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.NotificationsActive,
-                                contentDescription = null,
-                                tint = GoogleGreenDark,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = if (isHebrew) "שלח התראת Push של הזמנה לנייד 📲" else "Send Push Notification Invitation 📲",
-                                style = MaterialTheme.typography.bodySmall.copy(color = GoogleGreenDark, fontWeight = FontWeight.Bold)
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = GoogleBlueLight,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .clickable {
-                                val shareText = if (isHebrew) {
-                                    "הצטרף למרכז המשימות והניהול של $familyTitle! הורד את האפליקציה או התחבר דרך הקוד: $inviteCode\nקישור ישיר: $inviteLink"
-                                } else {
-                                    "Join the task and family hub for $familyTitle! Connect with code: $inviteCode\nDirect link: $inviteLink"
-                                }
-                                val sendIntent = android.content.Intent().apply {
-                                    action = android.content.Intent.ACTION_SEND
-                                    putExtra(android.content.Intent.EXTRA_TEXT, shareText)
-                                    type = "text/plain"
-                                }
-                                context.startActivity(android.content.Intent.createChooser(sendIntent, if (isHebrew) "שתף הזמנה למשפחה" else "Share Family Invite"))
-                            }
-                            .testTag("share_invite_link_btn")
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Share,
-                                contentDescription = null,
-                                tint = GoogleBlue,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = if (isHebrew) "שיתוף קישור הזמנה (WhatsApp / הודעה)" else "Share Invite Link (WhatsApp / Messages)",
-                                style = MaterialTheme.typography.bodySmall.copy(color = GoogleBlue, fontWeight = FontWeight.Bold)
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(10.dp))
-                }
-
-                // Actions: Save/Invite + Delete (if editing & not last admin)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    if (memberToEdit != null && !memberToEdit.isPrimaryAdmin && onDeleteMember != null) {
-                        OutlinedButton(
-                            onClick = {
-                                safeDismiss()
-                                onDeleteMember(memberToEdit.id)
-                            },
-                            shape = RoundedCornerShape(18.dp),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = GoogleRed),
-                            modifier = Modifier
-                                .weight(0.35f)
-                                .height(48.dp)
-                                .testTag("delete_member_btn")
-                        ) {
-                            Icon(imageVector = Icons.Default.DeleteOutline, contentDescription = "Delete", modifier = Modifier.size(18.dp))
-                        }
-                    }
-
+                // Generate Button (if not yet generated)
+                if (generatedInvitation == null) {
                     Button(
                         onClick = {
-                            if (name.isNotBlank()) {
-                                onConfirm(
-                                    name.trim(),
-                                    email.trim().ifBlank { "${name.lowercase().replace(" ", "")}@familyhub.app" },
-                                    selectedRole,
-                                    selectedEmoji,
-                                    schoolGrade.trim().ifBlank { null }
-                                )
+                            val emoji = if (selectedRole == UserRole.PARENT) "👩" else "🧒"
+                            val created = onInvite(
+                                nickname.trim(),
+                                emoji,
+                                selectedRole,
+                                null,
+                                null
+                            )
+                            if (created != null) {
+                                generatedInvitation = created
                             }
                         },
-                        shape = RoundedCornerShape(18.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = GoogleBlue),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = VibrantActionBlue),
                         modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("submit_invite_btn")
+                            .fillMaxWidth()
+                            .height(52.dp)
+                            .testTag("generate_invite_code_btn")
                     ) {
+                        Icon(imageVector = Icons.Default.VpnKey, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (isEditMode) {
-                                if (isHebrew) "שמור שינויים ✓" else "Save Changes ✓"
-                            } else {
-                                if (isHebrew) "שלח הזמנה והוסף למשפחה" else "Send Invite & Add Member"
-                            },
+                            text = if (isHebrew) "צור קוד הזמנה מאובטח" else "Generate Secure Invite Code",
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp
                         )
+                    }
+                }
+
+                // Step 2: Generated Invitation Code & Share Actions (WhatsApp / Copy / Sharesheet)
+                AnimatedVisibility(visible = generatedInvitation != null) {
+                    generatedInvitation?.let { invitation ->
+                        val roleBadge = if (invitation.invitedRole == UserRole.PARENT) {
+                            if (isHebrew) "הורה (מנהל משפחה)" else "Parent (PARENT)"
+                        } else {
+                            if (isHebrew) "ילד/ה (חבר משפחה)" else "Child (CHILD)"
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = GoogleGreenLight,
+                            border = BorderStroke(1.5.dp, GoogleGreen),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("generated_invitation_card")
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.VerifiedUser,
+                                        contentDescription = null,
+                                        tint = GoogleGreenDark,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = if (isHebrew)
+                                            "קוד הזמנה מוכן לשיתוף! (תפקיד קבוע: $roleBadge)"
+                                        else
+                                            "Invite Code Ready! (Locked Role: $roleBadge)",
+                                        style = MaterialTheme.typography.labelLarge.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = GoogleGreenDark
+                                        ),
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+
+                                // Large Prominent Code Display + Copy Button
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = Color.White,
+                                    border = BorderStroke(1.5.dp, GoogleGreen.copy(alpha = 0.5f)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column {
+                                            Text(
+                                                text = if (isHebrew) "קוד הזמנה חד-פעמי (תקף ל-7 ימים):" else "One-Time Invite Code (Valid 7 days):",
+                                                style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
+                                            )
+                                            Text(
+                                                text = invitation.code,
+                                                style = MaterialTheme.typography.headlineMedium.copy(
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    color = GoogleGreenDark,
+                                                    letterSpacing = 3.sp
+                                                ),
+                                                modifier = Modifier.testTag("invite_code_display")
+                                            )
+                                        }
+
+                                        FilledTonalButton(
+                                            onClick = {
+                                                clipboardManager.setText(AnnotatedString(invitation.code))
+                                                android.widget.Toast.makeText(
+                                                    context,
+                                                    if (isHebrew) "קוד ההזמנה ${invitation.code} הועתק!" else "Code ${invitation.code} copied!",
+                                                    android.widget.Toast.LENGTH_SHORT
+                                                ).show()
+                                            },
+                                            shape = RoundedCornerShape(12.dp),
+                                            modifier = Modifier.testTag("copy_invite_code_btn")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.ContentCopy,
+                                                contentDescription = "Copy Code",
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = if (isHebrew) "העתק" else "Copy",
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Share directly via WhatsApp (Readable Hebrew message without broken domain links)
+                                Button(
+                                    onClick = {
+                                        val shareText = buildDomainFreeShareMessage(invitation)
+                                        val whatsappIntent = Intent(Intent.ACTION_SEND).apply {
+                                            type = "text/plain"
+                                            setPackage("com.whatsapp")
+                                            putExtra(Intent.EXTRA_TEXT, shareText)
+                                        }
+                                        try {
+                                            context.startActivity(whatsappIntent)
+                                        } catch (_: Exception) {
+                                            val fallbackIntent = Intent(Intent.ACTION_SEND).apply {
+                                                type = "text/plain"
+                                                putExtra(Intent.EXTRA_TEXT, shareText)
+                                            }
+                                            context.startActivity(
+                                                Intent.createChooser(
+                                                    fallbackIntent,
+                                                    if (isHebrew) "שתף הזמנה למשפחה" else "Share Family Invite"
+                                                )
+                                            )
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(14.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFF25D366),
+                                        contentColor = Color.White
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(48.dp)
+                                        .testTag("whatsapp_share_btn")
+                                ) {
+                                    Icon(imageVector = Icons.Default.Share, contentDescription = null)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = if (isHebrew) "שלח הזמנה ב-WhatsApp 💬" else "Share via WhatsApp 💬",
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                // System Sharesheet Button
+                                OutlinedButton(
+                                    onClick = {
+                                        val shareText = buildDomainFreeShareText(invitation, ::buildDomainFreeShareMessage)
+                                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                            type = "text/plain"
+                                            putExtra(Intent.EXTRA_TEXT, shareText)
+                                        }
+                                        context.startActivity(
+                                            Intent.createChooser(
+                                                sendIntent,
+                                                if (isHebrew) "שתף קוד הזמנה למשפחה" else "Share Invite Code"
+                                            )
+                                        )
+                                    },
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("system_share_btn")
+                                ) {
+                                    Icon(imageVector = Icons.Default.IosShare, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = if (isHebrew) "שיתוף באפליקציות אחרות" else "More Share Options",
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                // Done / Close button
+                                TextButton(
+                                    onClick = onDismiss,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("confirm_invite_btn")
+                                ) {
+                                    Text(
+                                        text = if (isHebrew) "סיום וסגירה ✓" else "Done ✓",
+                                        fontWeight = FontWeight.Bold,
+                                        color = GoogleGreenDark
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
 }
+
+private fun buildDomainFreeShareText(
+    invitation: FamilyInvitation,
+    formatter: (FamilyInvitation) -> String
+): String = formatter(invitation)

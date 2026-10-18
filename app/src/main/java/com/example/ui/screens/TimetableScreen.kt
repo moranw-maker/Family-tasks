@@ -43,7 +43,7 @@ fun TimetableScreen(
     onDeletePeriod: (String) -> Unit,
     onTestAlert: (SchedulePeriod, String) -> Unit
 ) {
-    val kids = members.filter { it.role == UserRole.MEMBER_KID }
+    val kids = members.filter { it.role == UserRole.CHILD }
     var selectedDay by remember { mutableStateOf(SchoolDay.SUNDAY) }
 
     val activeKid = members.find { it.id == selectedChildId } ?: kids.firstOrNull() ?: members.first()
@@ -54,7 +54,7 @@ fun TimetableScreen(
 
     Scaffold(
         floatingActionButton = {
-            if (currentMember.isAdmin) {
+            if (currentMember.isParent) {
                 Surface(
                     onClick = onAddPeriod,
                     shape = RoundedCornerShape(24.dp),

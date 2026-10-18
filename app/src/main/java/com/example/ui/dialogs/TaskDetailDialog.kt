@@ -219,12 +219,15 @@ fun TaskDetailDialog(
 
                 Spacer(modifier = Modifier.height(22.dp))
 
-                // Action Buttons
+                // Action Buttons (PARENT can toggle/edit/delete any task; CHILD can only complete tasks assigned to them)
+                val canToggleTask = currentMember.isParent || task.assignedToMemberId == currentMember.id
+
                 Button(
                     onClick = {
                         onToggle()
                         onDismiss()
                     },
+                    enabled = canToggleTask,
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (task.isCompleted) GoogleGreen else VibrantActionBlue
@@ -241,7 +244,9 @@ fun TaskDetailDialog(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = if (task.isCompleted) {
+                        text = if (!canToggleTask) {
+                            if (isHebrew) "משויך לחבר משפחה אחר 🔒" else "Assigned to another member 🔒"
+                        } else if (task.isCompleted) {
                             if (isHebrew) "סמן כממתין שוב" else "Mark as Pending"
                         } else {
                             if (isHebrew) "סמן כבוצע ✓" else "Mark as Completed ✓"
@@ -251,63 +256,65 @@ fun TaskDetailDialog(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                if (currentMember.isParent) {
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            onDismiss()
-                            onEdit()
-                        },
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(44.dp)
-                            .testTag("detail_edit_btn")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(imageVector = Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = if (isHebrew) "ערוך" else "Edit",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp
-                        )
-                    }
-
-                    if (!task.isCompleted && currentMember.isAdmin) {
                         OutlinedButton(
                             onClick = {
-                                onSendNudge()
                                 onDismiss()
+                                onEdit()
                             },
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier
                                 .weight(1f)
                                 .height(44.dp)
-                                .testTag("detail_nudge_btn")
+                                .testTag("detail_edit_btn")
                         ) {
-                            Icon(imageVector = Icons.Default.NotificationsActive, contentDescription = null, modifier = Modifier.size(16.dp), tint = GoogleYellowDark)
+                            Icon(imageVector = Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = if (isHebrew) "תזכורת" else "Nudge",
+                                text = if (isHebrew) "ערוך" else "Edit",
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                color = GoogleYellowDark
+                                fontSize = 13.sp
                             )
                         }
-                    }
 
-                    TextButton(
-                        onClick = {
-                            onDelete()
-                            onDismiss()
-                        },
-                        modifier = Modifier.testTag("detail_delete_btn")
-                    ) {
-                        Icon(imageVector = Icons.Default.Delete, contentDescription = null, tint = GoogleRed, modifier = Modifier.size(18.dp))
+                        if (!task.isCompleted) {
+                            OutlinedButton(
+                                onClick = {
+                                    onSendNudge()
+                                    onDismiss()
+                                },
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
+                                    .testTag("detail_nudge_btn")
+                            ) {
+                                Icon(imageVector = Icons.Default.NotificationsActive, contentDescription = null, modifier = Modifier.size(16.dp), tint = GoogleYellowDark)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (isHebrew) "תזכורת" else "Nudge",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    color = GoogleYellowDark
+                                )
+                            }
+                        }
+
+                        TextButton(
+                            onClick = {
+                                onDelete()
+                                onDismiss()
+                            },
+                            modifier = Modifier.testTag("detail_delete_btn")
+                        ) {
+                            Icon(imageVector = Icons.Default.Delete, contentDescription = null, tint = GoogleRed, modifier = Modifier.size(18.dp))
+                        }
                     }
                 }
             }

@@ -1,271 +1,413 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function isAuthenticated() {
+    // =========================================================================
+    // Helper Functions (V1.6 Two-Role Model: PARENT and CHILD)
+    // =========================================================================
+
+    function isSignedIn() {
       return request.auth != null;
     }
 
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function familyExists(familyId) {
+      return exists(/databases/$(database)/documents/families/$(familyId));
+    }
+
+    function getFamilyData(familyId) {
+      return get(/databases/$(database)/documents/families/$(familyId)).data;
+    }
+
+    function memberDocExists(familyId, uid) {
+      return exists(/databases/$(database)/documents/families/$(familyId)/members/$(uid));
+    }
+
+    function getMemberData(familyId, uid) {
+      return get(/databases/$(database)/documents/families/$(familyId)/members/$(uid)).data;
+    }
+
+    function isParentRoleValue(role) {
+      return role in ['PARENT', 'PRIMARY_ADMIN', 'SECONDARY_ADMIN'];
+    }
+
+    function isChildRoleValue(role) {
+      return role in ['CHILD', 'MEMBER_KID'];
+    }
+
+    function isValidRoleValue(role) {
+      return isParentRoleValue(role) || isChildRoleValue(role);
+    }
+
+    function isValidFamilyIdentityValue(identity) {
+      return identity in ['FATHER', 'MOTHER', 'CHILD'];
+    }
+
+    // Both FATHER and MOTHER must have PARENT authorization role; CHILD has CHILD role
+    function isConsistentRoleAndIdentity(data) {
+      return !('familyIdentity' in data) || (
+        isValidFamilyIdentityValue(data.familyIdentity) && (
+          !('role' in data) ||
+          (isParentRoleValue(data.role) && data.familyIdentity in ['FATHER', 'MOTHER']) ||
+          (isChildRoleValue(data.role) && data.familyIdentity == 'CHILD')
+        )
+      );
+    }
+
+    function isInFamilyMemberList(familyData, uid) {
+      return ('memberUids' in familyData && uid in familyData.memberUids) ||
+        ('memberIds' in familyData && uid in familyData.memberIds) ||
+        ('adminUids' in familyData && uid in familyData.adminUids) ||
+        ('ownerUid' in familyData && familyData.ownerUid == uid) ||
+        ('createdById' in familyData && familyData.createdById == uid);
+    }
+
+    // Checks if the signed-in user is a validated member of the given family
     function isFamilyMember(familyId) {
-      return isAuthenticated() && (
-        exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)) ||
-        (exists(/databases/$(database)/documents/families/$(familyId)) &&
-         'memberIds' in get(/databases/$(database)/documents/families/$(familyId)).data &&
-         get(/databases/$(database)/documents/families/$(familyId)).data.memberIds is list &&
-         get(/databases/$(database)/documents/families/$(familyId)).data.memberIds.hasAny([request.auth.uid]))
+      return isSignedIn() && (
+        memberDocExists(familyId, request.auth.uid) ||
+        (familyExists(familyId) && isInFamilyMemberList(getFamilyData(familyId), request.auth.uid))
       );
     }
 
+    // Checks if the signed-in user holds the PARENT role in the given family.
+    // If a member document exists for the user, its role is authoritative.
     function isFamilyParent(familyId) {
-      return isAuthenticated() && (
-        (exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)) &&
-         get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.role in ['PRIMARY_ADMIN', 'SECONDARY_ADMIN']) ||
-        (exists(/databases/$(database)/documents/families/$(familyId)) &&
-         get(/databases/$(database)/documents/families/$(familyId)).data.createdById == request.auth.uid)
+      return isSignedIn() && (
+        memberDocExists(familyId, request.auth.uid)
+          ? isParentRoleValue(getMemberData(familyId, request.auth.uid).role)
+          : (familyExists(familyId) && (
+              ('ownerUid' in getFamilyData(familyId) && getFamilyData(familyId).ownerUid == request.auth.uid) ||
+              ('createdById' in getFamilyData(familyId) && getFamilyData(familyId).createdById == request.auth.uid) ||
+              ('adminUids' in getFamilyData(familyId) && request.auth.uid in getFamilyData(familyId).adminUids)
+            ))
       );
     }
 
-    function isFamilyPrimaryAdmin(familyId) {
-      return isAuthenticated() && (
-        (exists(/databases/$(database)/documents/families/$(familyId)) &&
-         get(/databases/$(database)/documents/families/$(familyId)).data.createdById == request.auth.uid) ||
-        (exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)) &&
-         get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.role == 'PRIMARY_ADMIN')
-      );
+    // Backwards-compatible alias
+    function isFamilyAdmin(familyId) {
+      return isFamilyParent(familyId);
     }
 
-    // Family Groups
+    // Prevents removing or demoting the last remaining PARENT in a family
+    function isLastRemainingParent(familyId, targetMemberId) {
+      return familyExists(familyId) &&
+        'adminUids' in getFamilyData(familyId) &&
+        (targetMemberId in getFamilyData(familyId).adminUids) &&
+        getFamilyData(familyId).adminUids.size() <= 1;
+    }
+
+    // Validates that an invited user is redeeming a valid, unredeemed, non-expired invitation
+    // with the exact role specified by the invitation.
+    function isValidInviteRedemption(familyId, memberId, data) {
+      let inviteCode = data.inviteCode;
+      let invitePath = /databases/$(database)/documents/family_invites/$(inviteCode);
+      let inviteDoc = get(invitePath).data;
+      let inviteAfter = getAfter(invitePath).data;
+      let expectedRole = 'invitedRole' in inviteDoc ? inviteDoc.invitedRole : 'CHILD';
+      let expires = 'expiresAt' in inviteDoc ? inviteDoc.expiresAt : inviteDoc.expiresAtMillis;
+      let isCurrentlyPending = (!('status' in inviteDoc) || inviteDoc.status == 'PENDING') &&
+        (!('isUsed' in inviteDoc) || inviteDoc.isUsed == false);
+      let isMarkedRedeemedAfter = ('status' in inviteAfter && inviteAfter.status == 'REDEEMED' && inviteAfter.redeemedByUid == request.auth.uid) ||
+        ('isUsed' in inviteAfter && inviteAfter.isUsed == true);
+      let roleMatchesInvite = (expectedRole == 'PARENT' && isParentRoleValue(data.role)) ||
+        (expectedRole == 'CHILD' && isChildRoleValue(data.role));
+
+      return isSignedIn() &&
+        request.auth.uid == memberId &&
+        data.id == request.auth.uid &&
+        inviteCode is string &&
+        inviteCode.size() >= 4 &&
+        exists(invitePath) &&
+        isCurrentlyPending &&
+        inviteDoc.familyId == familyId &&
+        expires > request.time.toMillis() &&
+        roleMatchesInvite &&
+        isMarkedRedeemedAfter;
+    }
+
+    // =========================================================================
+    // 1. User Profiles (/users/{userId})
+    // =========================================================================
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) &&
+        (!('role' in request.resource.data) || isValidRoleValue(request.resource.data.role)) &&
+        isConsistentRoleAndIdentity(request.resource.data);
+      allow update: if isOwner(userId) &&
+        (!('role' in request.resource.data) || isValidRoleValue(request.resource.data.role)) &&
+        isConsistentRoleAndIdentity(request.resource.data) &&
+        !(
+          'role' in resource.data &&
+          isChildRoleValue(resource.data.role) &&
+          'role' in request.resource.data &&
+          isParentRoleValue(request.resource.data.role) &&
+          'familyId' in resource.data &&
+          resource.data.familyId != '' &&
+          'familyId' in request.resource.data &&
+          request.resource.data.familyId == resource.data.familyId &&
+          !isFamilyParent(resource.data.familyId)
+        );
+      allow delete: if isOwner(userId);
+    }
+
+    // =========================================================================
+    // 1b. Personal / Per-User Tasks & Documents (/tasks/{taskId}, /documents/{docId})
+    // =========================================================================
+    match /tasks/{taskId} {
+      allow read, update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+    }
+
+    match /documents/{docId} {
+      allow read, update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+    }
+
+    // =========================================================================
+    // 2. Role-Specific Family Invitations (/family_invites/{inviteCode})
+    // =========================================================================
+    match /family_invites/{inviteCode} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn() && isFamilyMember(resource.data.familyId);
+
+      // Only a validated PARENT of the target family can create an invitation.
+      // Invited role must be PARENT or CHILD and is immutable after creation.
+      allow create: if isSignedIn() &&
+        request.resource.data.familyId is string &&
+        request.resource.data.familyId.size() > 0 &&
+        isFamilyParent(request.resource.data.familyId) &&
+        (
+          ('code' in request.resource.data && request.resource.data.code == inviteCode) ||
+          ('inviteCode' in request.resource.data && request.resource.data.inviteCode == inviteCode)
+        ) &&
+        (!('invitedRole' in request.resource.data) || request.resource.data.invitedRole in ['PARENT', 'CHILD']) &&
+        (
+          ('invitingParentUid' in request.resource.data && request.resource.data.invitingParentUid == request.auth.uid) ||
+          ('createdById' in request.resource.data && request.resource.data.createdById == request.auth.uid)
+        ) &&
+        (!('status' in request.resource.data) || request.resource.data.status == 'PENDING');
+
+      // Updating an invitation:
+      // 1) Redemption by the joining user (PENDING -> REDEEMED) before expiration, preserving immutable role & familyId
+      // 2) Revocation or expiration by a PARENT of the family
+      allow update: if isSignedIn() &&
+        request.resource.data.familyId == resource.data.familyId &&
+        (!('invitedRole' in resource.data) || request.resource.data.invitedRole == resource.data.invitedRole) &&
+        (
+          (
+            (!('status' in resource.data) || resource.data.status == 'PENDING') &&
+            (!('isUsed' in resource.data) || resource.data.isUsed == false) &&
+            (
+              (request.resource.data.status == 'REDEEMED' && request.resource.data.redeemedByUid == request.auth.uid) ||
+              (request.resource.data.isUsed == true)
+            ) &&
+            (
+              ('expiresAt' in resource.data && resource.data.expiresAt > request.time.toMillis()) ||
+              ('expiresAtMillis' in resource.data && resource.data.expiresAtMillis > request.time.toMillis())
+            )
+          ) ||
+          isFamilyParent(resource.data.familyId)
+        );
+
+      allow delete: if isSignedIn() && isFamilyParent(resource.data.familyId);
+    }
+
+    // =========================================================================
+    // 3. Families (/families/{familyId}) & Subcollections
+    // =========================================================================
     match /families/{familyId} {
-      allow read: if isAuthenticated() && (
-        resource.data.createdById == request.auth.uid ||
-        ('memberIds' in resource.data && resource.data.memberIds is list && resource.data.memberIds.hasAny([request.auth.uid])) ||
-        exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid))
-      );
-      allow create: if isAuthenticated() &&
-        request.resource.data.createdById == request.auth.uid &&
-        request.resource.data.memberIds is list &&
-        request.resource.data.memberIds.size() == 1 &&
-        request.resource.data.memberIds.hasOnly([request.auth.uid]);
+      allow read: if isFamilyMember(familyId);
+
+      // Creating a new family: only the authenticated creator can be in the initial member list
+      allow create: if isSignedIn() &&
+        request.resource.data.familyName is string &&
+        request.resource.data.familyName.size() > 0 &&
+        request.resource.data.familyName.size() <= 100 &&
+        (
+          ('ownerUid' in request.resource.data && request.resource.data.ownerUid == request.auth.uid) ||
+          ('createdById' in request.resource.data && request.resource.data.createdById == request.auth.uid)
+        ) &&
+        (
+          ('memberUids' in request.resource.data && request.resource.data.memberUids is list && request.resource.data.memberUids == [request.auth.uid]) ||
+          ('memberIds' in request.resource.data && request.resource.data.memberIds is list && request.resource.data.memberIds == [request.auth.uid])
+        ) &&
+        (!('adminUids' in request.resource.data) || (request.resource.data.adminUids is list && request.resource.data.adminUids == [request.auth.uid]));
+
+      // Updating family metadata / membership lists:
+      // 1) A PARENT can update family settings/members as long as at least 1 PARENT remains
+      // 2) A newly invited user redeeming a valid invitation can append their uid to memberUids/memberIds
+      //    (and to adminUids ONLY if their validated member role is PARENT)
       allow update: if (
         isFamilyParent(familyId) &&
-        request.resource.data.createdById == resource.data.createdById
+        (!('adminUids' in request.resource.data) || (request.resource.data.adminUids is list && request.resource.data.adminUids.size() >= 1))
       ) || (
-        // Joining member adding only their own UID to memberIds when they have a verified invite and member doc
-        isAuthenticated() &&
-        request.resource.data.createdById == resource.data.createdById &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds']) &&
-        resource.data.memberIds is list &&
-        request.resource.data.memberIds is list &&
-        request.resource.data.memberIds.hasAll(resource.data.memberIds) &&
-        request.resource.data.memberIds.removeAll(resource.data.memberIds).hasOnly([request.auth.uid]) &&
-        exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid))
+        isSignedIn() &&
+        request.resource.data.familyName == resource.data.familyName &&
+        existsAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)) &&
+        (
+          ('memberUids' in request.resource.data &&
+           (!('memberUids' in resource.data) || request.resource.data.memberUids.hasAll(resource.data.memberUids)) &&
+           request.auth.uid in request.resource.data.memberUids) ||
+          ('memberIds' in request.resource.data &&
+           (!('memberIds' in resource.data) || request.resource.data.memberIds.hasAll(resource.data.memberIds)) &&
+           request.auth.uid in request.resource.data.memberIds)
+        ) &&
+        (
+          !('adminUids' in resource.data) ||
+          (isParentRoleValue(getAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.role) &&
+           request.resource.data.adminUids.hasAll(resource.data.adminUids) &&
+           request.resource.data.adminUids.size() <= resource.data.adminUids.size() + 1) ||
+          (isChildRoleValue(getAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.role) &&
+           request.resource.data.adminUids == resource.data.adminUids)
+        )
       );
-      allow delete: if isAuthenticated() && resource.data.createdById == request.auth.uid;
 
-      // Family Members
+      allow delete: if isSignedIn() &&
+        familyExists(familyId) &&
+        (
+          ('ownerUid' in getFamilyData(familyId) && getFamilyData(familyId).ownerUid == request.auth.uid) ||
+          ('createdById' in getFamilyData(familyId) && getFamilyData(familyId).createdById == request.auth.uid)
+        );
+
+      // -----------------------------------------------------------------------
+      // 3a. Family Members Subcollection (/families/{familyId}/members/{memberId})
+      // -----------------------------------------------------------------------
       match /members/{memberId} {
-        allow get: if isFamilyMember(familyId) || (isAuthenticated() && request.auth.uid == memberId);
-        allow list: if isFamilyMember(familyId);
-        // Only parents can create other members; non-parents joining can only create their own non-admin profile with 0 earned points AND must be either in memberIds (without inviteCode) or provide a verified valid invite
-        allow create: if isFamilyParent(familyId) || (
-          request.auth.uid == memberId &&
-          !(request.resource.data.role in ['PRIMARY_ADMIN', 'SECONDARY_ADMIN']) &&
-          (!('earnedPoints' in request.resource.data) || request.resource.data.earnedPoints == 0) &&
-          (!('spentPoints' in request.resource.data) || request.resource.data.spentPoints == 0) &&
+        allow read: if isFamilyMember(familyId) || isOwner(memberId);
+
+        // Creating a member document:
+        // 1) Family creator initializing their own PARENT membership when creating the family
+        // 2) Existing family PARENT adding a member
+        // 3) Invited user redeeming a valid, unredeemed, non-expired invitation with matching role
+        // 4) Pre-listed member in memberIds without an unverified inviteCode onboarding as CHILD
+        allow create: if isValidRoleValue(request.resource.data.role) &&
+          isConsistentRoleAndIdentity(request.resource.data) &&
+          request.resource.data.name is string &&
+          request.resource.data.name.size() > 0 && (
+            isFamilyParent(familyId) ||
+            (
+              isOwner(memberId) &&
+              isParentRoleValue(request.resource.data.role) &&
+              existsAfter(/databases/$(database)/documents/families/$(familyId)) &&
+              (
+                ('ownerUid' in getAfter(/databases/$(database)/documents/families/$(familyId)).data &&
+                 getAfter(/databases/$(database)/documents/families/$(familyId)).data.ownerUid == request.auth.uid) ||
+                ('createdById' in getAfter(/databases/$(database)/documents/families/$(familyId)).data &&
+                 getAfter(/databases/$(database)/documents/families/$(familyId)).data.createdById == request.auth.uid)
+              )
+            ) ||
+            isValidInviteRedemption(familyId, memberId, request.resource.data) ||
+            (
+              isOwner(memberId) &&
+              isChildRoleValue(request.resource.data.role) &&
+              !('inviteCode' in request.resource.data && request.resource.data.inviteCode != '') &&
+              familyExists(familyId) &&
+              isInFamilyMemberList(getFamilyData(familyId), request.auth.uid)
+            )
+          );
+
+        // Updating a member document:
+        // 1) A PARENT can update member details or change roles, EXCEPT demoting the last remaining PARENT
+        // 2) A member (including CHILD) can update their own non-role profile/points,
+        //    but CANNOT modify their role or promote themselves to PARENT.
+        allow update: if isConsistentRoleAndIdentity(request.resource.data) && (
           (
-            (exists(/databases/$(database)/documents/families/$(familyId)) &&
-             'memberIds' in get(/databases/$(database)/documents/families/$(familyId)).data &&
-             get(/databases/$(database)/documents/families/$(familyId)).data.memberIds is list &&
-             get(/databases/$(database)/documents/families/$(familyId)).data.memberIds.hasAny([request.auth.uid]) &&
-             !('inviteCode' in request.resource.data)) ||
-            ('inviteCode' in request.resource.data &&
-             request.resource.data.inviteCode is string &&
-             exists(/databases/$(database)/documents/family_invites/$(request.resource.data.inviteCode)) &&
-             get(/databases/$(database)/documents/family_invites/$(request.resource.data.inviteCode)).data.familyId == familyId &&
-             (!('isRevoked' in get(/databases/$(database)/documents/family_invites/$(request.resource.data.inviteCode)).data) ||
-              get(/databases/$(database)/documents/family_invites/$(request.resource.data.inviteCode)).data.isRevoked == false) &&
-             (!('isUsed' in get(/databases/$(database)/documents/family_invites/$(request.resource.data.inviteCode)).data) ||
-              get(/databases/$(database)/documents/family_invites/$(request.resource.data.inviteCode)).data.isUsed == false) &&
-             (!('expiresAtMillis' in get(/databases/$(database)/documents/family_invites/$(request.resource.data.inviteCode)).data) ||
-              request.time.toMillis() < get(/databases/$(database)/documents/family_invites/$(request.resource.data.inviteCode)).data.expiresAtMillis) &&
-             (!('intendedEmail' in get(/databases/$(database)/documents/family_invites/$(request.resource.data.inviteCode)).data) ||
-              get(/databases/$(database)/documents/family_invites/$(request.resource.data.inviteCode)).data.intendedEmail == "" ||
-              get(/databases/$(database)/documents/family_invites/$(request.resource.data.inviteCode)).data.intendedEmail == request.auth.token.email) &&
-             // Mandatory atomic consumption: the invite must be marked as used by this user in the same atomic operation
-             getAfter(/databases/$(database)/documents/family_invites/$(request.resource.data.inviteCode)).data.isUsed == true &&
-             getAfter(/databases/$(database)/documents/family_invites/$(request.resource.data.inviteCode)).data.usedByUid == request.auth.uid)
+            isFamilyParent(familyId) &&
+            isValidRoleValue(request.resource.data.role) &&
+            !(
+              isParentRoleValue(resource.data.role) &&
+              isChildRoleValue(request.resource.data.role) &&
+              isLastRemainingParent(familyId, memberId)
+            )
+          ) || (
+            isFamilyMember(familyId) &&
+            isOwner(memberId) &&
+            request.resource.data.role == resource.data.role &&
+            (!('familyId' in resource.data) || request.resource.data.familyId == resource.data.familyId)
           )
         );
-        // Parent updates: only primary admin can assign/demote PRIMARY_ADMIN role
-        allow update: if (
-          isFamilyPrimaryAdmin(familyId)
-        ) || (
-          isFamilyParent(familyId) &&
-          request.resource.data.role != 'PRIMARY_ADMIN' &&
-          resource.data.role != 'PRIMARY_ADMIN'
-        ) || (
-          // Children/members can only update their own avatar/name/color, never points, role, or approval
-          request.auth.uid == memberId &&
-          request.resource.data.role == resource.data.role &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['avatarEmoji', 'name', 'colorHex', 'schoolGrade', 'updatedAt'])
-        );
-        allow delete: if isFamilyParent(familyId) && resource.data.role != 'PRIMARY_ADMIN';
+
+        // Deleting a member document:
+        // Only a PARENT can remove a member, and CANNOT remove the last remaining PARENT.
+        allow delete: if isFamilyParent(familyId) &&
+          !(isParentRoleValue(resource.data.role) && isLastRemainingParent(familyId, memberId));
       }
 
-      // Family Tasks
+      // -----------------------------------------------------------------------
+      // 3b. Tasks Subcollection (/families/{familyId}/tasks/{taskId})
+      // -----------------------------------------------------------------------
       match /tasks/{taskId} {
         allow read: if isFamilyMember(familyId);
-        // Parents can create any task; child creating task cannot self-approve or assign excessive points
-        allow create: if (
-          isFamilyParent(familyId) &&
-          request.resource.data.familyId == familyId &&
-          request.resource.data.title is string &&
-          request.resource.data.title.size() > 0
-        ) || (
-          isFamilyMember(familyId) &&
-          request.resource.data.familyId == familyId &&
+
+        // Only a PARENT can create, edit, assign, or delete family tasks
+        allow create: if isFamilyParent(familyId) &&
           request.resource.data.title is string &&
           request.resource.data.title.size() > 0 &&
-          (!('approvedByParent' in request.resource.data) || request.resource.data.approvedByParent == false) &&
-          (!('points' in request.resource.data) || request.resource.data.points == 0)
-        );
-        allow update: if (
-          isFamilyParent(familyId) &&
-          request.resource.data.familyId == resource.data.familyId
-        ) || (
-          // Child can ONLY update tasks assigned to them, and ONLY explicitly permitted completion fields; cannot touch points or approvedByParent
+          request.resource.data.title.size() <= 200 &&
+          request.resource.data.isCompleted is bool;
+
+        // Update rules:
+        // - PARENT can edit any task field (title, assignee, points, completion, approval)
+        // - CHILD can ONLY mark their OWN assigned task (`assignedUid == request.auth.uid` or `assignedToMemberId == request.auth.uid`)
+        //   as completed/uncompleted, and cannot change title, description, points/pointsValue,
+        //   assignedUid/assignedToMemberId, familyId, or approvedByParent.
+        allow update: if isFamilyParent(familyId) || (
           isFamilyMember(familyId) &&
-          ((('assignedToMemberId' in resource.data) && resource.data.assignedToMemberId == request.auth.uid) ||
-           (('assignedMemberId' in resource.data) && resource.data.assignedMemberId == request.auth.uid)) &&
-          request.resource.data.familyId == resource.data.familyId &&
-          request.resource.data.points == resource.data.points &&
-          request.resource.data.approvedByParent == resource.data.approvedByParent &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isCompleted', 'completedAtMillis', 'completedByMemberId', 'updatedAt'])
+          (
+            ('assignedUid' in resource.data && resource.data.assignedUid == request.auth.uid) ||
+            ('assignedToMemberId' in resource.data && resource.data.assignedToMemberId == request.auth.uid)
+          ) &&
+          request.resource.data.title == resource.data.title &&
+          request.resource.data.description == resource.data.description &&
+          (!('assignedUid' in resource.data) || request.resource.data.assignedUid == resource.data.assignedUid) &&
+          (!('assignedToMemberId' in resource.data) || request.resource.data.assignedToMemberId == resource.data.assignedToMemberId) &&
+          (!('points' in resource.data) || request.resource.data.points == resource.data.points) &&
+          (!('pointsValue' in resource.data) || request.resource.data.pointsValue == resource.data.pointsValue) &&
+          (!('familyId' in resource.data) || request.resource.data.familyId == resource.data.familyId) &&
+          (!('approvedByParent' in resource.data) || request.resource.data.approvedByParent == resource.data.approvedByParent) &&
+          request.resource.data.isCompleted is bool
         );
+
         allow delete: if isFamilyParent(familyId);
       }
 
-      // Rewards
+      // -----------------------------------------------------------------------
+      // 3c. Rewards Subcollection (/families/{familyId}/rewards/{rewardId})
+      // -----------------------------------------------------------------------
       match /rewards/{rewardId} {
         allow read: if isFamilyMember(familyId);
-        allow create, delete: if isFamilyParent(familyId);
-        allow update: if isFamilyParent(familyId) || (
-          // Child can claim a reward for themselves, but cannot approve it or change pointsCost/title
-          isFamilyMember(familyId) &&
-          (!('isClaimed' in resource.data) || resource.data.isClaimed == false) &&
-          request.resource.data.pointsCost == resource.data.pointsCost &&
-          request.resource.data.title == resource.data.title &&
-          request.resource.data.claimedByMemberId == request.auth.uid &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isClaimed', 'claimedByMemberId', 'claimedAtMillis', 'updatedAt'])
-        );
+        allow create, update, delete: if isFamilyParent(familyId) &&
+          (request.method == 'delete' || (
+            request.resource.data.title is string &&
+            request.resource.data.title.size() > 0 &&
+            request.resource.data.pointsCost is int &&
+            request.resource.data.pointsCost > 0
+          ));
       }
-    }
 
-    // Top-level invite lookup for family joining
-    match /family_invites/{inviteCode} {
-      // Prevent unauthorized enumeration of invitations across all families
-      allow list: if isAuthenticated() && isFamilyParent(resource.data.familyId);
+      // -----------------------------------------------------------------------
+      // 3d. School Timetable Subcollection (/families/{familyId}/periods/{periodId})
+      // -----------------------------------------------------------------------
+      match /periods/{periodId} {
+        allow read: if isFamilyMember(familyId);
+        allow create, update, delete: if isFamilyParent(familyId);
+      }
 
-      // Validate single document read (get) with expiration, revocation, usage and recipient checks
-      allow get: if isAuthenticated() && (
-        isFamilyParent(resource.data.familyId) ||
-        resource.data.createdById == request.auth.uid ||
-        (
-          (!('isRevoked' in resource.data) || resource.data.isRevoked == false) &&
-          (!('isUsed' in resource.data) || resource.data.isUsed == false) &&
-          (!('expiresAtMillis' in resource.data) || request.time.toMillis() < resource.data.expiresAtMillis) &&
-          (!('intendedEmail' in resource.data) || resource.data.intendedEmail == "" || resource.data.intendedEmail == request.auth.token.email)
-        )
-      );
-
-      // Only authenticated family parent can create invites for their family
-      allow create: if isAuthenticated() &&
-        request.resource.data.createdById == request.auth.uid &&
-        request.resource.data.familyId is string &&
-        isFamilyParent(request.resource.data.familyId) &&
-        (!('role' in request.resource.data) || request.resource.data.role != 'PRIMARY_ADMIN') &&
-        (!('isRevoked' in request.resource.data) || request.resource.data.isRevoked == false) &&
-        (!('isUsed' in request.resource.data) || request.resource.data.isUsed == false) &&
-        (!('expiresAtMillis' in request.resource.data) || request.resource.data.expiresAtMillis > request.time.toMillis());
-
-      // Parents can update invites (revoke, renew) or a joining member can mark single-use invite as used
-      allow update: if isAuthenticated() && (
-        (
-          isFamilyParent(resource.data.familyId) &&
-          request.resource.data.familyId == resource.data.familyId
-        ) || (
-          (!('isRevoked' in resource.data) || resource.data.isRevoked == false) &&
-          (!('isUsed' in resource.data) || resource.data.isUsed == false) &&
-          (!('expiresAtMillis' in resource.data) || request.time.toMillis() < resource.data.expiresAtMillis) &&
-          (!('intendedEmail' in resource.data) || resource.data.intendedEmail == "" || resource.data.intendedEmail == request.auth.token.email) &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isUsed', 'usedByUid', 'usedAtMillis', 'updatedAt']) &&
-          request.resource.data.isUsed == true &&
-          request.resource.data.usedByUid == request.auth.uid &&
-          !exists(/databases/$(database)/documents/families/$(resource.data.familyId)/members/$(request.auth.uid)) &&
-          getAfter(/databases/$(database)/documents/families/$(resource.data.familyId)/members/$(request.auth.uid)).data.id == request.auth.uid &&
-          getAfter(/databases/$(database)/documents/families/$(resource.data.familyId)/members/$(request.auth.uid)).data.inviteCode == inviteCode
-        )
-      );
-
-      allow delete: if isAuthenticated() && (
-        resource.data.createdById == request.auth.uid ||
-        isFamilyParent(resource.data.familyId)
-      );
-    }
-
-    // Top-level user profile: only user or family members can read private profile information
-    match /users/{userId} {
-      allow read: if isAuthenticated() && (
-        request.auth.uid == userId ||
-        (resource.data.familyId is string && resource.data.familyId != "" && isFamilyMember(resource.data.familyId))
-      );
-      allow create, update, delete: if isAuthenticated() && request.auth.uid == userId;
-    }
-
-    // Legacy/top-level tasks collection for backward compatibility
-    match /tasks/{taskId} {
-      allow read: if isAuthenticated() && (
-        resource.data.userId == request.auth.uid ||
-        (resource.data.familyId is string && resource.data.familyId != "" && isFamilyMember(resource.data.familyId))
-      );
-      allow create: if isAuthenticated() && (
-        // Standalone user task (no familyId)
-        ((!('familyId' in request.resource.data) || request.resource.data.familyId == "") && request.resource.data.userId == request.auth.uid) ||
-        // Family parent task creation
-        (request.resource.data.familyId is string && request.resource.data.familyId != "" && isFamilyParent(request.resource.data.familyId)) ||
-        // Family child task creation: proposal only, cannot self-approve or assign points
-        (request.resource.data.familyId is string && request.resource.data.familyId != "" && isFamilyMember(request.resource.data.familyId) &&
-         (!('approvedByParent' in request.resource.data) || request.resource.data.approvedByParent == false) &&
-         (!('points' in request.resource.data) || request.resource.data.points == 0))
-      );
-      allow update: if isAuthenticated() && (
-        // Standalone user task update
-        ((!('familyId' in resource.data) || resource.data.familyId == "") && resource.data.userId == request.auth.uid && request.resource.data.userId == request.auth.uid) ||
-        // Family parent task update
-        (resource.data.familyId is string && resource.data.familyId != "" && isFamilyParent(resource.data.familyId) && request.resource.data.familyId == resource.data.familyId) ||
-        // Family child task update: ONLY for tasks assigned to this user, and ONLY completion fields; cannot touch points or approvedByParent
-        (resource.data.familyId is string && resource.data.familyId != "" && isFamilyMember(resource.data.familyId) &&
-         ((('assignedToMemberId' in resource.data) && resource.data.assignedToMemberId == request.auth.uid) ||
-          (('assignedMemberId' in resource.data) && resource.data.assignedMemberId == request.auth.uid)) &&
-         request.resource.data.familyId == resource.data.familyId &&
-         request.resource.data.points == resource.data.points &&
-         request.resource.data.approvedByParent == resource.data.approvedByParent &&
-         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isCompleted', 'completedAtMillis', 'completedByMemberId', 'updatedAt']))
-      );
-      allow delete: if isAuthenticated() && (
-        ((!('familyId' in resource.data) || resource.data.familyId == "") && resource.data.userId == request.auth.uid) ||
-        (resource.data.familyId is string && resource.data.familyId != "" && isFamilyParent(resource.data.familyId))
-      );
-    }
-
-    // Legacy documents: separated operations, strict ownership validation
-    match /documents/{documentId} {
-      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
-      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
-      allow update: if isAuthenticated() &&
-        resource.data.userId == request.auth.uid &&
-        request.resource.data.userId == resource.data.userId;
-      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      // -----------------------------------------------------------------------
+      // 3e. Shared Documents Metadata (/families/{familyId}/documents/{docId})
+      // -----------------------------------------------------------------------
+      match /documents/{docId} {
+        allow read: if isFamilyMember(familyId);
+        allow create, update: if isFamilyMember(familyId) &&
+          request.resource.data.name is string &&
+          request.resource.data.name.size() > 0;
+        allow delete: if isFamilyParent(familyId);
+      }
     }
   }
 }
