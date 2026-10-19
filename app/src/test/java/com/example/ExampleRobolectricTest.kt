@@ -446,6 +446,56 @@ class ExampleRobolectricTest {
         )
         assertEquals("NOT_FOUND", classifiedNotFound.errorCode)
     }
+
+    @Test
+    fun `test invitation diagnostics redact full codes and failed invitation writes never produce shareable code`() = runBlocking {
+        val permDenied = com.google.firebase.firestore.FirebaseFirestoreException(
+            "PERMISSION_DENIED: Missing or insufficient permissions for inviteCode=K9M4P2",
+            com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED
+        )
+        val classifiedInviteErr = com.example.util.FirestoreErrorHandler.classifyInvitationFailure(
+            error = permDenied,
+            stage = com.example.util.FirestoreErrorHandler.InvitationStage.CREATE_INVITATION_WRITE,
+            path = "family_invites/K9M4P2",
+            rawInviteCode = "K9M4P2"
+        )
+        assertEquals(
+            com.example.util.FirestoreErrorHandler.InvitationFailureCategory.PERMISSION_DENIED,
+            classifiedInviteErr.category
+        )
+        assertEquals("PERMISSION_DENIED", classifiedInviteErr.errorCode)
+        assertEquals("CREATE_INVITATION_WRITE", classifiedInviteErr.stage.stageName)
+        assertEquals("family_invites/{inviteCode}", classifiedInviteErr.sanitizedPath)
+        assertEquals(
+            "ai-studio-android-familyta-a054dbd1-9c2d-4a83-ad6d-dcfe6fb0d2ca",
+            classifiedInviteErr.databaseId
+        )
+        assertFalse("Diagnostic message must never contain full invite code", classifiedInviteErr.sanitizedMessage.contains("K9M4P2"))
+        assertFalse("Diagnostic path must never contain full invite code", classifiedInviteErr.sanitizedPath.contains("K9M4P2"))
+
+        // Verify that when repository invitation write fails, no shareable code is produced
+        val repository = FamilyRepository()
+        repository.simulateOfflineNetworkFailure = true
+        val failedResult = repository.createRoleSpecificInvitation(
+            invitedRole = UserRole.CHILD,
+            invitedNickname = "דני",
+            customCodeOverride = "NEVER9"
+        )
+        assertTrue(failedResult.isFailure)
+        assertFalse(repository.pendingInvitations.value.any { it.code == "NEVER9" })
+        assertNull(repository.inviteNewMember("דני", "👦", UserRole.CHILD, null, null))
+
+        // Once network recovers, retry succeeds and produces a confirmed invitation
+        repository.simulateOfflineNetworkFailure = false
+        val retryResult = repository.createRoleSpecificInvitation(
+            invitedRole = UserRole.CHILD,
+            invitedNickname = "דני",
+            customCodeOverride = "VALID9"
+        )
+        assertTrue(retryResult.isSuccess)
+        assertEquals("VALID9", retryResult.getOrThrow().code)
+        assertTrue(repository.pendingInvitations.value.any { it.code == "VALID9" })
+    }
 }
 
 

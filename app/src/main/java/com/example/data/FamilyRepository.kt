@@ -142,6 +142,11 @@ class FamilyRepository(
     var lastClassifiedStartupFailure: FirestoreErrorHandler.ClassifiedStartupFailure? = null
         private set
 
+    /** Last classified invitation error for diagnostics and automated tests. */
+    @Volatile
+    var lastClassifiedInvitationFailure: FirestoreErrorHandler.ClassifiedInvitationFailure? = null
+        private set
+
     private var tasksListenerRegistration: ListenerRegistration? = null
     private var membersListenerRegistration: ListenerRegistration? = null
     private var rewardsListenerRegistration: ListenerRegistration? = null
@@ -1129,10 +1134,91 @@ class FamilyRepository(
                     if (!resolvedPhotoUrl.isNullOrBlank()) _googleUserPhotoUrl.value = resolvedPhotoUrl
                     _currentMember.value = restoredMember
 
-                    val currentList = _members.value.filter { it.id == uid }
-                        .map { restoredMember }
-                        .ifEmpty { listOf(restoredMember) }
-                    _members.value = currentList
+                    val loadedMembers = if (db != null && authProvider()?.currentUser != null) {
+                        val allDocs = runCatching {
+                            db.collection("families").document(existingFamilyId)
+                                .collection("members").get().await().documents
+                        }.getOrNull().orEmpty()
+                        val parsedMembers = allDocs.mapNotNull { doc ->
+                            if (doc.id == uid) {
+                                restoredMember
+                            } else {
+                                val mName = doc.getString("name") ?: doc.getString("displayName") ?: return@mapNotNull null
+                                val mRoleRaw = doc.getString("role") ?: doc.getString("userRole") ?: doc.getString("familyIdentity")
+                                val mRole = UserRole.fromFirestoreValue(mRoleRaw)
+                                val mPoints = (doc.getLong("earnedPoints") ?: 0L).toInt()
+                                val mIdentityRaw = doc.getString("familyIdentity")
+                                val mEmojiRaw = doc.getString("avatarEmoji")?.takeIf { it.isNotBlank() }
+                                val mIdentity = FamilyIdentity.fromFirestoreValue(
+                                    raw = mIdentityRaw,
+                                    role = mRole,
+                                    avatarEmoji = mEmojiRaw,
+                                    nameHint = mName,
+                                    memberId = doc.id
+                                )
+                                FamilyMember(
+                                    id = doc.id,
+                                    name = mName,
+                                    nameEn = doc.getString("nameEn") ?: mName,
+                                    avatarEmoji = mEmojiRaw ?: mIdentity.defaultEmoji,
+                                    role = mRole,
+                                    familyIdentity = mIdentity,
+                                    colorHex = doc.getLong("colorHex")
+                                        ?: if (mRole == UserRole.PARENT) 0xFF1A73E8L else 0xFF34A853L,
+                                    googleEmail = doc.getString("googleEmail") ?: doc.getString("email"),
+                                    photoUrl = doc.getString("photoUrl"),
+                                    schoolGrade = doc.getString("schoolGrade"),
+                                    earnedPoints = mPoints,
+                                    invitationPending = false,
+                                    invitationAccepted = true,
+                                    inviteToken = doc.getString("inviteCode") ?: doc.getString("inviteToken"),
+                                    invitedByMemberId = doc.getString("invitedByMemberId")
+                                )
+                            }
+                        }
+                        if (parsedMembers.any { it.id == uid }) {
+                            parsedMembers
+                        } else {
+                            listOf(restoredMember) + parsedMembers
+                        }
+                    } else {
+                        val localOtherMembers = _members.value.filter { it.id != uid && !it.id.startsWith("m_") }
+                        listOf(restoredMember) + localOtherMembers
+                    }
+                    _members.value = loadedMembers
+
+                    val confirmedPendingInvites = if (db != null && authProvider()?.currentUser != null && validatedRole == UserRole.PARENT) {
+                        val now = System.currentTimeMillis()
+                        val inviteDocs = runCatching {
+                            db.collection("family_invites")
+                                .whereEqualTo("familyId", existingFamilyId)
+                                .get()
+                                .await()
+                                .documents
+                        }.getOrNull().orEmpty()
+                        inviteDocs.mapNotNull { doc ->
+                            val data = doc.data ?: return@mapNotNull null
+                            parseInvitationDocument(doc.id, data).also { inv ->
+                                invitationsByCode[inv.code] = inv
+                            }
+                        }.filter { it.status == InvitationStatus.PENDING && !it.isExpired(now) }
+                            .sortedByDescending { it.createdAt }
+                    } else {
+                        _pendingInvitations.value.filter {
+                            it.familyId == existingFamilyId && it.status == InvitationStatus.PENDING && !it.isExpired()
+                        }
+                    }
+                    _pendingInvitations.value = confirmedPendingInvites
+
+                    _cloudFamilyGroup.value = _cloudFamilyGroup.value.copy(
+                        familyId = existingFamilyId,
+                        familyName = resolvedFamilyName,
+                        inviteCode = confirmedPendingInvites.firstOrNull()?.code.orEmpty(),
+                        ownerEmail = resolvedEmail.ifBlank { email },
+                        ownerName = persistedName,
+                        syncedMembersCount = loadedMembers.size,
+                        lastSyncedEpochMillis = System.currentTimeMillis()
+                    )
 
                     attachFirestoreRealtimeListeners(existingFamilyId)
                     flushOfflineSyncQueue(existingFamilyId)
@@ -1323,13 +1409,16 @@ class FamilyRepository(
                 batch.set(
                     familyRef,
                     mapOf(
+                        "id" to newFamilyId,
                         "familyId" to newFamilyId,
                         "name" to cleanFamilyName,
                         "familyName" to cleanFamilyName,
                         "createdBy" to uid,
+                        "createdById" to uid,
                         "ownerUid" to uid,
                         "ownerEmail" to email,
                         "adminUids" to listOf(uid),
+                        "memberIds" to listOf(uid),
                         "memberUids" to listOf(uid),
                         "updatedAt" to now
                     ),
@@ -1357,6 +1446,7 @@ class FamilyRepository(
                     memberData["photoUrl"] = photoUrl
                 }
                 batch.set(memberRef, memberData, SetOptions.merge())
+                batch.commit().await()
 
                 val userData = mutableMapOf<String, Any>(
                     "uid" to uid,
@@ -1373,9 +1463,7 @@ class FamilyRepository(
                 if (!photoUrl.isNullOrBlank()) {
                     userData["photoUrl"] = photoUrl
                 }
-                batch.set(userRef, userData, SetOptions.merge())
-
-                batch.commit().await()
+                userRef.set(userData, SetOptions.merge()).await()
             } catch (e: Exception) {
                 FirestoreErrorHandler.classifyStartupFailure(
                     error = e,
@@ -1434,30 +1522,359 @@ class FamilyRepository(
      * - The invited role (`PARENT` or `CHILD`) is stored in Firestore and is immutable after creation.
      * - Pending invitations are stored in `_pendingInvitations` and NEVER mixed into active `_members`.
      */
+    /**
+     * Ensures that an authenticated PARENT has a valid, persisted `/families/{familyId}` and
+     * `/families/{familyId}/members/{parentUid}` (`role = "PARENT"`) in the named Firestore database
+     * before creating an invitation in `/family_invites/{code}`.
+     *
+     * SECURITY INVARIANT:
+     * - If `/families/{familyId}/members/{parentUid}` exists in Firestore and has a CHILD role,
+     *   immediately throws [SecurityException] so a CHILD can NEVER create invitations.
+     */
+    private suspend fun ensureParentAuthorizedInFirestoreForInvite(
+        db: FirebaseFirestore,
+        parentUid: String,
+        parentEmail: String,
+        parentMember: FamilyMember
+    ): Pair<String, String> {
+        var resolvedFamilyId = _activeFamilyId.value.trim()
+        var resolvedFamilyName = _familyName.value.trim().ifBlank { "המשפחה שלי" }
+
+        // If activeFamilyId is blank or still on the offline demo placeholder, check /users/{parentUid} first
+        if (resolvedFamilyId.isBlank() || resolvedFamilyId == "fam_israeli_8492") {
+            val userSnap = runCatching {
+                db.collection("users").document(parentUid).get().await()
+            }.getOrNull()
+            val userFamId = (
+                userSnap?.getString("familyId")
+                    ?: userSnap?.getString("activeFamilyId")
+                    ?: userSnap?.getString("groupId")
+                )?.trim()?.takeIf { it.isNotBlank() && it != "fam_israeli_8492" }
+            val userFamName = userSnap?.getString("familyName")?.trim()?.takeIf { it.isNotBlank() }
+
+            if (userFamId != null) {
+                resolvedFamilyId = userFamId
+                if (userFamName != null) {
+                    resolvedFamilyName = userFamName
+                }
+                _activeFamilyId.value = resolvedFamilyId
+                _familyName.value = resolvedFamilyName
+            } else if (resolvedFamilyId.isBlank() || resolvedFamilyId == "fam_israeli_8492") {
+                resolvedFamilyId = "fam_${parentUid.take(8)}_${System.currentTimeMillis() % 10000}"
+                _activeFamilyId.value = resolvedFamilyId
+            }
+        }
+
+        val familyRef = db.collection("families").document(resolvedFamilyId)
+        val memberRef = familyRef.collection("members").document(parentUid)
+
+        // Check existing member document in Firestore
+        val memberSnap: DocumentSnapshot? = try {
+            memberRef.get().await()
+        } catch (memberErr: FirebaseFirestoreException) {
+            if (memberErr.code == FirebaseFirestoreException.Code.UNAVAILABLE ||
+                memberErr.code == FirebaseFirestoreException.Code.DEADLINE_EXCEEDED
+            ) {
+                throw memberErr
+            }
+            null
+        }
+
+        if (memberSnap != null && memberSnap.exists()) {
+            val rawRole = (memberSnap.getString("role") ?: memberSnap.getString("userRole"))?.trim()
+            if (!rawRole.isNullOrBlank() && !UserRole.fromFirestoreValue(rawRole).isParentRole) {
+                throw SecurityException("רק הורה (מנהל משפחה) רשאי ליצור קודי הזמנה למשפחה.")
+            }
+            // If legacy parent role (e.g. PRIMARY_ADMIN / ADMIN / FATHER / MOTHER), normalize to canonical "PARENT"
+            if (rawRole != "PARENT") {
+                val parentIdentity = if (parentMember.familyIdentity.isParentIdentity) {
+                    parentMember.familyIdentity
+                } else {
+                    FamilyIdentity.FATHER
+                }
+                memberRef.set(
+                    mapOf(
+                        "role" to UserRole.PARENT.toFirestoreValue(),
+                        "familyIdentity" to parentIdentity.toFirestoreValue()
+                    ),
+                    SetOptions.merge()
+                ).await()
+            }
+            return resolvedFamilyId to resolvedFamilyName
+        }
+
+        // Member doc does not exist yet in Firestore; inspect /families/{familyId}
+        val familySnap = familyRef.get().await()
+        if (familySnap.exists()) {
+            val remoteName = (familySnap.getString("familyName") ?: familySnap.getString("name"))
+                ?.trim()?.takeIf { it.isNotBlank() }
+            if (remoteName != null) {
+                resolvedFamilyName = remoteName
+                _familyName.value = remoteName
+            }
+            val isCreatorOrAdmin = familySnap.getString("createdBy") == parentUid ||
+                familySnap.getString("createdById") == parentUid ||
+                familySnap.getString("ownerUid") == parentUid ||
+                (familySnap.get("adminUids") as? List<*>)?.contains(parentUid) == true
+
+            if (!isCreatorOrAdmin) {
+                throw SecurityException("החשבון המחובר אינו רשום כהורה במשפחה זו בענן.")
+            }
+
+            // Self-heal missing /families/{familyId}/members/{parentUid} document for verified family creator/admin
+            val parentIdentity = if (parentMember.familyIdentity.isParentIdentity) {
+                parentMember.familyIdentity
+            } else {
+                FamilyIdentity.FATHER
+            }
+            memberRef.set(
+                mapOf(
+                    "id" to parentUid,
+                    "uid" to parentUid,
+                    "familyId" to resolvedFamilyId,
+                    "name" to parentMember.name.ifBlank { parentIdentity.labelHe },
+                    "nameEn" to parentMember.nameEn.ifBlank { parentMember.name.ifBlank { parentIdentity.labelEn } },
+                    "avatarEmoji" to parentMember.avatarEmoji.ifBlank { parentIdentity.defaultEmoji },
+                    "role" to UserRole.PARENT.toFirestoreValue(),
+                    "familyIdentity" to parentIdentity.toFirestoreValue(),
+                    "googleEmail" to parentEmail,
+                    "earnedPoints" to parentMember.earnedPoints,
+                    "spentPoints" to 0,
+                    "invitationPending" to false,
+                    "invitationAccepted" to true
+                ),
+                SetOptions.merge()
+            ).await()
+        } else {
+            // Family document was not yet persisted to Firestore (e.g. created in local/clean session); bootstrap atomically
+            val now = System.currentTimeMillis()
+            val parentIdentity = if (parentMember.familyIdentity.isParentIdentity) {
+                parentMember.familyIdentity
+            } else {
+                FamilyIdentity.FATHER
+            }
+            val batch = db.batch()
+            batch.set(
+                familyRef,
+                mapOf(
+                    "id" to resolvedFamilyId,
+                    "familyId" to resolvedFamilyId,
+                    "name" to resolvedFamilyName,
+                    "familyName" to resolvedFamilyName,
+                    "createdBy" to parentUid,
+                    "createdById" to parentUid,
+                    "ownerUid" to parentUid,
+                    "ownerEmail" to parentEmail,
+                    "adminUids" to listOf(parentUid),
+                    "memberIds" to listOf(parentUid),
+                    "memberUids" to listOf(parentUid),
+                    "updatedAt" to now
+                ),
+                SetOptions.merge()
+            )
+            batch.set(
+                memberRef,
+                mapOf(
+                    "id" to parentUid,
+                    "uid" to parentUid,
+                    "familyId" to resolvedFamilyId,
+                    "name" to parentMember.name.ifBlank { parentIdentity.labelHe },
+                    "nameEn" to parentMember.nameEn.ifBlank { parentMember.name.ifBlank { parentIdentity.labelEn } },
+                    "avatarEmoji" to parentMember.avatarEmoji.ifBlank { parentIdentity.defaultEmoji },
+                    "role" to UserRole.PARENT.toFirestoreValue(),
+                    "familyIdentity" to parentIdentity.toFirestoreValue(),
+                    "googleEmail" to parentEmail,
+                    "earnedPoints" to parentMember.earnedPoints,
+                    "spentPoints" to 0,
+                    "invitationPending" to false,
+                    "invitationAccepted" to true,
+                    "joinedAt" to now
+                ),
+                SetOptions.merge()
+            )
+            batch.commit().await()
+
+            db.collection("users").document(parentUid).set(
+                mapOf(
+                    "uid" to parentUid,
+                    "email" to parentEmail,
+                    "displayName" to parentMember.name.ifBlank { parentIdentity.labelHe },
+                    "name" to parentMember.name.ifBlank { parentIdentity.labelHe },
+                    "familyId" to resolvedFamilyId,
+                    "familyName" to resolvedFamilyName,
+                    "role" to UserRole.PARENT.toFirestoreValue(),
+                    "familyIdentity" to parentIdentity.toFirestoreValue(),
+                    "avatarEmoji" to parentMember.avatarEmoji.ifBlank { parentIdentity.defaultEmoji },
+                    "updatedAt" to now
+                ),
+                SetOptions.merge()
+            ).await()
+        }
+
+        return resolvedFamilyId to resolvedFamilyName
+    }
+
+    /**
+     * V1.6 Requirement 4:
+     * Generates and persists a unique, role-specific invitation in `/family_invites/{code}`
+     * in the named Firestore database (`ai-studio-android-familyta-a054dbd1-9c2d-4a83-ad6d-dcfe6fb0d2ca`).
+     * - Strictly enforces that ONLY a PARENT can create invitations (both locally and in Firestore).
+     * - Writes document ID = `code` (6-character uppercase alphanumeric) with all required V1.6 fields.
+     * - Confirms the Firestore document commit before adding the invitation to `_pendingInvitations`
+     *   or returning success to the UI, so a failed write NEVER produces a shareable code.
+     */
     suspend fun createRoleSpecificInvitation(
         invitedRole: UserRole,
         invitedNickname: String = "",
-        customExpirationMs: Long = FamilyInvitation.DEFAULT_EXPIRATION_MS
+        customExpirationMs: Long = FamilyInvitation.DEFAULT_EXPIRATION_MS,
+        invitedEmail: String? = null,
+        intendedEmail: String? = null,
+        schoolGrade: String? = null,
+        customCodeOverride: String? = null
     ): Result<FamilyInvitation> {
         val current = _currentMember.value
+        val code = customCodeOverride?.trim()?.uppercase()?.takeIf { it.length >= 4 }
+            ?: generateSecureInviteCode()
+        val invitePath = "family_invites/$code"
+
         if (!current.isParent) {
-            return Result.failure(SecurityException("רק הורה (מנהל משפחה) רשאי ליצור הזמנות למשפחה."))
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = SecurityException("רק הורה (מנהל משפחה) רשאי ליצור קודי הזמנה למשפחה."),
+                stage = FirestoreErrorHandler.InvitationStage.VERIFY_PARENT_AUTHORIZATION,
+                path = invitePath,
+                rawInviteCode = code,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.UNAUTHORIZED_ROLE
+            )
+            lastClassifiedInvitationFailure = classified
+            return Result.failure(FirestoreErrorHandler.InvitationFirestoreException(classified))
+        }
+
+        if (simulateOfflineNetworkFailure) {
+            val offlineErr = FirebaseFirestoreException(
+                "Simulated offline network failure during invitation creation",
+                FirebaseFirestoreException.Code.UNAVAILABLE
+            )
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = offlineErr,
+                stage = FirestoreErrorHandler.InvitationStage.CREATE_INVITATION_WRITE,
+                path = invitePath,
+                rawInviteCode = code,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedInvitationFailure = classified
+            return Result.failure(FirestoreErrorHandler.InvitationFirestoreException(classified, offlineErr))
         }
 
         val canonicalRole = if (invitedRole.isParentRole) UserRole.PARENT else UserRole.CHILD
-        val code = generateSecureInviteCode()
         val now = System.currentTimeMillis()
         val expiresAt = now + customExpirationMs
-        val familyId = _activeFamilyId.value
-        val familyName = _familyName.value
+        var familyId = _activeFamilyId.value
+        var familyName = _familyName.value
         val parentUid = currentUid()
+        val parentEmail = authProvider()?.currentUser?.email ?: _googleUserEmail.value
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        var currentInviteStage = FirestoreErrorHandler.InvitationStage.VERIFY_PARENT_AUTHORIZATION
+
+        if (db != null && authUser != null) {
+            try {
+                FirestoreErrorHandler.logInvitationMilestone(
+                    stage = FirestoreErrorHandler.InvitationStage.VERIFY_PARENT_AUTHORIZATION,
+                    path = "families/$familyId/members/$parentUid",
+                    databaseId = configuredDatabaseId,
+                    rawInviteCode = code,
+                    note = "Verifying parent authorization before creating invitation"
+                )
+                val (verifiedFamilyId, verifiedFamilyName) = ensureParentAuthorizedInFirestoreForInvite(
+                    db = db,
+                    parentUid = authUser.uid,
+                    parentEmail = parentEmail,
+                    parentMember = current
+                )
+                familyId = verifiedFamilyId
+                familyName = verifiedFamilyName
+
+                currentInviteStage = FirestoreErrorHandler.InvitationStage.CREATE_INVITATION_WRITE
+                FirestoreErrorHandler.logInvitationMilestone(
+                    stage = FirestoreErrorHandler.InvitationStage.CREATE_INVITATION_WRITE,
+                    path = invitePath,
+                    databaseId = configuredDatabaseId,
+                    rawInviteCode = code,
+                    note = "Writing role=${canonicalRole.toFirestoreValue()} invitation to family_invites"
+                )
+
+                val inviteMap = mutableMapOf<String, Any>(
+                    "code" to code,
+                    "inviteCode" to code,
+                    "familyId" to familyId,
+                    "familyName" to familyName,
+                    "role" to canonicalRole.toFirestoreValue(),
+                    "invitedRole" to canonicalRole.toFirestoreValue(), // "PARENT" or "CHILD"
+                    "invitingParentUid" to authUser.uid,
+                    "createdById" to authUser.uid,
+                    "createdByUid" to authUser.uid,
+                    "invitingParentName" to current.name,
+                    "createdByName" to current.name,
+                    "invitedNickname" to invitedNickname.trim(),
+                    "invitedName" to invitedNickname.trim(),
+                    "createdAt" to now,
+                    "expiresAt" to expiresAt,
+                    "expiresAtMillis" to expiresAt,
+                    "status" to InvitationStatus.PENDING.name,
+                    "isUsed" to false,
+                    "isRevoked" to false,
+                    "revoked" to false
+                )
+                val effectiveEmail = intendedEmail?.takeIf { it.isNotBlank() } ?: invitedEmail?.takeIf { it.isNotBlank() }
+                if (!effectiveEmail.isNullOrBlank()) {
+                    inviteMap["intendedEmail"] = effectiveEmail.trim()
+                }
+                if (!schoolGrade.isNullOrBlank()) {
+                    inviteMap["schoolGrade"] = schoolGrade.trim()
+                }
+
+                val inviteDocRef = db.collection("family_invites").document(code)
+                inviteDocRef.set(inviteMap).await()
+
+                currentInviteStage = FirestoreErrorHandler.InvitationStage.CONFIRM_INVITATION_COMMIT
+                val verifySnap = inviteDocRef.get().await()
+                if (!verifySnap.exists()) {
+                    throw FirebaseFirestoreException(
+                        "Invitation document was not found in family_invites after write",
+                        FirebaseFirestoreException.Code.NOT_FOUND
+                    )
+                }
+
+                FirestoreErrorHandler.logInvitationMilestone(
+                    stage = FirestoreErrorHandler.InvitationStage.CONFIRM_INVITATION_COMMIT,
+                    path = invitePath,
+                    databaseId = configuredDatabaseId,
+                    rawInviteCode = code,
+                    note = "Confirmed invitation document committed in family_invites"
+                )
+            } catch (e: Exception) {
+                val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                    error = e,
+                    stage = currentInviteStage,
+                    path = invitePath,
+                    rawInviteCode = code,
+                    databaseId = configuredDatabaseId
+                )
+                lastClassifiedInvitationFailure = classified
+                invitationsByCode.remove(code)
+                _pendingInvitations.value = _pendingInvitations.value.filterNot { it.code == code }
+                return Result.failure(FirestoreErrorHandler.InvitationFirestoreException(classified, e))
+            }
+        }
 
         val invitation = FamilyInvitation(
             code = code,
             familyId = familyId,
             familyName = familyName,
             invitedRole = canonicalRole,
-            invitingParentUid = parentUid,
+            invitingParentUid = authUser?.uid ?: parentUid,
             invitingParentName = current.name,
             invitedNickname = invitedNickname.trim(),
             createdAt = now,
@@ -1465,36 +1882,17 @@ class FamilyRepository(
             status = InvitationStatus.PENDING
         )
 
-        val db = firestoreProvider()
-        if (db != null && authProvider()?.currentUser != null) {
-            try {
-                val inviteMap = mapOf(
-                    "code" to invitation.code,
-                    "inviteCode" to invitation.code,
-                    "familyId" to invitation.familyId,
-                    "familyName" to invitation.familyName,
-                    "invitedRole" to invitation.invitedRole.toFirestoreValue(), // "PARENT" or "CHILD"
-                    "invitingParentUid" to invitation.invitingParentUid,
-                    "createdById" to invitation.invitingParentUid,
-                    "invitingParentName" to invitation.invitingParentName,
-                    "invitedNickname" to invitation.invitedNickname,
-                    "createdAt" to invitation.createdAt,
-                    "expiresAt" to invitation.expiresAt,
-                    "expiresAtMillis" to invitation.expiresAt,
-                    "status" to InvitationStatus.PENDING.name,
-                    "isUsed" to false
-                )
-                db.collection("family_invites").document(code).set(inviteMap).await()
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to persist invitation to Firestore: ${e.message}", e)
-                return Result.failure(e)
-            }
-        }
-
+        lastClassifiedInvitationFailure = null
         invitationsByCode[code] = invitation
         _pendingInvitations.value = (_pendingInvitations.value.filterNot { it.code == code } + invitation)
             .filter { it.status == InvitationStatus.PENDING && !it.isExpired(now) }
             .sortedByDescending { it.createdAt }
+        _cloudFamilyGroup.value = _cloudFamilyGroup.value.copy(
+            familyId = familyId,
+            familyName = familyName,
+            inviteCode = code,
+            lastSyncedEpochMillis = now
+        )
 
         val roleLabelHe = if (canonicalRole == UserRole.PARENT) "הורה" else "ילד/ה"
         pushAlert(
@@ -1511,7 +1909,8 @@ class FamilyRepository(
     /**
      * V1.6 Requirement 5:
      * Validates an invitation code entered by a user before joining.
-     * Checks existence, status (PENDING vs REDEEMED / REVOKED), expiration, and duplicate membership.
+     * Checks existence in `/family_invites/{code}` on the named Firestore database,
+     * status (PENDING vs REDEEMED / REVOKED), expiration, and duplicate membership.
      */
     suspend fun validateInvitationCode(
         rawCode: String,
@@ -1519,25 +1918,132 @@ class FamilyRepository(
         nowMillis: Long = System.currentTimeMillis()
     ): InvitationValidationResult {
         val normalized = rawCode.trim().uppercase()
+        val invitePath = "family_invites/$normalized"
+
         if (normalized.length < 4) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = IllegalArgumentException("Invalid invitation code format"),
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                rawInviteCode = normalized,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.INVALID_FORMAT
+            )
+            lastClassifiedInvitationFailure = classified
             return InvitationValidationResult.Invalid(
                 errorCode = "INVALID_FORMAT",
-                messageHe = "נא להזין קוד הזמנה חוקי (6 תווים).",
-                messageEn = "Please enter a valid 6-character invitation code."
+                messageHe = classified.messageHe,
+                messageEn = classified.messageEn
+            )
+        }
+
+        if (simulateOfflineNetworkFailure) {
+            val offlineErr = FirebaseFirestoreException(
+                "Simulated offline network failure during invitation validation",
+                FirebaseFirestoreException.Code.UNAVAILABLE
+            )
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = offlineErr,
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                rawInviteCode = normalized,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedInvitationFailure = classified
+            return InvitationValidationResult.Invalid(
+                errorCode = "UNAVAILABLE",
+                messageHe = classified.messageHe,
+                messageEn = classified.messageEn
             )
         }
 
         var invitation: FamilyInvitation? = null
         val db = firestoreProvider()
         if (db != null && authProvider()?.currentUser != null) {
+            FirestoreErrorHandler.logInvitationMilestone(
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                databaseId = configuredDatabaseId,
+                rawInviteCode = normalized,
+                note = "Validating invitation document in family_invites"
+            )
             try {
                 val snap = db.collection("family_invites").document(normalized).get().await()
                 if (snap.exists()) {
-                    invitation = parseInvitationDocument(normalized, snap.data ?: emptyMap())
-                    invitationsByCode[normalized] = invitation
+                    var parsed = parseInvitationDocument(normalized, snap.data ?: emptyMap())
+                    if (parsed.familyName.isBlank() && parsed.familyId.isNotBlank()) {
+                        val famSnap = runCatching {
+                            db.collection("families").document(parsed.familyId).get().await()
+                        }.getOrNull()
+                        val resolvedFamName = (famSnap?.getString("familyName") ?: famSnap?.getString("name"))
+                            ?.takeIf { it.isNotBlank() }
+                        if (resolvedFamName != null) {
+                            parsed = parsed.copy(familyName = resolvedFamName)
+                        }
+                    }
+                    invitation = parsed
+                    invitationsByCode[normalized] = parsed
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Firestore lookup for invite code failed: ${e.javaClass.simpleName}")
+                val (rawCat, _) = com.example.util.classifyFirestoreException(e)
+                if (rawCat == com.example.util.FirestoreFailureCategory.UNAVAILABLE) {
+                    val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                        error = e,
+                        stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                        path = invitePath,
+                        rawInviteCode = normalized,
+                        databaseId = configuredDatabaseId,
+                        overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.UNAVAILABLE
+                    )
+                    lastClassifiedInvitationFailure = classified
+                    return InvitationValidationResult.Invalid(
+                        errorCode = "UNAVAILABLE",
+                        messageHe = classified.messageHe,
+                        messageEn = classified.messageEn
+                    )
+                }
+                if (rawCat == com.example.util.FirestoreFailureCategory.PERMISSION_DENIED) {
+                    // In V1.6 security rules, resource == null is allowed for all signed-in users,
+                    // whereas an already-used or revoked invitation denies get() to non-parents.
+                    val cached = invitationsByCode[normalized]
+                    if (cached?.status == InvitationStatus.REVOKED) {
+                        val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                            error = e,
+                            stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                            path = invitePath,
+                            rawInviteCode = normalized,
+                            databaseId = configuredDatabaseId,
+                            overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.REVOKED
+                        )
+                        lastClassifiedInvitationFailure = classified
+                        return InvitationValidationResult.Invalid(
+                            errorCode = "REVOKED",
+                            messageHe = classified.messageHe,
+                            messageEn = classified.messageEn
+                        )
+                    }
+                    val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                        error = e,
+                        stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                        path = invitePath,
+                        rawInviteCode = normalized,
+                        databaseId = configuredDatabaseId,
+                        overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.ALREADY_REDEEMED
+                    )
+                    lastClassifiedInvitationFailure = classified
+                    return InvitationValidationResult.Invalid(
+                        errorCode = "ALREADY_REDEEMED",
+                        messageHe = "קוד הזמנה זה כבר נוצל או בוטל ולא ניתן להשתמש בו שוב.",
+                        messageEn = "This invitation code has already been redeemed or revoked."
+                    )
+                }
+                FirestoreErrorHandler.classifyInvitationFailure(
+                    error = e,
+                    stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                    path = invitePath,
+                    rawInviteCode = normalized,
+                    databaseId = configuredDatabaseId
+                )
             }
         }
 
@@ -1546,6 +2052,15 @@ class FamilyRepository(
         }
 
         if (invitation == null) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = NoSuchElementException("Invitation code not found in family_invites"),
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                rawInviteCode = normalized,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.NOT_FOUND
+            )
+            lastClassifiedInvitationFailure = classified
             return InvitationValidationResult.Invalid(
                 errorCode = "NOT_FOUND",
                 messageHe = "קוד ההזמנה \"$normalized\" אינו קיים במערכת. ודאו שהקלדתם נכון.",
@@ -1554,6 +2069,15 @@ class FamilyRepository(
         }
 
         if (invitation.status == InvitationStatus.REDEEMED) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = IllegalStateException("Invitation already redeemed"),
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                rawInviteCode = normalized,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.ALREADY_REDEEMED
+            )
+            lastClassifiedInvitationFailure = classified
             return InvitationValidationResult.Invalid(
                 errorCode = "ALREADY_REDEEMED",
                 messageHe = "קוד הזמנה זה כבר נוצל ולא ניתן להשתמש בו שוב.",
@@ -1562,6 +2086,15 @@ class FamilyRepository(
         }
 
         if (invitation.status == InvitationStatus.REVOKED) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = IllegalStateException("Invitation revoked"),
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                rawInviteCode = normalized,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.REVOKED
+            )
+            lastClassifiedInvitationFailure = classified
             return InvitationValidationResult.Invalid(
                 errorCode = "REVOKED",
                 messageHe = "קוד הזמנה זה בוטל על ידי הורה במשפחה.",
@@ -1570,6 +2103,15 @@ class FamilyRepository(
         }
 
         if (invitation.isExpired(nowMillis)) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = IllegalStateException("Invitation expired"),
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                rawInviteCode = normalized,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.EXPIRED
+            )
+            lastClassifiedInvitationFailure = classified
             return InvitationValidationResult.Invalid(
                 errorCode = "EXPIRED",
                 messageHe = "פג תוקפו של קוד ההזמנה. בקשו מההורה ליצור קוד הזמנה חדש.",
@@ -1588,6 +2130,15 @@ class FamilyRepository(
                     .await()
             }.getOrNull()
             if (existingMemberSnap?.exists() == true) {
+                val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                    error = IllegalStateException("User is already a member of target family"),
+                    stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                    path = "families/${invitation.familyId}/members/$joiningUid",
+                    rawInviteCode = normalized,
+                    databaseId = configuredDatabaseId,
+                    overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.ALREADY_MEMBER
+                )
+                lastClassifiedInvitationFailure = classified
                 return InvitationValidationResult.Invalid(
                     errorCode = "ALREADY_MEMBER",
                     messageHe = "אתם כבר רשומים כחברים במשפחת \"${invitation.familyName}\"!",
@@ -1604,6 +2155,14 @@ class FamilyRepository(
             )
         }
 
+        lastClassifiedInvitationFailure = null
+        FirestoreErrorHandler.logInvitationMilestone(
+            stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+            path = invitePath,
+            databaseId = configuredDatabaseId,
+            rawInviteCode = normalized,
+            note = "Invitation code validated successfully for role=${invitation.invitedRole.toFirestoreValue()}"
+        )
         return InvitationValidationResult.Valid(invitation)
     }
 
@@ -1635,6 +2194,7 @@ class FamilyRepository(
         }
 
         val invite = (validation as InvitationValidationResult.Valid).invitation
+        val invitePath = "family_invites/${invite.code}"
         // CRITICAL: The role is strictly determined by the invitation, NEVER by client input
         val assignedRole: UserRole = if (invite.invitedRole.isParentRole) UserRole.PARENT else UserRole.CHILD
         val cleanName = memberDisplayName.trim().ifBlank {
@@ -1687,33 +2247,44 @@ class FamilyRepository(
 
         val db = firestoreProvider()
         if (db != null && authProvider()?.currentUser != null) {
+            FirestoreErrorHandler.logInvitationMilestone(
+                stage = FirestoreErrorHandler.InvitationStage.REDEEM_INVITATION_TRANSACTION,
+                path = invitePath,
+                databaseId = configuredDatabaseId,
+                rawInviteCode = invite.code,
+                note = "Starting atomic invitation redemption transaction"
+            )
             try {
                 val inviteRef = db.collection("family_invites").document(invite.code)
                 val familyRef = db.collection("families").document(invite.familyId)
                 val memberRef = familyRef.collection("members").document(uid)
                 val userRef = db.collection("users").document(uid)
 
-                var lockedRoleForFamilyUpdate = assignedRole
-
                 db.runTransaction { transaction ->
+                    // All reads MUST precede writes in a Firestore transaction
                     val freshInviteSnap = transaction.get(inviteRef)
+                    val familySnap = transaction.get(familyRef)
+
                     if (!freshInviteSnap.exists()) {
                         throw IllegalStateException("קוד ההזמנה אינו קיים.")
                     }
                     val freshStatus = InvitationStatus.fromFirestoreValue(freshInviteSnap.getString("status"))
                     val isAlreadyUsed = freshInviteSnap.getBoolean("isUsed") ?: false
+                    val isRevoked = (freshInviteSnap.getBoolean("isRevoked") ?: false) ||
+                        (freshInviteSnap.getBoolean("revoked") ?: false)
                     val freshExpiresAt = freshInviteSnap.getLong("expiresAt")
                         ?: freshInviteSnap.getLong("expiresAtMillis")
                         ?: 0L
-                    if (freshStatus != InvitationStatus.PENDING || isAlreadyUsed) {
+                    if (freshStatus != InvitationStatus.PENDING || isAlreadyUsed || isRevoked) {
                         throw IllegalStateException("קוד הזמנה זה כבר נוצל או בוטל.")
                     }
-                    if (nowMillis > freshExpiresAt) {
+                    if (freshExpiresAt > 0L && nowMillis > freshExpiresAt) {
                         throw IllegalStateException("פג תוקפו של קוד ההזמנה.")
                     }
 
-                    val lockedRole = UserRole.fromFirestoreValue(freshInviteSnap.getString("invitedRole"))
-                    lockedRoleForFamilyUpdate = lockedRole
+                    val lockedRoleRaw = freshInviteSnap.getString("invitedRole")
+                        ?: freshInviteSnap.getString("role")
+                    val lockedRole = UserRole.fromFirestoreValue(lockedRoleRaw)
                     val roleValue = lockedRole.toFirestoreValue() // "PARENT" or "CHILD"
                     val txIdentity = if (lockedRole == UserRole.PARENT) {
                         if (resolvedIdentity.isParentIdentity) resolvedIdentity else FamilyIdentity.MOTHER
@@ -1759,7 +2330,21 @@ class FamilyRepository(
                     }
                     transaction.set(memberRef, memberDocData, SetOptions.merge())
 
-                    // 3. Save user's active familyId, validated role, and familyIdentity
+                    // 3. Atomically append joining user's UID to /families/{familyId} memberIds & memberUids
+                    if (familySnap.exists()) {
+                        val familyUpdates = mutableMapOf<String, Any>(
+                            "memberIds" to FieldValue.arrayUnion(uid),
+                            "memberUids" to FieldValue.arrayUnion(uid),
+                            "updatedAt" to nowMillis
+                        )
+                        if (lockedRole == UserRole.PARENT) {
+                            familyUpdates["adminUids"] = FieldValue.arrayUnion(uid)
+                        }
+                        transaction.update(familyRef, familyUpdates)
+                    }
+                    Pair(roleValue, txIdentity)
+                }.await().let { (committedRoleValue, committedIdentity) ->
+                    // 4. Save user's active familyId, validated role, and familyIdentity now that memberRef is committed
                     val userDocData = mutableMapOf<String, Any>(
                         "uid" to uid,
                         "email" to email,
@@ -1767,30 +2352,33 @@ class FamilyRepository(
                         "name" to cleanName,
                         "familyId" to invite.familyId,
                         "familyName" to invite.familyName,
-                        "role" to roleValue,
-                        "familyIdentity" to txIdentity.toFirestoreValue(),
-                        "avatarEmoji" to txIdentity.defaultEmoji,
+                        "role" to committedRoleValue,
+                        "familyIdentity" to committedIdentity.toFirestoreValue(),
+                        "avatarEmoji" to committedIdentity.defaultEmoji,
                         "updatedAt" to nowMillis
                     )
                     if (!photoUrl.isNullOrBlank()) {
                         userDocData["photoUrl"] = photoUrl
                     }
-                    transaction.set(userRef, userDocData, SetOptions.merge())
-                }.await()
+                    userRef.set(userDocData, SetOptions.merge()).await()
+                }
 
-                // 4. Best-effort update to root family document memberUids (and adminUids ONLY if PARENT)
-                val familyUpdates = mutableMapOf<String, Any>(
-                    "memberUids" to FieldValue.arrayUnion(uid),
-                    "updatedAt" to nowMillis
+                FirestoreErrorHandler.logInvitationMilestone(
+                    stage = FirestoreErrorHandler.InvitationStage.REDEEM_INVITATION_TRANSACTION,
+                    path = "families/${invite.familyId}/members/$uid",
+                    databaseId = configuredDatabaseId,
+                    rawInviteCode = invite.code,
+                    note = "Completed atomic invitation redemption and joined family as ${assignedRole.toFirestoreValue()}"
                 )
-                if (lockedRoleForFamilyUpdate == UserRole.PARENT) {
-                    familyUpdates["adminUids"] = FieldValue.arrayUnion(uid)
-                }
-                runCatching {
-                    familyRef.update(familyUpdates).await()
-                }
             } catch (e: Exception) {
-                Log.e(TAG, "redeemInvitationAndJoinFamily transaction failed: ${e.message}", e)
+                val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                    error = e,
+                    stage = FirestoreErrorHandler.InvitationStage.REDEEM_INVITATION_TRANSACTION,
+                    path = invitePath,
+                    rawInviteCode = invite.code,
+                    databaseId = configuredDatabaseId
+                )
+                lastClassifiedInvitationFailure = classified
                 return Result.failure(e)
             }
         }
@@ -1853,34 +2441,82 @@ class FamilyRepository(
         val db = firestoreProvider()
         if (db != null && authProvider()?.currentUser != null) {
             repoScope.launch {
-                runCatching {
+                try {
                     db.collection("family_invites")
                         .document(normalized)
-                        .update("status", InvitationStatus.REVOKED.name)
+                        .update(
+                            mapOf(
+                                "status" to InvitationStatus.REVOKED.name,
+                                "isRevoked" to true,
+                                "revoked" to true
+                            )
+                        )
                         .await()
+                    FirestoreErrorHandler.logInvitationMilestone(
+                        stage = FirestoreErrorHandler.InvitationStage.REVOKE_INVITATION_WRITE,
+                        path = "family_invites/$normalized",
+                        databaseId = configuredDatabaseId,
+                        rawInviteCode = normalized,
+                        note = "Invitation revoked in family_invites"
+                    )
+                } catch (e: Exception) {
+                    FirestoreErrorHandler.classifyInvitationFailure(
+                        error = e,
+                        stage = FirestoreErrorHandler.InvitationStage.REVOKE_INVITATION_WRITE,
+                        path = "family_invites/$normalized",
+                        rawInviteCode = normalized,
+                        databaseId = configuredDatabaseId
+                    )
                 }
             }
         }
         return true
     }
 
-    private fun parseInvitationDocument(docId: String, data: Map<String, Any>): FamilyInvitation {
-        val code = (data["code"] as? String)?.trim()?.uppercase()?.ifBlank { docId } ?: docId
-        val familyId = (data["familyId"] as? String) ?: _activeFamilyId.value
-        val familyName = (data["familyName"] as? String) ?: _familyName.value
-        val invitedRole = UserRole.fromFirestoreValue(data["invitedRole"] as? String)
-        val invitingParentUid = (data["invitingParentUid"] as? String) ?: ""
-        val invitingParentName = (data["invitingParentName"] as? String) ?: ""
-        val invitedNickname = (data["invitedNickname"] as? String) ?: ""
-        val createdAt = (data["createdAt"] as? Number)?.toLong() ?: System.currentTimeMillis()
-        val expiresAt = (data["expiresAt"] as? Number)?.toLong() ?: (createdAt + FamilyInvitation.DEFAULT_EXPIRATION_MS)
-        val status = InvitationStatus.fromFirestoreValue(data["status"] as? String)
-        val redeemedByUid = data["redeemedByUid"] as? String
+    private fun extractTimestampMillis(rawValue: Any?): Long? {
+        return when (rawValue) {
+            is Number -> rawValue.toLong()
+            is com.google.firebase.Timestamp -> rawValue.toDate().time
+            is Date -> rawValue.time
+            else -> null
+        }
+    }
+
+    private fun parseInvitationDocument(docId: String, data: Map<String, Any?>): FamilyInvitation {
+        val rawCode = (data["code"] as? String)?.trim()?.uppercase()?.takeIf { it.isNotBlank() }
+            ?: (data["inviteCode"] as? String)?.trim()?.uppercase()?.takeIf { it.isNotBlank() }
+            ?: docId.trim().uppercase()
+        val familyId = (data["familyId"] as? String)?.takeIf { it.isNotBlank() } ?: _activeFamilyId.value
+        val familyName = (data["familyName"] as? String) ?: ""
+        val roleRaw = (data["invitedRole"] as? String) ?: (data["role"] as? String)
+        val invitedRole = UserRole.fromFirestoreValue(roleRaw)
+        val invitingParentUid = (data["invitingParentUid"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["createdById"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["createdByUid"] as? String)?.takeIf { it.isNotBlank() }
+            ?: ""
+        val invitingParentName = (data["invitingParentName"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["createdByName"] as? String)
+            ?: ""
+        val invitedNickname = (data["invitedNickname"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["invitedName"] as? String)
+            ?: ""
+        val createdAt = extractTimestampMillis(data["createdAt"]) ?: System.currentTimeMillis()
+        val expiresAt = extractTimestampMillis(data["expiresAt"])
+            ?: extractTimestampMillis(data["expiresAtMillis"])
+            ?: (createdAt + FamilyInvitation.DEFAULT_EXPIRATION_MS)
+        val isUsed = (data["isUsed"] as? Boolean) ?: false
+        val isRevoked = (data["isRevoked"] as? Boolean) ?: (data["revoked"] as? Boolean) ?: false
+        val status = when {
+            isRevoked -> InvitationStatus.REVOKED
+            isUsed -> InvitationStatus.REDEEMED
+            else -> InvitationStatus.fromFirestoreValue(data["status"] as? String)
+        }
+        val redeemedByUid = (data["redeemedByUid"] as? String) ?: (data["usedByUid"] as? String)
         val redeemedByName = data["redeemedByName"] as? String
-        val redeemedAt = (data["redeemedAt"] as? Number)?.toLong()
+        val redeemedAt = extractTimestampMillis(data["redeemedAt"])
 
         return FamilyInvitation(
-            code = code,
+            code = rawCode,
             familyId = familyId,
             familyName = familyName,
             invitedRole = invitedRole,
@@ -2072,23 +2708,32 @@ class FamilyRepository(
                 }
         }
 
-        // 3. Real-time Pending Invitations Listener (/family_invites where familyId == familyId)
-        runCatching {
-            invitesListenerRegistration = db.collection("family_invites")
-                .whereEqualTo("familyId", familyId)
-                .addSnapshotListener { snapshot, error ->
-                    if (error != null || snapshot == null) return@addSnapshotListener
-                    val now = System.currentTimeMillis()
-                    val allInvites = snapshot.documents.mapNotNull { doc ->
-                        val data = doc.data ?: return@mapNotNull null
-                        parseInvitationDocument(doc.id, data).also { inv ->
-                            invitationsByCode[inv.code] = inv
+        // 3. Real-time Pending Invitations Listener (/family_invites where familyId == familyId, PARENT only)
+        if (_currentMember.value.isParent) {
+            runCatching {
+                invitesListenerRegistration = db.collection("family_invites")
+                    .whereEqualTo("familyId", familyId)
+                    .addSnapshotListener { snapshot, error ->
+                        if (error != null || snapshot == null) return@addSnapshotListener
+                        val now = System.currentTimeMillis()
+                        val allInvites = snapshot.documents.mapNotNull { doc ->
+                            val data = doc.data ?: return@mapNotNull null
+                            parseInvitationDocument(doc.id, data).also { inv ->
+                                invitationsByCode[inv.code] = inv
+                            }
                         }
+                        val usablePending = allInvites
+                            .filter { it.status == InvitationStatus.PENDING && !it.isExpired(now) }
+                            .sortedByDescending { it.createdAt }
+                        _pendingInvitations.value = usablePending
+                        _cloudFamilyGroup.value = _cloudFamilyGroup.value.copy(
+                            inviteCode = usablePending.firstOrNull()?.code.orEmpty()
+                        )
                     }
-                    _pendingInvitations.value = allInvites
-                        .filter { it.status == InvitationStatus.PENDING && !it.isExpired(now) }
-                        .sortedByDescending { it.createdAt }
-                }
+            }
+        } else {
+            _pendingInvitations.value = emptyList()
+            _cloudFamilyGroup.value = _cloudFamilyGroup.value.copy(inviteCode = "")
         }
 
         // 4. Real-time Rewards Listener
@@ -2394,16 +3039,8 @@ class FamilyRepository(
         _googleUserEmail.value = cleanEmail
         _googleUserDisplayName.value = cleanAdminName
 
-        repoScope.launch {
-            createFamilyAsParent(
-                familyNameInput = cleanFamilyName,
-                parentDisplayName = cleanAdminName,
-                familyIdentity = resolvedParentIdentity
-            )
-        }
-
-        // Also update synchronous state immediately for UI/test responsiveness
         val uid = authProvider()?.currentUser?.uid ?: "m_parent_${System.currentTimeMillis()}"
+        val newFamilyId = "fam_${uid.take(8)}_${System.currentTimeMillis() % 10000}"
         val primaryAdmin = FamilyMember(
             id = uid,
             name = cleanAdminName,
@@ -2419,6 +3056,7 @@ class FamilyRepository(
             invitationAccepted = true
         )
 
+        _activeFamilyId.value = newFamilyId
         _familyName.value = cleanFamilyName
         _members.value = listOf(primaryAdmin)
         _currentMember.value = primaryAdmin
@@ -2426,7 +3064,7 @@ class FamilyRepository(
         _schedulePeriods.value = emptyList()
         _pendingInvitations.value = emptyList()
         val activeState = FamilyMembershipState.ActiveMember(
-            familyId = _activeFamilyId.value,
+            familyId = newFamilyId,
             familyName = cleanFamilyName,
             role = UserRole.PARENT,
             familyIdentity = resolvedParentIdentity,
@@ -2435,11 +3073,20 @@ class FamilyRepository(
         _membershipState.value = activeState
         _startupState.value = StartupState.ReadyToEnterDashboard(
             uid = uid,
-            familyId = _activeFamilyId.value,
+            familyId = newFamilyId,
             familyName = cleanFamilyName,
             role = UserRole.PARENT,
             familyIdentity = resolvedParentIdentity
         )
+
+        repoScope.launch {
+            createFamilyAsParent(
+                familyNameInput = cleanFamilyName,
+                parentDisplayName = cleanAdminName,
+                familyIdentity = resolvedParentIdentity,
+                allowCreateIfAlreadyInFamily = true
+            )
+        }
     }
 
     /**
@@ -2555,7 +3202,32 @@ class FamilyRepository(
         googleEmail: String?,
         schoolGrade: String?
     ): FamilyInvitation? {
-        if (!_currentMember.value.isParent) return null
+        if (!_currentMember.value.isParent) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = SecurityException("רק הורה (מנהל משפחה) רשאי ליצור קודי הזמנה למשפחה."),
+                stage = FirestoreErrorHandler.InvitationStage.VERIFY_PARENT_AUTHORIZATION,
+                path = "family_invites/{inviteCode}",
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.UNAUTHORIZED_ROLE
+            )
+            lastClassifiedInvitationFailure = classified
+            return null
+        }
+        if (simulateOfflineNetworkFailure) {
+            val offlineErr = FirebaseFirestoreException(
+                "Simulated offline network failure during invitation creation",
+                FirebaseFirestoreException.Code.UNAVAILABLE
+            )
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = offlineErr,
+                stage = FirestoreErrorHandler.InvitationStage.CREATE_INVITATION_WRITE,
+                path = "family_invites/{inviteCode}",
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedInvitationFailure = classified
+            return null
+        }
+
         val canonicalRole = if (role.isParentRole) UserRole.PARENT else UserRole.CHILD
         val code = generateSecureInviteCode()
         val now = System.currentTimeMillis()
@@ -2572,31 +3244,31 @@ class FamilyRepository(
             status = InvitationStatus.PENDING
         )
 
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            // When connected to Firebase Auth/Firestore, persist via createRoleSpecificInvitation
+            // so all required V1.6 security rule fields (including createdById and isUsed=false) are written
+            // and verified before exposing the invitation in _pendingInvitations.
+            repoScope.launch {
+                createRoleSpecificInvitation(
+                    invitedRole = canonicalRole,
+                    invitedNickname = name.trim(),
+                    invitedEmail = googleEmail,
+                    schoolGrade = schoolGrade,
+                    customCodeOverride = code
+                )
+            }
+            return invitation
+        }
+
         invitationsByCode[code] = invitation
         _pendingInvitations.value = (_pendingInvitations.value.filterNot { it.code == code } + invitation)
             .sortedByDescending { it.createdAt }
-
-        val db = firestoreProvider()
-        if (db != null && authProvider()?.currentUser != null) {
-            repoScope.launch {
-                runCatching {
-                    db.collection("family_invites").document(code).set(
-                        mapOf(
-                            "code" to invitation.code,
-                            "familyId" to invitation.familyId,
-                            "familyName" to invitation.familyName,
-                            "invitedRole" to invitation.invitedRole.toFirestoreValue(),
-                            "invitingParentUid" to invitation.invitingParentUid,
-                            "invitingParentName" to invitation.invitingParentName,
-                            "invitedNickname" to invitation.invitedNickname,
-                            "createdAt" to invitation.createdAt,
-                            "expiresAt" to invitation.expiresAt,
-                            "status" to InvitationStatus.PENDING.name
-                        )
-                    ).await()
-                }
-            }
-        }
+        _cloudFamilyGroup.value = _cloudFamilyGroup.value.copy(
+            inviteCode = code,
+            lastSyncedEpochMillis = now
+        )
 
         val roleLabelHe = if (canonicalRole == UserRole.PARENT) "הורה" else "ילד/ה"
         pushAlert(
@@ -3143,26 +3815,67 @@ class FamilyRepository(
         )
 
         return try {
+            FirestoreErrorHandler.logInvitationMilestone(
+                stage = FirestoreErrorHandler.InvitationStage.CREATE_INVITATION_WRITE,
+                path = "family_invites/$code",
+                databaseId = configuredDatabaseId,
+                rawInviteCode = code,
+                note = "Writing role=${canonicalRole.toFirestoreValue()} invitation in cloud"
+            )
             val inviteMap = mapOf(
                 "code" to invitation.code,
                 "inviteCode" to invitation.code,
                 "familyId" to invitation.familyId,
                 "familyName" to invitation.familyName,
+                "role" to invitation.invitedRole.toFirestoreValue(),
                 "invitedRole" to invitation.invitedRole.toFirestoreValue(),
                 "invitingParentUid" to invitation.invitingParentUid,
                 "createdById" to invitation.invitingParentUid,
+                "createdByUid" to invitation.invitingParentUid,
                 "invitingParentName" to invitation.invitingParentName,
+                "createdByName" to invitation.invitingParentName,
                 "invitedNickname" to invitation.invitedNickname,
+                "invitedName" to invitation.invitedNickname,
                 "createdAt" to invitation.createdAt,
                 "expiresAt" to invitation.expiresAt,
                 "expiresAtMillis" to invitation.expiresAt,
                 "status" to InvitationStatus.PENDING.name,
-                "isUsed" to false
+                "isUsed" to false,
+                "isRevoked" to false,
+                "revoked" to false
             )
-            db.collection("family_invites").document(code).set(inviteMap).await()
+            val docRef = db.collection("family_invites").document(code)
+            docRef.set(inviteMap).await()
+            val committed = docRef.get().await()
+            if (!committed.exists()) {
+                throw FirebaseFirestoreException(
+                    "Invitation document was not found after write",
+                    FirebaseFirestoreException.Code.NOT_FOUND
+                )
+            }
+            FirestoreErrorHandler.logInvitationMilestone(
+                stage = FirestoreErrorHandler.InvitationStage.CONFIRM_INVITATION_COMMIT,
+                path = "family_invites/$code",
+                databaseId = configuredDatabaseId,
+                rawInviteCode = code,
+                note = "Confirmed invitation document committed in family_invites"
+            )
             invitationsByCode[code] = invitation
+            _pendingInvitations.value = (_pendingInvitations.value.filterNot { it.code == code } + invitation)
+                .filter { it.status == InvitationStatus.PENDING && !it.isExpired(now) }
+                .sortedByDescending { it.createdAt }
             Result.success(invitation)
         } catch (e: Exception) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = e,
+                stage = FirestoreErrorHandler.InvitationStage.CREATE_INVITATION_WRITE,
+                path = "family_invites/$code",
+                rawInviteCode = code,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedInvitationFailure = classified
+            invitationsByCode.remove(code)
+            _pendingInvitations.value = _pendingInvitations.value.filterNot { it.code == code }
             Result.failure(e)
         }
     }

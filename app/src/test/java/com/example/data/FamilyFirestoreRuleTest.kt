@@ -1474,6 +1474,269 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         assertFalse("Child must never be granted parent privileges", reopenedChildRepo.currentMember.value.isParent)
     }
 
+    @Test
+    fun testV16InvitationEndToEnd_parentCreatesChildInvitation_persistedValidatedRedeemedAndAppearsInParentMembersList() = runBlocking {
+        val parentEmail = "parent_inviter_${System.currentTimeMillis()}@example.com"
+        val childEmail = "child_invitee_${System.currentTimeMillis()}@example.com"
+
+        // 1. Parent signs in and creates family
+        val parentUid = signInTestUser(parentEmail)
+        val parentRepo = repo()
+        val createdFamily = withTimeout(timeoutMs) {
+            parentRepo.createFamilyAsParent(
+                familyNameInput = "משפחת כהן",
+                parentDisplayName = "אבא כהן",
+                creatorUidOverride = parentUid,
+                creatorEmailOverride = parentEmail,
+                familyIdentity = FamilyIdentity.FATHER
+            )
+        }.getOrThrow()
+        val familyId = createdFamily.familyId
+
+        // Verify no unconfirmed placeholder invite code is exposed before creating an invitation
+        assertEquals("", parentRepo.cloudFamilyGroup.value.inviteCode)
+
+        // 2. Parent creates a CHILD invitation via createRoleSpecificInvitation (and also test inviteNewMember dialog path)
+        val childInvitation = withTimeout(timeoutMs) {
+            parentRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "נועה כהן"
+            )
+        }.getOrThrow()
+
+        val code = childInvitation.code
+        assertTrue("Invitation code must be non-blank uppercase", code.length >= 6 && code == code.uppercase())
+        assertEquals(UserRole.CHILD, childInvitation.invitedRole)
+        assertEquals(familyId, childInvitation.familyId)
+        assertTrue(
+            "Confirmed invitation must be present in parent's pendingInvitations",
+            parentRepo.pendingInvitations.value.any { it.code == code }
+        )
+        assertEquals(code, parentRepo.cloudFamilyGroup.value.inviteCode)
+
+        // 3. Verify invitation document is persisted in /family_invites/{code} with exact document ID = code
+        val inviteSnap = withTimeout(timeoutMs) {
+            firestore.collection("family_invites").document(code).get().awaitTask()
+        }
+        assertTrue("Invitation document MUST exist in /family_invites/{code}", inviteSnap.exists())
+        assertEquals(code, inviteSnap.id)
+        assertEquals(code, inviteSnap.getString("code"))
+        assertEquals(familyId, inviteSnap.getString("familyId"))
+        assertEquals("CHILD", inviteSnap.getString("invitedRole"))
+        assertEquals(parentUid, inviteSnap.getString("createdById"))
+        assertEquals("PENDING", inviteSnap.getString("status"))
+        assertEquals(false, inviteSnap.getBoolean("isUsed"))
+        assertEquals(false, inviteSnap.getBoolean("isRevoked"))
+
+        // Also verify InviteMemberDialog synchronous compatibility helper inviteNewMember persists to /family_invites/{code}
+        val dialogInvitation = parentRepo.inviteNewMember(
+            name = "איתי כהן",
+            emoji = "👦",
+            role = UserRole.CHILD,
+            googleEmail = null,
+            schoolGrade = "כיתה ג'"
+        )
+        assertNotNull("inviteNewMember by PARENT must return confirmed invitation", dialogInvitation)
+        val dialogInviteSnap = withTimeout(timeoutMs) {
+            firestore.collection("family_invites").document(dialogInvitation!!.code).get().awaitTask()
+        }
+        assertTrue("inviteNewMember document MUST exist in /family_invites/{code}", dialogInviteSnap.exists())
+        assertEquals(parentUid, dialogInviteSnap.getString("createdById"))
+
+        // 4. A different Google user (not yet a family member) signs in and validates the code
+        val childUid = signInTestUser(childEmail)
+        val childRepo = repo()
+
+        // Non-member cannot list all family_invites or read family tasks prior to joining
+        val unauthorizedListInvites = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("family_invites").get().awaitTask()
+            }
+        }
+        assertTrue("Non-member must not be able to list /family_invites", unauthorizedListInvites.isFailure)
+
+        val unauthorizedReadTasks = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyId).collection("tasks").get().awaitTask()
+            }
+        }
+        assertTrue("Non-member must not have access to family tasks before redeeming invite", unauthorizedReadTasks.isFailure)
+
+        // Non-member securely validates the specific invitation code
+        val validationResult = withTimeout(timeoutMs) {
+            childRepo.validateInvitationCode(code)
+        }
+        assertTrue(
+            "Second Google user must be able to validate legitimate invitation code: $validationResult",
+            validationResult is InvitationValidationResult.Valid
+        )
+        val validInvite = (validationResult as InvitationValidationResult.Valid).invitation
+        assertEquals(code, validInvite.code)
+        assertEquals(familyId, validInvite.familyId)
+        assertEquals("משפחת כהן", validInvite.familyName)
+        assertEquals(UserRole.CHILD, validInvite.invitedRole)
+
+        // 5. Invited user redeems the invitation and joins with CHILD permissions
+        val joinedState = withTimeout(timeoutMs) {
+            childRepo.redeemInvitationAndJoinFamily(
+                rawCode = code,
+                memberDisplayName = "נועה כהן"
+            )
+        }.getOrThrow()
+
+        assertEquals(familyId, joinedState.familyId)
+        assertEquals(UserRole.CHILD, joinedState.role)
+        assertFalse("Joined child must NOT have parent privileges", childRepo.currentMember.value.isParent)
+        assertTrue("Joined child must have child role", childRepo.currentMember.value.isChild)
+
+        // 6. Verify the new child appears in the parent's family members list in Firestore and repository state
+        signInTestUser(parentEmail)
+        val refreshedParentRepo = repo()
+        val parentMembership = withTimeout(timeoutMs) {
+            refreshedParentRepo.checkAuthenticatedUserMembership(
+                uid = parentUid,
+                email = parentEmail,
+                displayName = "אבא כהן",
+                forceRefresh = true
+            )
+        }
+        assertTrue(parentMembership is FamilyMembershipState.ActiveMember)
+        val parentSeenMembers = refreshedParentRepo.members.value
+        val childInParentList = parentSeenMembers.find { it.id == childUid }
+        assertNotNull("New child must appear in parent's family members list", childInParentList)
+        assertEquals("נועה כהן", childInParentList!!.name)
+        assertEquals(UserRole.CHILD, childInParentList.role)
+    }
+
+    @Test
+    fun testV16InvitationSecurityAndFailureHandling_childCannotCreate_failedWriteNeverExposesCode_invalidAndExpiredRejected() = runBlocking {
+        val parentEmail = "parent_sec_${System.currentTimeMillis()}@example.com"
+        val childEmail = "child_sec_${System.currentTimeMillis()}@example.com"
+        val outsiderEmail = "outsider_sec_${System.currentTimeMillis()}@example.com"
+
+        // 1. Setup family with Parent and Child
+        val parentUid = signInTestUser(parentEmail)
+        val parentRepo = repo()
+        val createdFamily = withTimeout(timeoutMs) {
+            parentRepo.createFamilyAsParent(
+                familyNameInput = "משפחת לוי",
+                parentDisplayName = "אמא לוי",
+                creatorUidOverride = parentUid,
+                creatorEmailOverride = parentEmail,
+                familyIdentity = FamilyIdentity.MOTHER
+            )
+        }.getOrThrow()
+        val familyId = createdFamily.familyId
+
+        val childInvite = withTimeout(timeoutMs) {
+            parentRepo.createRoleSpecificInvitation(invitedRole = UserRole.CHILD, invitedNickname = "גיא")
+        }.getOrThrow()
+
+        val childUid = signInTestUser(childEmail)
+        val childRepo = repo()
+        withTimeout(timeoutMs) {
+            childRepo.redeemInvitationAndJoinFamily(
+                rawCode = childInvite.code,
+                memberDisplayName = "גיא לוי"
+            )
+        }.getOrThrow()
+
+        // 2. Child cannot create invitations (via repository OR direct Firestore write)
+        val childCreateAttempt = withTimeout(timeoutMs) {
+            childRepo.createRoleSpecificInvitation(invitedRole = UserRole.CHILD, customCodeOverride = "CHILDCODE1")
+        }
+        assertTrue("CHILD must not be able to create invitations", childCreateAttempt.isFailure)
+        assertNull(
+            "CHILD inviteNewMember must return null",
+            childRepo.inviteNewMember("חבר", "👦", UserRole.CHILD, null, null)
+        )
+        val directChildFirestoreAttempt = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("family_invites").document("CHILDFORCE1").set(
+                    mapOf(
+                        "code" to "CHILDFORCE1",
+                        "familyId" to familyId,
+                        "invitedRole" to "CHILD",
+                        "createdById" to childUid,
+                        "status" to "PENDING",
+                        "isUsed" to false,
+                        "isRevoked" to false
+                    )
+                ).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must reject direct invitation creation by CHILD", directChildFirestoreAttempt.isFailure)
+
+        // 3. Failed invitation writes NEVER produce a shareable success code
+        signInTestUser(parentEmail)
+        val parentOnlineRepo = repo()
+        withTimeout(timeoutMs) {
+            parentOnlineRepo.checkAuthenticatedUserMembership(parentUid, parentEmail, "אמא לוי", forceRefresh = true)
+        }
+        val pendingCountBefore = parentOnlineRepo.pendingInvitations.value.size
+        parentOnlineRepo.simulateOfflineNetworkFailure = true
+
+        val failedOfflineCreate = withTimeout(timeoutMs) {
+            parentOnlineRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "כישלון רשת",
+                customCodeOverride = "FAILNET1"
+            )
+        }
+        assertTrue("Offline invitation write must fail", failedOfflineCreate.isFailure)
+        assertFalse(
+            "Failed invitation write must NEVER add code to pendingInvitations",
+            parentOnlineRepo.pendingInvitations.value.any { it.code == "FAILNET1" }
+        )
+        assertEquals(pendingCountBefore, parentOnlineRepo.pendingInvitations.value.size)
+        assertNotEquals("FAILNET1", parentOnlineRepo.cloudFamilyGroup.value.inviteCode)
+        assertNotNull(parentOnlineRepo.lastClassifiedInvitationFailure)
+        assertEquals(
+            com.example.util.FirestoreErrorHandler.InvitationFailureCategory.UNAVAILABLE,
+            parentOnlineRepo.lastClassifiedInvitationFailure?.category
+        )
+        assertEquals(
+            "family_invites/{inviteCode}",
+            parentOnlineRepo.lastClassifiedInvitationFailure?.sanitizedPath
+        )
+
+        parentOnlineRepo.simulateOfflineNetworkFailure = false
+
+        // 4. Invalid and expired invitations are rejected during validation and redemption
+        val expiredInvite = withTimeout(timeoutMs) {
+            parentOnlineRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "פג תוקף",
+                customExpirationMs = -60_000L
+            )
+        }.getOrThrow()
+
+        signInTestUser(outsiderEmail)
+        val outsiderRepo = repo()
+
+        val nonExistentValidation = withTimeout(timeoutMs) {
+            outsiderRepo.validateInvitationCode("NOTEXIST99")
+        }
+        assertTrue("Non-existent code must be rejected", nonExistentValidation is InvitationValidationResult.Invalid)
+        assertEquals("NOT_FOUND", (nonExistentValidation as InvitationValidationResult.Invalid).errorCode)
+
+        val nonExistentRedeem = withTimeout(timeoutMs) {
+            outsiderRepo.redeemInvitationAndJoinFamily("NOTEXIST99", "אורח")
+        }
+        assertTrue("Redeeming non-existent code must fail", nonExistentRedeem.isFailure)
+
+        val expiredValidation = withTimeout(timeoutMs) {
+            outsiderRepo.validateInvitationCode(expiredInvite.code)
+        }
+        assertTrue("Expired code must be rejected", expiredValidation is InvitationValidationResult.Invalid)
+        assertEquals("EXPIRED", (expiredValidation as InvitationValidationResult.Invalid).errorCode)
+
+        val expiredRedeem = withTimeout(timeoutMs) {
+            outsiderRepo.redeemInvitationAndJoinFamily(expiredInvite.code, "אורח")
+        }
+        assertTrue("Redeeming expired code must fail", expiredRedeem.isFailure)
+    }
+
     private val activeRepos = mutableListOf<FamilyRepository>()
 
     private fun repo(): FamilyRepository {

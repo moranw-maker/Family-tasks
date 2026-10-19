@@ -69,6 +69,8 @@ fun FamilyTasksApp(
     val validatedInvitationPreview by viewModel.validatedInvitationPreview.collectAsStateWithLifecycle()
     val invitationErrorMessage by viewModel.invitationErrorMessage.collectAsStateWithLifecycle()
     val isProcessingFamilyAction by viewModel.isProcessingFamilyAction.collectAsStateWithLifecycle()
+    val isCreatingInvitation by viewModel.isCreatingInvitation.collectAsStateWithLifecycle()
+    val invitationCreationError by viewModel.invitationCreationError.collectAsStateWithLifecycle()
 
     // Google Auth & Cloud Family Group states
     val isGoogleSignedIn by viewModel.isGoogleSignedIn.collectAsStateWithLifecycle()
@@ -487,6 +489,17 @@ fun FamilyTasksApp(
                             },
                             onFormatInvitationShareText = { invite ->
                                 viewModel.getWhatsAppInviteShareText(invite, isHebrew)
+                            },
+                            isCreatingInvitation = isCreatingInvitation,
+                            invitationErrorMessage = invitationCreationError,
+                            onCreateInvitationAsync = { name, _, role, email, grade, onConfirmed ->
+                                viewModel.createRoleSpecificInvitation(
+                                    invitedRole = role,
+                                    invitedNickname = name,
+                                    intendedEmail = email.orEmpty(),
+                                    schoolGrade = grade,
+                                    onCreated = onConfirmed
+                                )
                             },
                             onInvite = { name, emoji, role, email, grade ->
                                 viewModel.inviteMember(name, emoji, role, email, grade)

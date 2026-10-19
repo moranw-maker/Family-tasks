@@ -54,6 +54,15 @@ class FamilyViewModel(
     private val _isProcessingFamilyAction = MutableStateFlow(false)
     val isProcessingFamilyAction: StateFlow<Boolean> = _isProcessingFamilyAction.asStateFlow()
 
+    private val _isCreatingInvitation = MutableStateFlow(false)
+    val isCreatingInvitation: StateFlow<Boolean> = _isCreatingInvitation.asStateFlow()
+
+    private val _invitationCreationError = MutableStateFlow<String?>(null)
+    val invitationCreationError: StateFlow<String?> = _invitationCreationError.asStateFlow()
+
+    private val _lastCreatedRoleFilter = MutableStateFlow(UserRole.CHILD)
+    val lastCreatedRoleFilter: StateFlow<UserRole> = _lastCreatedRoleFilter.asStateFlow()
+
     // Google Auth & Cloud Family Group streams
     val isGoogleSignedIn: StateFlow<Boolean> = repository.isGoogleSignedIn
     val googleUserEmail: StateFlow<String> = repository.googleUserEmail
@@ -228,11 +237,17 @@ class FamilyViewModel(
             _snackbarMessage.value = "רק הורים יכולים להזמין חברים למשפחה 🔒"
             return
         }
+        _invitationCreationError.value = null
         _showInviteMemberDialog.value = true
     }
 
     fun closeInviteMemberDialog() {
+        _invitationCreationError.value = null
         _showInviteMemberDialog.value = false
+    }
+
+    fun clearInvitationCreationError() {
+        _invitationCreationError.value = null
     }
 
     fun openEditFamilyNameDialog() {
@@ -524,29 +539,50 @@ class FamilyViewModel(
     /**
      * V1.6 Requirement 4:
      * Generates a role-specific invitation (`PARENT` or `CHILD`) and persists it in Firestore.
+     * Never exposes or shares a code until Firestore confirms that `/family_invites/{code}` was committed.
      */
     fun createRoleSpecificInvitation(
         invitedRole: UserRole,
         invitedNickname: String = "",
+        intendedEmail: String = "",
+        schoolGrade: String? = null,
         onCreated: ((FamilyInvitation) -> Unit)? = null
     ) {
         if (!currentMember.value.isParent) {
-            _snackbarMessage.value = "רק הורה רשאי ליצור הזמנות למשפחה 🔒"
+            val err = "רק הורה רשאי ליצור הזמנות למשפחה 🔒"
+            _invitationCreationError.value = err
+            _snackbarMessage.value = err
             return
         }
+        _lastCreatedRoleFilter.value = invitedRole
+        _isCreatingInvitation.value = true
+        _invitationCreationError.value = null
         viewModelScope.launch {
             val result = repository.createRoleSpecificInvitation(
                 invitedRole = invitedRole,
-                invitedNickname = invitedNickname
+                invitedNickname = invitedNickname,
+                intendedEmail = intendedEmail,
+                schoolGrade = schoolGrade
             )
+            _isCreatingInvitation.value = false
             result.onSuccess { invitation ->
+                _invitationCreationError.value = null
                 val roleHe = if (invitation.invitedRole == UserRole.PARENT) "הורה" else "ילד/ה"
-                _snackbarMessage.value = "נוצר קוד הזמנה (${invitation.code}) לתפקיד $roleHe 🔑"
+                _snackbarMessage.value = "נוצר ונשמר בענן קוד הזמנה (${invitation.code}) לתפקיד $roleHe 🔑"
                 onCreated?.invoke(invitation)
             }.onFailure { err ->
-                _snackbarMessage.value = err.localizedMessage ?: "שגיאה ביצירת קוד ההזמנה"
+                val msg = err.localizedMessage ?: "שגיאה בשמירת קוד ההזמנה בענן. נסו שוב."
+                _invitationCreationError.value = msg
+                _snackbarMessage.value = msg
             }
         }
+    }
+
+    fun retryLastRoleInvitation(onCreated: ((FamilyInvitation) -> Unit)? = null) {
+        createRoleSpecificInvitation(
+            invitedRole = _lastCreatedRoleFilter.value,
+            onCreated = onCreated
+        )
     }
 
     fun inviteMember(
@@ -558,8 +594,16 @@ class FamilyViewModel(
     ): FamilyInvitation? {
         val created = repository.inviteNewMember(name, emoji, role, googleEmail, schoolGrade)
         if (created == null) {
-            _snackbarMessage.value = "רק הורה רשאי להזמין חברים למשפחה 🔒"
+            val errMsg = repository.lastClassifiedInvitationFailure?.messageHe
+                ?: if (!currentMember.value.isParent) {
+                    "רק הורה רשאי להזמין חברים למשפחה 🔒"
+                } else {
+                    "שגיאה בשמירת קוד ההזמנה בענן. נסו שוב."
+                }
+            _invitationCreationError.value = errMsg
+            _snackbarMessage.value = errMsg
         } else {
+            _invitationCreationError.value = null
             val roleHe = if (created.invitedRole == UserRole.PARENT) "הורה" else "ילד/ה"
             _snackbarMessage.value = "נוצרה הזמנה (${created.code}) עבור ${name.ifBlank { roleHe }} בתפקיד $roleHe ✉️"
         }

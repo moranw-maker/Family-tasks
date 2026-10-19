@@ -718,7 +718,7 @@ fun GoogleOnboardingScreen(
                                     OutlinedTextField(
                                         value = inviteCodeInput,
                                         onValueChange = {
-                                            inviteCodeInput = it.uppercase().take(8)
+                                            inviteCodeInput = it.trim().uppercase().take(12)
                                             localError = null
                                             if (validatedInvitation != null) {
                                                 onClearValidatedInvite()

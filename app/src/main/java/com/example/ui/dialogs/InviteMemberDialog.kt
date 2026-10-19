@@ -39,6 +39,16 @@ fun InviteMemberDialog(
     onDismiss: () -> Unit,
     onGenerateShareText: (name: String, role: UserRole) -> String,
     onFormatInvitationShareText: ((FamilyInvitation) -> String)? = null,
+    isCreatingInvitation: Boolean = false,
+    invitationErrorMessage: String? = null,
+    onCreateInvitationAsync: ((
+        name: String,
+        emoji: String,
+        role: UserRole,
+        googleEmail: String?,
+        schoolGrade: String?,
+        onConfirmed: (FamilyInvitation) -> Unit
+    ) -> Unit)? = null,
     onInvite: (
         name: String,
         emoji: String,
@@ -53,6 +63,33 @@ fun InviteMemberDialog(
 
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
+
+    val triggerCreateInvite = {
+        val emoji = if (selectedRole == UserRole.PARENT) "👩" else "🧒"
+        val cleanNickname = nickname.trim()
+        if (onCreateInvitationAsync != null) {
+            onCreateInvitationAsync(
+                cleanNickname,
+                emoji,
+                selectedRole,
+                null,
+                null
+            ) { confirmedInvitation ->
+                generatedInvitation = confirmedInvitation
+            }
+        } else {
+            val created = onInvite(
+                cleanNickname,
+                emoji,
+                selectedRole,
+                null,
+                null
+            )
+            if (created != null) {
+                generatedInvitation = created
+            }
+        }
+    }
 
     fun buildDomainFreeShareMessage(invitation: FamilyInvitation): String {
         if (onFormatInvitationShareText != null) {
@@ -149,7 +186,7 @@ fun InviteMemberDialog(
                 roles.forEach { r ->
                     val activeRole = generatedInvitation?.invitedRole ?: selectedRole
                     val isSelected = activeRole == r
-                    val isLocked = generatedInvitation != null
+                    val isLocked = generatedInvitation != null || isCreatingInvitation
                     val desc = when (r) {
                         UserRole.CHILD -> if (isHebrew)
                             "ילד/ה (חבר משפחה): צפייה במשימות, סימון משימות אישיות כבוצע וצבירת נקודות לפרסים (ללא הרשאות ניהול)"
@@ -211,8 +248,8 @@ fun InviteMemberDialog(
                 // Optional nickname / label for the parent's pending invitations list
                 OutlinedTextField(
                     value = nickname,
-                    onValueChange = { if (generatedInvitation == null) nickname = it },
-                    enabled = generatedInvitation == null,
+                    onValueChange = { if (generatedInvitation == null && !isCreatingInvitation) nickname = it },
+                    enabled = generatedInvitation == null && !isCreatingInvitation,
                     label = {
                         Text(
                             if (isHebrew) "שם / כינוי המוזמן (אופציונלי, לזיהוי ברשימת ההמתנה)"
@@ -228,22 +265,55 @@ fun InviteMemberDialog(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Generate Button (if not yet generated)
+                // Error Banner & Retry Button if Firestore write failed (Requirement 4 & 5)
+                if (generatedInvitation == null && !invitationErrorMessage.isNullOrBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                            .testTag("invite_creation_error_banner")
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(
+                                text = invitationErrorMessage,
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            )
+                            OutlinedButton(
+                                onClick = { triggerCreateInvite() },
+                                enabled = !isCreatingInvitation,
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("retry_create_invite_btn")
+                            ) {
+                                Icon(imageVector = Icons.Default.Refresh, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (isHebrew) "נסה שוב ליצור קוד הזמנה" else "Retry Creating Invite Code",
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Generate Button (if not yet generated and confirmed in Firestore)
                 if (generatedInvitation == null) {
                     Button(
-                        onClick = {
-                            val emoji = if (selectedRole == UserRole.PARENT) "👩" else "🧒"
-                            val created = onInvite(
-                                nickname.trim(),
-                                emoji,
-                                selectedRole,
-                                null,
-                                null
-                            )
-                            if (created != null) {
-                                generatedInvitation = created
-                            }
-                        },
+                        onClick = { triggerCreateInvite() },
+                        enabled = !isCreatingInvitation,
                         shape = RoundedCornerShape(16.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = VibrantActionBlue),
                         modifier = Modifier
@@ -251,13 +321,27 @@ fun InviteMemberDialog(
                             .height(52.dp)
                             .testTag("generate_invite_code_btn")
                     ) {
-                        Icon(imageVector = Icons.Default.VpnKey, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (isHebrew) "צור קוד הזמנה מאובטח" else "Generate Secure Invite Code",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp
-                        )
+                        if (isCreatingInvitation) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = Color.White
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = if (isHebrew) "שומר ומאמת קוד הזמנה בענן..." else "Saving & Verifying Invite in Cloud...",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                        } else {
+                            Icon(imageVector = Icons.Default.VpnKey, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (isHebrew) "צור קוד הזמנה מאובטח" else "Generate Secure Invite Code",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp
+                            )
+                        }
                     }
                 }
 
