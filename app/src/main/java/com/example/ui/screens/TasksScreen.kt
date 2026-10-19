@@ -48,7 +48,11 @@ fun TasksScreen(
     onSendNudge: (FamilyTask) -> Unit,
     onAddNewTask: () -> Unit,
     onOpenFamilyAdmin: () -> Unit = {},
-    onOpenRewards: () -> Unit = {}
+    onOpenRewards: () -> Unit = {},
+    taskSyncStates: Map<String, TaskCompletionSyncState> = emptyMap(),
+    taskOperationError: String? = null,
+    onApproveTask: (String) -> Unit = {},
+    onDismissTaskError: () -> Unit = {}
 ) {
     var filterTab by remember { mutableIntStateOf(0) } // 0 = All, 1 = Today, 2 = Week, 3 = Completed
     var searchQuery by remember { mutableStateOf("") }
@@ -65,14 +69,26 @@ fun TasksScreen(
         tasks.count { it.isCompleted }
     }
 
-    // Filter tasks based on member, status, date, and search query
+    // Filter tasks based on member, status, date, and search query.
+    // Tasks that are SAVING, PENDING_APPROVAL (!approvedByParent), or FAILED stay visible in active tabs
+    // so children see pending-approval status and parents see tasks awaiting their approval.
     val filteredTasks = tasks.filter { task ->
         val matchesMember = selectedMemberFilter == null || task.assignedToMemberId == selectedMemberFilter
         val matchesSearch = searchQuery.isBlank() || task.title.contains(searchQuery, ignoreCase = true) || task.description.contains(searchQuery, ignoreCase = true)
+        val syncState = taskSyncStates[task.id] ?: when {
+            task.isCompleted && task.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
+            task.isCompleted && !task.approvedByParent -> TaskCompletionSyncState.PENDING_APPROVAL
+            else -> TaskCompletionSyncState.IDLE
+        }
+        val isActiveOrPending = !task.isCompleted ||
+            !task.approvedByParent ||
+            syncState == TaskCompletionSyncState.SAVING ||
+            syncState == TaskCompletionSyncState.PENDING_APPROVAL ||
+            syncState == TaskCompletionSyncState.FAILED
         val matchesTab = when (filterTab) {
-            0 -> !task.isCompleted
-            1 -> !task.isCompleted && task.dateEpochDay == todayEpoch
-            2 -> !task.isCompleted && task.dateEpochDay <= todayEpoch + 7
+            0 -> isActiveOrPending
+            1 -> isActiveOrPending && task.dateEpochDay == todayEpoch
+            2 -> isActiveOrPending && task.dateEpochDay <= todayEpoch + 7
             3 -> task.isCompleted
             else -> true
         }
@@ -475,6 +491,62 @@ fun TasksScreen(
                 }
             }
 
+            // 5b. Clear Hebrew Error Banner when a task write or approval fails
+            if (!taskOperationError.isNullOrBlank()) {
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = Color(0xFFFEF2F2),
+                        border = BorderStroke(1.dp, GoogleRed),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("task_operation_error_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(text = "⚠️", fontSize = 20.sp)
+                                Column {
+                                    Text(
+                                        text = if (isHebrew) "שגיאה בשמירת המשימה בענן" else "Cloud Task Sync Error",
+                                        style = MaterialTheme.typography.labelLarge.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = GoogleRed
+                                        )
+                                    )
+                                    Text(
+                                        text = taskOperationError,
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            color = TextPrimary,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    )
+                                }
+                            }
+                            IconButton(
+                                onClick = onDismissTaskError,
+                                modifier = Modifier.testTag("dismiss_task_error_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Dismiss error",
+                                    tint = GoogleRed
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // 6. Tasks List
             if (filteredTasks.isEmpty()) {
                 item {
@@ -508,11 +580,19 @@ fun TasksScreen(
             } else {
                 items(filteredTasks, key = { it.id }) { task ->
                     val assignedMember = members.find { it.id == task.assignedToMemberId }
+                    val syncState = taskSyncStates[task.id] ?: when {
+                        task.isCompleted && task.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
+                        task.isCompleted && !task.approvedByParent -> TaskCompletionSyncState.PENDING_APPROVAL
+                        else -> TaskCompletionSyncState.IDLE
+                    }
                     TaskItemCardModern(
                         task = task,
                         assignedMember = assignedMember,
+                        currentMember = currentMember,
+                        syncState = syncState,
                         isHebrew = isHebrew,
                         onToggle = { onToggleTask(task.id) },
+                        onApprove = { onApproveTask(task.id) },
                         onCardClick = { selectedTaskForDetail = task }
                     )
                 }
@@ -588,17 +668,25 @@ fun TasksScreen(
 
     // Modal Task Details Dialog (matches Image 2 Screen 4)
     selectedTaskForDetail?.let { activeTask ->
-        val activeAssignee = members.find { it.id == activeTask.assignedToMemberId }
+        val latestTask = tasks.find { it.id == activeTask.id } ?: activeTask
+        val activeAssignee = members.find { it.id == latestTask.assignedToMemberId }
+        val activeSyncState = taskSyncStates[latestTask.id] ?: when {
+            latestTask.isCompleted && latestTask.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
+            latestTask.isCompleted && !latestTask.approvedByParent -> TaskCompletionSyncState.PENDING_APPROVAL
+            else -> TaskCompletionSyncState.IDLE
+        }
         TaskDetailDialog(
-            task = activeTask,
+            task = latestTask,
             assignedMember = activeAssignee,
             currentMember = currentMember,
             isHebrew = isHebrew,
             onDismiss = { selectedTaskForDetail = null },
-            onToggle = { onToggleTask(activeTask.id) },
-            onEdit = { onEditTask(activeTask) },
-            onDelete = { onDeleteTask(activeTask.id) },
-            onSendNudge = { onSendNudge(activeTask) }
+            onToggle = { onToggleTask(latestTask.id) },
+            onEdit = { onEditTask(latestTask) },
+            onDelete = { onDeleteTask(latestTask.id) },
+            onSendNudge = { onSendNudge(latestTask) },
+            syncState = activeSyncState,
+            onApprove = { onApproveTask(latestTask.id) }
         )
     }
 }
@@ -607,20 +695,42 @@ fun TasksScreen(
 private fun TaskItemCardModern(
     task: FamilyTask,
     assignedMember: FamilyMember?,
+    currentMember: FamilyMember = FamilyMember(id = "", name = "", role = UserRole.PARENT, colorHex = 0xFF1A73E8),
+    syncState: TaskCompletionSyncState = TaskCompletionSyncState.IDLE,
     isHebrew: Boolean,
     onToggle: () -> Unit,
+    onApprove: () -> Unit = {},
     onCardClick: () -> Unit
 ) {
+    val isPendingApproval = task.isCompleted && !task.approvedByParent
+    val isFullyApproved = task.isCompleted && task.approvedByParent
+    val isSaving = syncState == TaskCompletionSyncState.SAVING
+    val isFailed = syncState == TaskCompletionSyncState.FAILED
+
     val checkBgColor by animateColorAsState(
-        targetValue = if (task.isCompleted) Color(0xFF10B981) else Color.Transparent,
+        targetValue = when {
+            isSaving -> VibrantActionBlue.copy(alpha = 0.2f)
+            isFailed -> Color(0xFFFEE2E2)
+            isFullyApproved -> Color(0xFF10B981)
+            isPendingApproval -> Color(0xFFF59E0B)
+            else -> Color.Transparent
+        },
         animationSpec = spring(),
         label = "checkBg"
     )
 
+    val cardBorderColor = when {
+        isFailed -> GoogleRed
+        isSaving -> VibrantActionBlue
+        isFullyApproved -> PastelGreenBorder
+        isPendingApproval -> PastelYellowBorder
+        else -> OutlineLight
+    }
+
     Surface(
         shape = RoundedCornerShape(20.dp),
         color = Color.White,
-        border = BorderStroke(1.dp, if (task.isCompleted) PastelGreenBorder else OutlineLight),
+        border = BorderStroke(1.dp, cardBorderColor),
         tonalElevation = 2.dp,
         modifier = Modifier
             .fillMaxWidth()
@@ -628,112 +738,189 @@ private fun TaskItemCardModern(
             .clickable { onCardClick() }
             .testTag("task_card_${task.id}")
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(horizontal = 14.dp, vertical = 12.dp)
         ) {
-            // Checkbox button on the left (RTL aligned)
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .background(checkBgColor)
-                    .border(
-                        2.dp,
-                        if (task.isCompleted) Color(0xFF10B981) else Color(0xFFCBD5E1),
-                        CircleShape
-                    )
-                    .clickable { onToggle() }
-                    .testTag("task_toggle_${task.id}"),
-                contentAlignment = Alignment.Center
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                if (task.isCompleted) {
-                    Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = "Completed",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.width(12.dp))
-
-            // Task Title, Points & Member info
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = task.title,
-                    style = MaterialTheme.typography.bodyLarge.copy(
-                        fontWeight = FontWeight.Bold,
-                        textDecoration = if (task.isCompleted) TextDecoration.LineThrough else TextDecoration.None,
-                        color = if (task.isCompleted) Color(0xFF94A3B8) else TextPrimary
-                    ),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                Spacer(modifier = Modifier.height(3.dp))
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                // Checkbox button on the left (RTL aligned)
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(checkBgColor)
+                        .border(
+                            2.dp,
+                            when {
+                                isFailed -> GoogleRed
+                                isSaving -> VibrantActionBlue
+                                isFullyApproved -> Color(0xFF10B981)
+                                isPendingApproval -> Color(0xFFF59E0B)
+                                else -> Color(0xFFCBD5E1)
+                            },
+                            CircleShape
+                        )
+                        .clickable(enabled = !isSaving) { onToggle() }
+                        .testTag("task_toggle_${task.id}"),
+                    contentAlignment = Alignment.Center
                 ) {
+                    when {
+                        isSaving -> {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = VibrantActionBlue
+                            )
+                        }
+                        task.isCompleted -> {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Completed",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                // Task Title, Points, Sync Status & Member info
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "${task.points} ${if (isHebrew) "נקודות" else "pts"}",
-                        style = MaterialTheme.typography.labelSmall.copy(
+                        text = task.title,
+                        style = MaterialTheme.typography.bodyLarge.copy(
                             fontWeight = FontWeight.Bold,
-                            color = if (task.isCompleted) Color(0xFF10B981) else Color(0xFFE11D48)
-                        )
+                            textDecoration = if (isFullyApproved) TextDecoration.LineThrough else TextDecoration.None,
+                            color = if (isFullyApproved) Color(0xFF94A3B8) else TextPrimary
+                        ),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
 
-                    Text(text = "•", color = TextSecondary, fontSize = 11.sp)
+                    Spacer(modifier = Modifier.height(3.dp))
 
-                    Text(
-                        text = if (task.isCompleted) {
-                            if (isHebrew) "הושלם" else "Done"
-                        } else {
-                            if (isHebrew) "היום" else "Today"
-                        },
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            color = TextSecondary,
-                            fontWeight = FontWeight.Medium
-                        )
-                    )
+                    val statusLabel = when {
+                        isSaving -> if (isHebrew) "שומר בענן... ⏳" else "Saving... ⏳"
+                        isFailed -> if (isHebrew) "שגיאה בשמירה • שוחזר ⚠️" else "Save failed ⚠️"
+                        isPendingApproval -> if (isHebrew) "נשמר • ממתין לאישור הורה ⏳" else "Pending approval ⏳"
+                        isFullyApproved -> if (isHebrew) "נשמר • הושלם ואושר ✓" else "Saved & Approved ✓"
+                        else -> if (isHebrew) "היום" else "Today"
+                    }
+                    val statusTag = when {
+                        isSaving -> "task_status_saving_${task.id}"
+                        isFailed -> "task_status_failed_${task.id}"
+                        isPendingApproval -> "task_status_pending_approval_${task.id}"
+                        isFullyApproved -> "task_status_saved_approved_${task.id}"
+                        else -> "task_status_idle_${task.id}"
+                    }
+                    val statusColor = when {
+                        isSaving -> VibrantActionBlue
+                        isFailed -> GoogleRed
+                        isPendingApproval -> PastelYellowDark
+                        isFullyApproved -> Color(0xFF10B981)
+                        else -> TextSecondary
+                    }
 
-                    if (assignedMember != null) {
-                        Text(text = "•", color = TextSecondary, fontSize = 11.sp)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         Text(
-                            text = "${assignedMember.avatarEmoji} ${assignedMember.name}",
+                            text = "${task.points} ${if (isHebrew) "נקודות" else "pts"}",
                             style = MaterialTheme.typography.labelSmall.copy(
-                                color = TextSecondary,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.Bold,
+                                color = if (isFullyApproved) Color(0xFF10B981) else Color(0xFFE11D48)
                             )
                         )
+
+                        Text(text = "•", color = TextSecondary, fontSize = 11.sp)
+
+                        Text(
+                            text = statusLabel,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = statusColor,
+                                fontWeight = FontWeight.Bold
+                            ),
+                            modifier = Modifier.testTag(statusTag)
+                        )
+
+                        if (assignedMember != null) {
+                            Text(text = "•", color = TextSecondary, fontSize = 11.sp)
+                            Text(
+                                text = "${assignedMember.avatarEmoji} ${assignedMember.name}",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = TextSecondary,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(10.dp))
+
+                // Right Category Icon badge (matches Image 1 Right Phone)
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = when (task.category) {
+                        TaskCategory.BEDROOM -> Color(0xFFEFF6FF)
+                        TaskCategory.DISHES -> Color(0xFFECFDF5)
+                        TaskCategory.HOMEWORK -> Color(0xFFFAF5FF)
+                        TaskCategory.CLEANING -> Color(0xFFF0FDF4)
+                        TaskCategory.GROCERIES -> Color(0xFFFDF2F8)
+                        TaskCategory.PETS -> Color(0xFFFFFBEB)
+                        else -> Color(0xFFF8FAFC)
+                    },
+                    modifier = Modifier.size(44.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(text = task.category.defaultEmoji, fontSize = 22.sp)
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.width(10.dp))
-
-            // Right Category Icon badge (matches Image 1 Right Phone)
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = when (task.category) {
-                    TaskCategory.BEDROOM -> Color(0xFFEFF6FF)
-                    TaskCategory.DISHES -> Color(0xFFECFDF5)
-                    TaskCategory.HOMEWORK -> Color(0xFFFAF5FF)
-                    TaskCategory.CLEANING -> Color(0xFFF0FDF4)
-                    TaskCategory.GROCERIES -> Color(0xFFFDF2F8)
-                    TaskCategory.PETS -> Color(0xFFFFFBEB)
-                    else -> Color(0xFFF8FAFC)
-                },
-                modifier = Modifier.size(44.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text(text = task.category.defaultEmoji, fontSize = 22.sp)
+            // Parent Approval Action Bar when a child has marked the task completed
+            if (currentMember.isParent && isPendingApproval && !isSaving) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = if (isHebrew)
+                            "סומן כבוצע ע\"י ${assignedMember?.name ?: "הילד/ה"} וממתין לאישורך"
+                        else
+                            "Completed by ${assignedMember?.name ?: "child"} — awaiting parent approval",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = PastelYellowDark,
+                            fontWeight = FontWeight.SemiBold
+                        ),
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = onApprove,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier
+                            .height(34.dp)
+                            .testTag("approve_task_${task.id}")
+                    ) {
+                        Text(
+                            text = if (isHebrew) "אשר ביצוע ✓" else "Approve ✓",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
                 }
             }
         }

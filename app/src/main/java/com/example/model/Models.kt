@@ -474,6 +474,22 @@ data class RewardItem(
     val description: String = ""
 )
 
+/**
+ * Explicit UI & cloud persistence state for task completion and parent approval (V1.6).
+ */
+enum class TaskCompletionSyncState {
+    /** Task is incomplete and idle. */
+    IDLE,
+    /** Task completion or approval write is in flight to Firestore. */
+    SAVING,
+    /** Child completed the task and the write is persisted in Firestore, awaiting parent approval. */
+    PENDING_APPROVAL,
+    /** Task completion is persisted in Firestore and approved by a parent. */
+    SAVED_APPROVED,
+    /** Last completion/approval write failed; previous state was restored. */
+    FAILED
+}
+
 data class FamilyTask(
     val id: String = UUID.randomUUID().toString(),
     val title: String,
@@ -495,6 +511,18 @@ data class FamilyTask(
     val createdAtMillis: Long = System.currentTimeMillis(),
     val updatedAtMillis: Long = System.currentTimeMillis()
 ) {
+    /**
+     * True when the task has been marked completed by a child and is awaiting parent approval.
+     */
+    val isPendingParentApproval: Boolean
+        get() = isCompleted && !approvedByParent
+
+    /**
+     * True when the task is both completed and approved by a parent.
+     */
+    val isFullyApprovedCompletion: Boolean
+        get() = isCompleted && approvedByParent
+
     /**
      * Converts UI FamilyTask to Room/Firestore core Task entity.
      */

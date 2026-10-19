@@ -10,8 +10,10 @@ import com.example.model.FamilyTask
 import com.example.model.InvitationStatus
 import com.example.model.InvitationValidationResult
 import com.example.model.TaskCategory
+import com.example.model.TaskCompletionSyncState
 import com.example.model.TaskPriority
 import com.example.model.UserRole
+import com.example.viewmodel.FamilyViewModel
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
@@ -496,6 +498,56 @@ class ExampleRobolectricTest {
         assertEquals("VALID9", retryResult.getOrThrow().code)
         assertTrue(repository.pendingInvitations.value.any { it.code == "VALID9" })
     }
+
+    @Test
+    fun `test child task completion shows pending approval and failed write reverts with Hebrew error`() = runBlocking {
+        val repository = FamilyRepository()
+
+        val roiChild = repository.members.value.first { it.id == "m_kid1" }
+        val dadParent = repository.members.value.first { it.id == "m_dad" }
+
+        // Switch active profile to Child (Roi / m_kid1)
+        repository.switchCurrentMember(roiChild)
+        val assignedTask = repository.tasks.value.first { it.assignedToMemberId == roiChild.id && !it.isCompleted }
+
+        // 1. Simulate failed write -> must revert to incomplete, set FAILED sync state, and set Hebrew error
+        repository.simulateOfflineNetworkFailure = true
+        val notifBeforeFail = repository.notifications.value.size
+        val failRes = repository.toggleTaskCompletionAsync(assignedTask.id)
+        assertTrue("Simulated network failure must fail task completion write", failRes.isFailure)
+
+        val taskAfterFail = repository.tasks.value.first { it.id == assignedTask.id }
+        assertFalse("Failed write must restore task to incomplete", taskAfterFail.isCompleted)
+        assertEquals(TaskCompletionSyncState.FAILED, repository.taskSyncStates.value[assignedTask.id])
+        assertFalse("Failed write must set Hebrew error message", repository.taskOperationError.value.isNullOrBlank())
+        assertEquals("Failed write must NOT trigger notification", notifBeforeFail, repository.notifications.value.size)
+
+        // 2. Network recovers -> Child marks task completed -> enters PENDING_APPROVAL (not self-approved)
+        repository.simulateOfflineNetworkFailure = false
+        val completeRes = repository.toggleTaskCompletionAsync(assignedTask.id)
+        assertTrue("Child completion of assigned task must succeed", completeRes.isSuccess)
+
+        val taskAfterChildComplete = repository.tasks.value.first { it.id == assignedTask.id }
+        assertTrue("Task must be marked completed after child toggle", taskAfterChildComplete.isCompleted)
+        assertFalse("Task must NOT be marked approvedByParent before parent approves", taskAfterChildComplete.approvedByParent)
+        assertEquals(TaskCompletionSyncState.PENDING_APPROVAL, repository.taskSyncStates.value[assignedTask.id])
+        assertEquals(notifBeforeFail + 1, repository.notifications.value.size)
+
+        // 3. Parent switches in and approves the task -> approvedByParent becomes true and points are awarded
+        val roiPointsBefore = repository.members.value.first { it.id == roiChild.id }.earnedPoints
+        repository.switchCurrentMember(dadParent)
+        val approveRes = repository.approveTaskCompletionAsync(assignedTask.id)
+        assertTrue("Parent approval must succeed", approveRes.isSuccess)
+
+        val taskAfterParentApprove = repository.tasks.value.first { it.id == assignedTask.id }
+        assertTrue("Task must be completed", taskAfterParentApprove.isCompleted)
+        assertTrue("Task must be approvedByParent after parent approval", taskAfterParentApprove.approvedByParent)
+        assertEquals(TaskCompletionSyncState.SAVED_APPROVED, repository.taskSyncStates.value[assignedTask.id])
+
+        val roiPointsAfter = repository.members.value.first { it.id == roiChild.id }.earnedPoints
+        assertEquals(roiPointsBefore + assignedTask.points, roiPointsAfter)
+    }
 }
+
 
 

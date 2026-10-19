@@ -71,6 +71,8 @@ fun FamilyTasksApp(
     val isProcessingFamilyAction by viewModel.isProcessingFamilyAction.collectAsStateWithLifecycle()
     val isCreatingInvitation by viewModel.isCreatingInvitation.collectAsStateWithLifecycle()
     val invitationCreationError by viewModel.invitationCreationError.collectAsStateWithLifecycle()
+    val taskSyncStates by viewModel.taskSyncStates.collectAsStateWithLifecycle()
+    val taskOperationError by viewModel.taskOperationError.collectAsStateWithLifecycle()
 
     // Google Auth & Cloud Family Group states
     val isGoogleSignedIn by viewModel.isGoogleSignedIn.collectAsStateWithLifecycle()
@@ -280,7 +282,11 @@ fun FamilyTasksApp(
                                             onSendNudge = { viewModel.sendParentNudge(it) },
                                             onAddNewTask = { viewModel.openAddTaskDialog(null) },
                                             onOpenFamilyAdmin = { viewModel.navigateTo(AppScreen.ADMIN_DASHBOARD) },
-                                            onOpenRewards = { showRewardsSheet = true }
+                                            onOpenRewards = { showRewardsSheet = true },
+                                            taskSyncStates = taskSyncStates,
+                                            taskOperationError = taskOperationError,
+                                            onApproveTask = { viewModel.approveTaskCompletion(it) },
+                                            onDismissTaskError = { viewModel.clearTaskOperationError() }
                                         )
                                     }
 

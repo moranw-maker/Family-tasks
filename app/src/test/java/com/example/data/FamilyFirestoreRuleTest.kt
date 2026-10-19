@@ -2,6 +2,7 @@ package com.example.data
 
 import com.example.base.FirestoreEmulatorTestBase
 import com.example.model.*
+import com.example.util.FirestoreErrorHandler
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
@@ -1735,6 +1736,355 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
             outsiderRepo.redeemInvitationAndJoinFamily(expiredInvite.code, "אורח")
         }
         assertTrue("Redeeming expired code must fail", expiredRedeem.isFailure)
+    }
+
+    /**
+     * V1.6 Critical Regression Test:
+     * Covers all 7 requirements for CHILD task completion persistence & PARENT approval workflow:
+     * 1. Child completing an assigned task persists in Firestore (/families/{familyId}/tasks/{taskId})
+     *    with isCompleted=true, approvedByParent=false, and sync state PENDING_APPROVAL.
+     * 2. Parent observes the child's completion in real-time via Firestore snapshot listener.
+     * 3. Child is denied updates to another child's task (both in repository and Firestore rules).
+     * 4. Child is denied changes to task title, assignee, rewards/points, approvedByParent=true,
+     *    task creation, or task deletion.
+     * 5. Failed writes revert the optimistic UI state to incomplete and populate a clear Hebrew error.
+     * 6. Notifications are NOT sent for rejected writes, and only sent once after committed writes.
+     * 7. Parent approval workflow persists approvedByParent=true and awards earnedPoints to the child.
+     */
+    @Test
+    fun testV16ChildTaskCompletionPersistence_parentRealtimeObservation_andApprovalWorkflow() = runBlocking {
+        val ts = System.currentTimeMillis()
+        val parentEmail = "v16_task_parent_$ts@example.com"
+        val roiChildEmail = "v16_task_roi_$ts@example.com"
+        val siblingChildEmail = "v16_task_noa_$ts@example.com"
+
+        // 1. Parent signs in and creates a family
+        val parentUid = signInTestUser(parentEmail)
+        val parentRepo = repo()
+        assertEquals(
+            "All task operations must target the configured named Firestore database",
+            FamilyRepository.NAMED_FIRESTORE_DATABASE_ID,
+            parentRepo.configuredDatabaseId
+        )
+
+        val familyCreation = withTimeout(timeoutMs) {
+            parentRepo.createFamilyAsParent(
+                familyNameInput = "משפחת משימות",
+                parentDisplayName = "אבא דני",
+                familyIdentity = FamilyIdentity.FATHER
+            )
+        }
+        assertTrue("Parent must create family", familyCreation.isSuccess)
+        val familyId = familyCreation.getOrThrow().familyId
+
+        // Create invitations for Roi (CHILD 1) and Noa (CHILD 2)
+        val roiInvite = withTimeout(timeoutMs) {
+            parentRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "רועי"
+            )
+        }.getOrThrow()
+        val noaInvite = withTimeout(timeoutMs) {
+            parentRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "נועה"
+            )
+        }.getOrThrow()
+
+        // Roi joins as CHILD
+        val roiUid = signInTestUser(roiChildEmail)
+        val roiRepo = repo()
+        val roiJoin = withTimeout(timeoutMs) {
+            roiRepo.redeemInvitationAndJoinFamily(
+                rawCode = roiInvite.code,
+                memberDisplayName = "רועי",
+                familyIdentity = FamilyIdentity.SON
+            )
+        }
+        assertTrue("Roi must join family as CHILD: ${roiJoin.exceptionOrNull()}", roiJoin.isSuccess)
+        assertEquals(UserRole.CHILD, roiRepo.currentMember.value.role)
+
+        // Noa joins as second CHILD
+        val noaUid = signInTestUser(siblingChildEmail)
+        val noaRepo = repo()
+        val noaJoin = withTimeout(timeoutMs) {
+            noaRepo.redeemInvitationAndJoinFamily(
+                rawCode = noaInvite.code,
+                memberDisplayName = "נועה",
+                familyIdentity = FamilyIdentity.DAUGHTER
+            )
+        }
+        assertTrue("Noa must join family as CHILD", noaJoin.isSuccess)
+
+        // Parent signs in and creates a task for Roi and a task for Noa
+        signInTestUser(parentEmail)
+        val roiTaskId = "task_roi_room_$ts"
+        val noaTaskId = "task_noa_dishes_$ts"
+
+        val roiTask = FamilyTask(
+            id = roiTaskId,
+            familyId = familyId,
+            title = "סידור החדר של רועי",
+            description = "לסדר צעצועים ומיטה",
+            category = TaskCategory.BEDROOM,
+            assignedToMemberId = roiUid,
+            dateEpochDay = LocalDate.now().toEpochDay(),
+            dueTimeFormatted = "17:30",
+            priority = TaskPriority.HIGH,
+            points = 25,
+            isCompleted = false,
+            approvedByParent = false
+        )
+        val noaTask = FamilyTask(
+            id = noaTaskId,
+            familyId = familyId,
+            title = "פינוי מדיח כלים",
+            category = TaskCategory.DISHES,
+            assignedToMemberId = noaUid,
+            dateEpochDay = LocalDate.now().toEpochDay(),
+            dueTimeFormatted = "18:00",
+            points = 15,
+            isCompleted = false,
+            approvedByParent = false
+        )
+
+        parentRepo.addTask(roiTask)
+        parentRepo.addTask(noaTask)
+
+        // Wait for tasks to be persisted in Firestore and visible to Roi's real-time listener
+        withTimeout(timeoutMs) {
+            while (roiRepo.tasks.value.none { it.id == roiTaskId } || roiRepo.tasks.value.none { it.id == noaTaskId }) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+        assertTrue("Roi must immediately see the task created by Parent", roiRepo.tasks.value.any { it.id == roiTaskId })
+
+        // Switch active auth to Roi (CHILD)
+        signInTestUser(roiChildEmail)
+        val notificationsBeforeComplete = roiRepo.notifications.value.size
+
+        // 2. Roi (CHILD) completes his assigned task
+        val completeRes = withTimeout(timeoutMs) {
+            roiRepo.toggleTaskCompletionAsync(roiTaskId)
+        }
+        assertTrue(
+            "Roi completing his assigned task must succeed in Firestore without PERMISSION_DENIED: ${completeRes.exceptionOrNull()}",
+            completeRes.isSuccess
+        )
+
+        val completedLocalTask = roiRepo.tasks.value.first { it.id == roiTaskId }
+        assertTrue("Task must remain marked completed on Roi's device", completedLocalTask.isCompleted)
+        assertFalse(
+            "Child completion must NOT self-approve; approvedByParent must be false (pending approval)",
+            completedLocalTask.approvedByParent
+        )
+        assertEquals(
+            "Task sync state must be PENDING_APPROVAL after child completion commit",
+            TaskCompletionSyncState.PENDING_APPROVAL,
+            roiRepo.taskSyncStates.value[roiTaskId]
+        )
+        assertNull("No error message should be set on successful completion", roiRepo.taskOperationError.value)
+
+        // Verify notification was sent AFTER commit and not duplicated by snapshot listener
+        val notificationsAfterComplete = roiRepo.notifications.value.size
+        assertEquals(
+            "Exactly one notification must be emitted after child completion commit (no duplicates from snapshot listener)",
+            notificationsBeforeComplete + 1,
+            notificationsAfterComplete
+        )
+
+        // Verify persisted document in Firestore directly
+        val cloudSnapAfterChild = withTimeout(timeoutMs) {
+            firestore.collection("families").document(familyId)
+                .collection("tasks").document(roiTaskId).get().awaitTask()
+        }
+        assertTrue("Task document must exist in Firestore", cloudSnapAfterChild.exists())
+        assertEquals("isCompleted must be persisted as true in Firestore", true, cloudSnapAfterChild.getBoolean("isCompleted"))
+        assertEquals("approvedByParent must remain false in Firestore", false, cloudSnapAfterChild.getBoolean("approvedByParent"))
+        assertEquals("completedByMemberId must be Roi's UID", roiUid, cloudSnapAfterChild.getString("completedByMemberId"))
+
+        // 3. Parent observes the completion in real-time with PENDING_APPROVAL status
+        withTimeout(timeoutMs) {
+            while (parentRepo.tasks.value.find { it.id == roiTaskId }?.isCompleted != true) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+        val parentObservedTask = parentRepo.tasks.value.first { it.id == roiTaskId }
+        assertTrue("Parent must observe Roi's task as completed in real-time", parentObservedTask.isCompleted)
+        assertFalse("Parent must observe Roi's task as pending parent approval", parentObservedTask.approvedByParent)
+        assertEquals(
+            TaskCompletionSyncState.PENDING_APPROVAL,
+            parentRepo.taskSyncStates.value[roiTaskId]
+        )
+
+        // 4. Child is denied updates to another child's task (Noa's task)
+        val notificationsBeforeSiblingAttempt = roiRepo.notifications.value.size
+        val siblingToggleRes = withTimeout(timeoutMs) {
+            roiRepo.toggleTaskCompletionAsync(noaTaskId)
+        }
+        assertTrue("Roi must be denied completing Noa's task", siblingToggleRes.isFailure)
+        assertEquals(
+            FirestoreErrorHandler.TaskFailureCategory.ASSIGNEE_MISMATCH,
+            roiRepo.lastClassifiedTaskFailure?.category
+        )
+        assertNotNull("Clear Hebrew error message must be set when child tries to complete another child's task", roiRepo.taskOperationError.value)
+        assertFalse("Noa's task must remain incomplete", roiRepo.tasks.value.first { it.id == noaTaskId }.isCompleted)
+        assertEquals(
+            "Rejected sibling task write must NOT trigger any notification",
+            notificationsBeforeSiblingAttempt,
+            roiRepo.notifications.value.size
+        )
+
+        // Also verify direct Firestore SDK update by Roi on Noa's task is rejected by firestore.rules
+        val directSiblingFirestoreAttempt = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyId)
+                    .collection("tasks").document(noaTaskId)
+                    .update(
+                        mapOf(
+                            "isCompleted" to true,
+                            "completedAtMillis" to System.currentTimeMillis(),
+                            "completedByMemberId" to roiUid,
+                            "updatedAt" to System.currentTimeMillis()
+                        )
+                    ).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must reject child updating another child's task", directSiblingFirestoreAttempt.isFailure)
+
+        // 5. Child is denied changes to protected fields (title, assignee, rewards/points, approvedByParent, create, delete)
+        val roiTaskRef = firestore.collection("families").document(familyId).collection("tasks").document(roiTaskId)
+
+        val tamperTitleAttempt = runCatching {
+            withTimeout(5000L) {
+                roiTaskRef.update(mapOf("title" to "hacked title", "updatedAt" to System.currentTimeMillis())).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must deny child changing task title", tamperTitleAttempt.isFailure)
+
+        val tamperAssigneeAttempt = runCatching {
+            withTimeout(5000L) {
+                roiTaskRef.update(mapOf("assignedToMemberId" to noaUid, "assignedUid" to noaUid)).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must deny child changing task assignee", tamperAssigneeAttempt.isFailure)
+
+        val tamperPointsAttempt = runCatching {
+            withTimeout(5000L) {
+                roiTaskRef.update(mapOf("points" to 999, "pointsValue" to 999)).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must deny child changing task reward points", tamperPointsAttempt.isFailure)
+
+        val tamperSelfApprovalAttempt = runCatching {
+            withTimeout(5000L) {
+                roiTaskRef.update(mapOf("approvedByParent" to true, "updatedAt" to System.currentTimeMillis())).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must deny child setting approvedByParent=true", tamperSelfApprovalAttempt.isFailure)
+
+        val childApproveRepoAttempt = withTimeout(timeoutMs) {
+            roiRepo.approveTaskCompletionAsync(roiTaskId)
+        }
+        assertTrue("Repository must deny child calling approveTaskCompletionAsync", childApproveRepoAttempt.isFailure)
+
+        val childCreateTaskAttempt = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyId)
+                    .collection("tasks").document("task_child_created_$ts")
+                    .set(
+                        mapOf(
+                            "id" to "task_child_created_$ts",
+                            "familyId" to familyId,
+                            "title" to "Unauthorized child task",
+                            "assignedUid" to roiUid,
+                            "assignedToMemberId" to roiUid,
+                            "points" to 0,
+                            "isCompleted" to false,
+                            "approvedByParent" to false
+                        )
+                    ).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must deny child creating any task", childCreateTaskAttempt.isFailure)
+
+        val childDeleteTaskAttempt = runCatching {
+            withTimeout(5000L) {
+                roiTaskRef.delete().awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must deny child deleting a task", childDeleteTaskAttempt.isFailure)
+
+        // 6. Failed write reverts optimistic UI with a clear Hebrew error and does NOT send notification
+        // Switch to Noa (CHILD) and simulate a failed Firestore write on Noa's assigned task
+        signInTestUser(siblingChildEmail)
+        val noaNotificationsBeforeFail = noaRepo.notifications.value.size
+        noaRepo.simulateOfflineNetworkFailure = true
+
+        val failedCompleteRes = withTimeout(timeoutMs) {
+            noaRepo.toggleTaskCompletionAsync(noaTaskId)
+        }
+        assertTrue("Simulated network failure must fail completion", failedCompleteRes.isFailure)
+        assertFalse(
+            "Failed write must revert optimistic UI back to incomplete (isCompleted=false)",
+            noaRepo.tasks.value.first { it.id == noaTaskId }.isCompleted
+        )
+        assertEquals(
+            "Sync state must be FAILED after failed completion write",
+            TaskCompletionSyncState.FAILED,
+            noaRepo.taskSyncStates.value[noaTaskId]
+        )
+        assertFalse(
+            "Hebrew error message must be populated on failed task write",
+            noaRepo.taskOperationError.value.isNullOrBlank()
+        )
+        assertEquals(
+            "Failed task completion write must NOT emit any push notification",
+            noaNotificationsBeforeFail,
+            noaRepo.notifications.value.size
+        )
+        noaRepo.simulateOfflineNetworkFailure = false
+
+        // 7. Parent approves Roi's completed task -> persists approvedByParent=true and awards points
+        signInTestUser(parentEmail)
+        val roiPointsBeforeApproval = parentRepo.members.value.find { it.id == roiUid }?.earnedPoints ?: 0
+
+        val approvalRes = withTimeout(timeoutMs) {
+            parentRepo.approveTaskCompletionAsync(roiTaskId)
+        }
+        assertTrue("Parent approving Roi's completed task must succeed: ${approvalRes.exceptionOrNull()}", approvalRes.isSuccess)
+        assertEquals(
+            TaskCompletionSyncState.SAVED_APPROVED,
+            parentRepo.taskSyncStates.value[roiTaskId]
+        )
+
+        val cloudSnapAfterApproval = withTimeout(timeoutMs) {
+            roiTaskRef.get().awaitTask()
+        }
+        assertEquals("isCompleted must be true after parent approval", true, cloudSnapAfterApproval.getBoolean("isCompleted"))
+        assertEquals("approvedByParent must be true after parent approval", true, cloudSnapAfterApproval.getBoolean("approvedByParent"))
+
+        val roiMemberDocAfterApproval = withTimeout(timeoutMs) {
+            firestore.collection("families").document(familyId)
+                .collection("members").document(roiUid).get().awaitTask()
+        }
+        assertEquals(
+            "Roi's earnedPoints in Firestore must increase by task points (25) upon parent approval",
+            (roiPointsBeforeApproval + 25).toLong(),
+            roiMemberDocAfterApproval.getLong("earnedPoints")
+        )
+
+        // Verify Roi's real-time listener receives the approved state
+        withTimeout(timeoutMs) {
+            while (roiRepo.tasks.value.find { it.id == roiTaskId }?.approvedByParent != true) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+        assertTrue("Roi must see approvedByParent=true in real-time after parent approval", roiRepo.tasks.value.first { it.id == roiTaskId }.approvedByParent)
+        assertEquals(
+            TaskCompletionSyncState.SAVED_APPROVED,
+            roiRepo.taskSyncStates.value[roiTaskId]
+        )
     }
 
     private val activeRepos = mutableListOf<FamilyRepository>()

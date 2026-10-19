@@ -497,6 +497,155 @@ object FirestoreErrorHandler {
             messageEn = messageEn
         )
     }
+
+    /**
+     * Explicit task lifecycle stages for creation, child completion, parent approval, and deletion.
+     */
+    enum class TaskStage(val stageName: String) {
+        VERIFY_TASK_AUTHORIZATION("VERIFY_TASK_AUTHORIZATION"),
+        CHILD_COMPLETE_TASK_WRITE("CHILD_COMPLETE_TASK_WRITE"),
+        PARENT_COMPLETE_TASK_WRITE("PARENT_COMPLETE_TASK_WRITE"),
+        PARENT_APPROVE_TASK_WRITE("PARENT_APPROVE_TASK_WRITE"),
+        CREATE_TASK_WRITE("CREATE_TASK_WRITE"),
+        UPDATE_TASK_WRITE("UPDATE_TASK_WRITE"),
+        DELETE_TASK_WRITE("DELETE_TASK_WRITE")
+    }
+
+    /**
+     * Distinct error categories for task completion, approval, and management.
+     */
+    enum class TaskFailureCategory {
+        PERMISSION_DENIED,
+        UNAVAILABLE,
+        NOT_FOUND,
+        UNAUTHORIZED_ROLE,
+        ASSIGNEE_MISMATCH,
+        UNEXPECTED_EXCEPTION
+    }
+
+    data class ClassifiedTaskFailure(
+        val category: TaskFailureCategory,
+        val errorCode: String,
+        val stage: TaskStage,
+        val databaseId: String,
+        val sanitizedPath: String,
+        val sanitizedMessage: String,
+        val causeSummary: String,
+        val messageHe: String,
+        val messageEn: String
+    )
+
+    class TaskFirestoreException(
+        val classified: ClassifiedTaskFailure,
+        cause: Throwable? = null
+    ) : Exception(classified.messageHe, cause)
+
+    fun logTaskMilestone(
+        stage: TaskStage,
+        path: String,
+        databaseId: String = NAMED_DATABASE_ID,
+        category: String = "OK",
+        note: String = ""
+    ) {
+        val safePath = sanitizeFirestorePath(path)
+        val safeNote = sanitizeFirestoreDiagnosticMessage(note)
+        val payload = JSONObject().apply {
+            put("event", "TASK_DIAGNOSTIC")
+            put("stage", stage.stageName)
+            put("category", category)
+            put("databaseId", databaseId)
+            put("documentPath", safePath)
+            if (note.isNotBlank()) {
+                put("note", safeNote)
+            }
+        }
+        Log.i(TAG, payload.toString())
+    }
+
+    fun classifyTaskFailure(
+        error: Throwable,
+        stage: TaskStage,
+        path: String = "families/{familyId}/tasks/{taskId}",
+        databaseId: String = NAMED_DATABASE_ID,
+        overrideCategory: TaskFailureCategory? = null
+    ): ClassifiedTaskFailure {
+        if (error is TaskFirestoreException) {
+            return error.classified
+        }
+
+        val (rawCat, code) = classifyFirestoreException(error)
+        val category = overrideCategory ?: when {
+            error is SecurityException -> TaskFailureCategory.PERMISSION_DENIED
+            rawCat == FirestoreFailureCategory.PERMISSION_DENIED -> TaskFailureCategory.PERMISSION_DENIED
+            rawCat == FirestoreFailureCategory.UNAVAILABLE -> TaskFailureCategory.UNAVAILABLE
+            rawCat == FirestoreFailureCategory.NOT_FOUND -> TaskFailureCategory.NOT_FOUND
+            else -> TaskFailureCategory.UNEXPECTED_EXCEPTION
+        }
+
+        val safePath = sanitizeFirestorePath(path)
+        val safeMsg = sanitizeFirestoreDiagnosticMessage(error.message)
+        val safeCause = error.cause?.let {
+            "${it.javaClass.simpleName}: ${sanitizeFirestoreDiagnosticMessage(it.message)}"
+        } ?: "none"
+
+        val (messageHe, messageEn) = when (category) {
+            TaskFailureCategory.ASSIGNEE_MISMATCH -> Pair(
+                "ילדים יכולים לסמן כבוצע רק משימות שמשויכות אליהם 🔒",
+                "Children can only mark tasks assigned to them as completed."
+            )
+            TaskFailureCategory.UNAUTHORIZED_ROLE -> Pair(
+                "רק הורים יכולים ליצור, לערוך, למחוק או לאשר משימות 🔒",
+                "Only parents can create, edit, delete, or approve tasks."
+            )
+            TaskFailureCategory.PERMISSION_DENIED -> Pair(
+                when (stage) {
+                    TaskStage.CHILD_COMPLETE_TASK_WRITE ->
+                        "שמירת ביצוע המשימה נדחתה בענן (PERMISSION_DENIED). המצב הקודם שוחזר — ודאו שהמשימה משויכת לחשבון שלכם ונסו שוב."
+                    TaskStage.PARENT_APPROVE_TASK_WRITE ->
+                        "אישור המשימה נדחה בענן (PERMISSION_DENIED). המצב הקודם שוחזר."
+                    else ->
+                        "הפעולה במשימה נדחתה על ידי חוקי האבטחה בענן (PERMISSION_DENIED). המצב הקודם שוחזר."
+                },
+                "Task operation was denied by Firestore Security Rules (PERMISSION_DENIED at ${stage.stageName}). Previous state restored."
+            )
+            TaskFailureCategory.UNAVAILABLE -> Pair(
+                "שרתי הענן אינם זמינים כרגע (UNAVAILABLE). השינוי במשימה לא נשמר והמצב הקודם שוחזר — בדקו את החיבור לאינטרנט ונסו שוב.",
+                "Cloud servers are temporarily unavailable (UNAVAILABLE at ${stage.stageName}). Previous state restored — check your connection and retry."
+            )
+            TaskFailureCategory.NOT_FOUND -> Pair(
+                "מסמך המשימה לא נמצא בענן (NOT_FOUND). המצב הקודם שוחזר.",
+                "Task document was not found in Firestore (NOT_FOUND at ${stage.stageName}). Previous state restored."
+            )
+            TaskFailureCategory.UNEXPECTED_EXCEPTION -> Pair(
+                "שגיאה בשמירת עדכון המשימה בענן ($code). המצב הקודם שוחזר — נסו שוב.",
+                "An unexpected error occurred while saving the task ($code at ${stage.stageName}). Previous state restored."
+            )
+        }
+
+        val payload = JSONObject().apply {
+            put("event", "TASK_FIRESTORE_FAILURE")
+            put("stage", stage.stageName)
+            put("category", category.name)
+            put("errorCode", code)
+            put("databaseId", databaseId)
+            put("documentPath", safePath)
+            put("message", safeMsg)
+            put("cause", safeCause)
+        }
+        Log.e(TAG, payload.toString())
+
+        return ClassifiedTaskFailure(
+            category = category,
+            errorCode = code,
+            stage = stage,
+            databaseId = databaseId,
+            sanitizedPath = safePath,
+            sanitizedMessage = safeMsg,
+            causeSummary = safeCause,
+            messageHe = messageHe,
+            messageEn = messageEn
+        )
+    }
 }
 
 fun logStartupFirestoreDiagnostic(

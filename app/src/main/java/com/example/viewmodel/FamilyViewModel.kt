@@ -44,6 +44,8 @@ class FamilyViewModel(
     val startupState: StateFlow<StartupState> = repository.startupState
     val membershipState: StateFlow<FamilyMembershipState> = repository.membershipState
     val pendingInvitations: StateFlow<List<FamilyInvitation>> = repository.pendingInvitations
+    val taskSyncStates: StateFlow<Map<String, TaskCompletionSyncState>> = repository.taskSyncStates
+    val taskOperationError: StateFlow<String?> = repository.taskOperationError
 
     private val _validatedInvitationPreview = MutableStateFlow<FamilyInvitation?>(null)
     val validatedInvitationPreview: StateFlow<FamilyInvitation?> = _validatedInvitationPreview.asStateFlow()
@@ -154,6 +156,16 @@ class FamilyViewModel(
 
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            repository.taskOperationError.collect { err ->
+                if (!err.isNullOrBlank()) {
+                    _snackbarMessage.value = err
+                }
+            }
+        }
+    }
 
     /**
      * Restores an existing FirebaseAuth session on application launch without restarting
@@ -655,8 +667,30 @@ class FamilyViewModel(
     fun toggleTask(taskId: String) {
         val ok = repository.toggleTaskCompletion(taskId)
         if (!ok) {
-            _snackbarMessage.value = "ילדים יכולים לסמן כבוצע רק משימות שמשויכות אליהם 🔒"
+            _snackbarMessage.value = repository.taskOperationError.value
+                ?: "ילדים יכולים לסמן כבוצע רק משימות שמשויכות אליהם 🔒"
         }
+    }
+
+    fun approveTaskCompletion(taskId: String) {
+        if (!currentMember.value.isParent) {
+            val err = "רק הורה רשאי לאשר השלמת משימות 🔒"
+            _snackbarMessage.value = err
+            return
+        }
+        val target = tasks.value.find { it.id == taskId }
+        val ok = repository.approveTaskCompletion(taskId)
+        if (ok) {
+            val pts = target?.points ?: 0
+            _snackbarMessage.value = "השלמת המשימה אושרה! +$pts נקודות הוענקו ✓"
+        } else {
+            _snackbarMessage.value = repository.taskOperationError.value
+                ?: "שגיאה באישור המשימה מול הענן. נסו שוב."
+        }
+    }
+
+    fun clearTaskOperationError() {
+        repository.clearTaskOperationError()
     }
 
     fun saveTask(

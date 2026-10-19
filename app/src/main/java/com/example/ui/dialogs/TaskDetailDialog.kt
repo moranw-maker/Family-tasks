@@ -34,7 +34,9 @@ fun TaskDetailDialog(
     onToggle: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
-    onSendNudge: () -> Unit
+    onSendNudge: () -> Unit,
+    syncState: TaskCompletionSyncState = TaskCompletionSyncState.IDLE,
+    onApprove: () -> Unit = {}
 ) {
     val dateText = try {
         val ld = LocalDate.ofEpochDay(task.dateEpochDay)
@@ -132,23 +134,59 @@ fun TaskDetailDialog(
                         modifier = Modifier.weight(1f)
                     )
 
+                    val resolvedSyncState = when {
+                        syncState == TaskCompletionSyncState.SAVING -> TaskCompletionSyncState.SAVING
+                        syncState == TaskCompletionSyncState.FAILED -> TaskCompletionSyncState.FAILED
+                        task.isCompleted && task.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
+                        task.isCompleted && !task.approvedByParent -> TaskCompletionSyncState.PENDING_APPROVAL
+                        else -> TaskCompletionSyncState.IDLE
+                    }
+
+                    val badgeBg = when (resolvedSyncState) {
+                        TaskCompletionSyncState.SAVING -> PastelBlueBackground
+                        TaskCompletionSyncState.FAILED -> Color(0xFFFEE2E2)
+                        TaskCompletionSyncState.PENDING_APPROVAL -> PastelYellowBackground
+                        TaskCompletionSyncState.SAVED_APPROVED -> PastelGreenBackground
+                        TaskCompletionSyncState.IDLE -> PastelYellowBackground
+                    }
+                    val badgeBorder = when (resolvedSyncState) {
+                        TaskCompletionSyncState.SAVING -> VibrantActionBlue
+                        TaskCompletionSyncState.FAILED -> GoogleRed
+                        TaskCompletionSyncState.PENDING_APPROVAL -> PastelYellowBorder
+                        TaskCompletionSyncState.SAVED_APPROVED -> PastelGreenBorder
+                        TaskCompletionSyncState.IDLE -> PastelYellowBorder
+                    }
+                    val badgeTextColor = when (resolvedSyncState) {
+                        TaskCompletionSyncState.SAVING -> VibrantActionBlue
+                        TaskCompletionSyncState.FAILED -> GoogleRed
+                        TaskCompletionSyncState.PENDING_APPROVAL -> PastelYellowDark
+                        TaskCompletionSyncState.SAVED_APPROVED -> PastelGreenDark
+                        TaskCompletionSyncState.IDLE -> PastelYellowDark
+                    }
+                    val badgeText = when (resolvedSyncState) {
+                        TaskCompletionSyncState.SAVING ->
+                            if (isHebrew) "שומר בענן... ⏳" else "Saving... ⏳"
+                        TaskCompletionSyncState.FAILED ->
+                            if (isHebrew) "שגיאה בשמירה ⚠️" else "Save Failed ⚠️"
+                        TaskCompletionSyncState.PENDING_APPROVAL ->
+                            if (isHebrew) "ממתין לאישור הורה ⏳" else "Pending Approval ⏳"
+                        TaskCompletionSyncState.SAVED_APPROVED ->
+                            if (isHebrew) "נשמר • הושלם ואושר ✓" else "Saved & Approved ✓"
+                        TaskCompletionSyncState.IDLE ->
+                            if (isHebrew) "ממתין לביצוע" else "Pending"
+                    }
+
                     Surface(
                         shape = RoundedCornerShape(12.dp),
-                        color = if (task.isCompleted) PastelGreenBackground else PastelYellowBackground,
-                        border = BorderStroke(
-                            1.dp,
-                            if (task.isCompleted) PastelGreenBorder else PastelYellowBorder
-                        )
+                        color = badgeBg,
+                        border = BorderStroke(1.dp, badgeBorder),
+                        modifier = Modifier.testTag("detail_status_badge")
                     ) {
                         Text(
-                            text = if (task.isCompleted) {
-                                if (isHebrew) "הושלם ✓" else "Completed ✓"
-                            } else {
-                                if (isHebrew) "ממתין לביצוע" else "Pending"
-                            },
+                            text = badgeText,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp,
-                            color = if (task.isCompleted) PastelGreenDark else PastelYellowDark,
+                            color = badgeTextColor,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                         )
                     }
@@ -246,6 +284,8 @@ fun TaskDetailDialog(
                     Text(
                         text = if (!canToggleTask) {
                             if (isHebrew) "משויך לחבר משפחה אחר 🔒" else "Assigned to another member 🔒"
+                        } else if (syncState == TaskCompletionSyncState.SAVING) {
+                            if (isHebrew) "שומר בענן... ⏳" else "Saving to Cloud... ⏳"
                         } else if (task.isCompleted) {
                             if (isHebrew) "סמן כממתין שוב" else "Mark as Pending"
                         } else {
@@ -254,6 +294,38 @@ fun TaskDetailDialog(
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp
                     )
+                }
+
+                if (currentMember.isParent && task.isCompleted && !task.approvedByParent) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            onApprove()
+                            onDismiss()
+                        },
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("detail_approve_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Verified,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (isHebrew)
+                                "אשר ביצוע והענק +${task.points} נק' ✓"
+                            else
+                                "Approve & Award +${task.points} pts ✓",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp,
+                            color = Color.White
+                        )
+                    }
                 }
 
                 if (currentMember.isParent) {

@@ -147,6 +147,15 @@ class FamilyRepository(
     var lastClassifiedInvitationFailure: FirestoreErrorHandler.ClassifiedInvitationFailure? = null
         private set
 
+    /** Last classified task error for diagnostics and automated tests. */
+    @Volatile
+    var lastClassifiedTaskFailure: FirestoreErrorHandler.ClassifiedTaskFailure? = null
+        private set
+
+    /** Deduplication set of task completion/approval notification keys to prevent duplicate alerts from snapshot listeners or retries. */
+    private val notifiedTaskCompletionKeys: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
     private var tasksListenerRegistration: ListenerRegistration? = null
     private var membersListenerRegistration: ListenerRegistration? = null
     private var rewardsListenerRegistration: ListenerRegistration? = null
@@ -434,6 +443,18 @@ class FamilyRepository(
         )
     )
     val tasks: StateFlow<List<FamilyTask>> = _tasks.asStateFlow()
+
+    // Explicit per-task synchronization & approval states (IDLE, SAVING, PENDING_APPROVAL, SAVED_APPROVED, FAILED)
+    private val _taskSyncStates = MutableStateFlow<Map<String, TaskCompletionSyncState>>(emptyMap())
+    val taskSyncStates: StateFlow<Map<String, TaskCompletionSyncState>> = _taskSyncStates.asStateFlow()
+
+    // User-facing Hebrew error message when a task completion/approval/edit fails in Firestore
+    private val _taskOperationError = MutableStateFlow<String?>(null)
+    val taskOperationError: StateFlow<String?> = _taskOperationError.asStateFlow()
+
+    fun clearTaskOperationError() {
+        _taskOperationError.value = null
+    }
 
     val localRoomTasksFlow: Flow<List<Task>> = taskDao?.getAllTasksFlow() ?: emptyFlow()
 
@@ -1219,6 +1240,37 @@ class FamilyRepository(
                         syncedMembersCount = loadedMembers.size,
                         lastSyncedEpochMillis = System.currentTimeMillis()
                     )
+
+                    if (db != null && authProvider()?.currentUser != null) {
+                        runCatching {
+                            val taskDocs = db.collection("families")
+                                .document(existingFamilyId)
+                                .collection("tasks")
+                                .get()
+                                .await()
+                                .documents
+                            val loadedTasks = taskDocs.mapNotNull { doc ->
+                                val data = doc.data ?: return@mapNotNull null
+                                parseTaskDocument(doc.id, data, existingFamilyId)
+                            }
+                            _tasks.value = loadedTasks
+                            val initialSyncMap = mutableMapOf<String, TaskCompletionSyncState>()
+                            for (t in loadedTasks) {
+                                if (t.isCompleted) {
+                                    notifiedTaskCompletionKeys.add("${t.id}:completed")
+                                    if (t.approvedByParent) {
+                                        notifiedTaskCompletionKeys.add("${t.id}:approved")
+                                        initialSyncMap[t.id] = TaskCompletionSyncState.SAVED_APPROVED
+                                    } else {
+                                        initialSyncMap[t.id] = TaskCompletionSyncState.PENDING_APPROVAL
+                                    }
+                                } else {
+                                    initialSyncMap[t.id] = TaskCompletionSyncState.IDLE
+                                }
+                            }
+                            _taskSyncStates.value = initialSyncMap
+                        }
+                    }
 
                     attachFirestoreRealtimeListeners(existingFamilyId)
                     flushOfflineSyncQueue(existingFamilyId)
@@ -2533,6 +2585,82 @@ class FamilyRepository(
     }
 
     /**
+     * Parses a Firestore task document from `/families/{familyId}/tasks/{taskId}` (or legacy `/tasks/{taskId}`)
+     * into a canonical [FamilyTask], supporting both V1.6 and legacy V1.5 field names and preserving
+     * `isCompleted`, `approvedByParent`, `completedAtMillis`, and `completedByMemberId`.
+     */
+    private fun parseTaskDocument(
+        docId: String,
+        data: Map<String, Any?>,
+        fallbackFamilyId: String
+    ): FamilyTask? {
+        val title = (data["title"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["task_name"] as? String)?.takeIf { it.isNotBlank() }
+            ?: return null
+        val description = (data["description"] as? String) ?: ""
+        val rawAssigned = (data["assignedUid"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["assignedToMemberId"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["assignedMemberId"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["assigned_member_id"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["assigned_family_member"] as? String)?.takeIf { it.isNotBlank() }
+            ?: "m_kid1"
+
+        val resolvedAssignedId = _members.value.find { m ->
+            m.id == rawAssigned ||
+                m.name.equals(rawAssigned, ignoreCase = true) ||
+                (!m.googleEmail.isNullOrBlank() && m.googleEmail.equals(rawAssigned, ignoreCase = true))
+        }?.id ?: rawAssigned
+
+        val points = ((data["points"] as? Number)?.toInt())
+            ?: ((data["pointsValue"] as? Number)?.toInt())
+            ?: 10
+        val completed = (data["isCompleted"] as? Boolean)
+            ?: (data["is_completed"] as? Boolean)
+            ?: false
+        val approvedByParent = (data["approvedByParent"] as? Boolean)
+            ?: (data["approved_by_parent"] as? Boolean)
+            ?: false
+        val completedAtMillis = extractTimestampMillis(data["completedAtMillis"])
+            ?: extractTimestampMillis(data["completed_at_millis"])
+        val completedByMemberId = (data["completedByMemberId"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["completed_by_member_id"] as? String)?.takeIf { it.isNotBlank() }
+        val epochDay = ((data["dateEpochDay"] as? Number)?.toLong())
+            ?: ((data["due_date_epoch_day"] as? Number)?.toLong()?.takeIf { it != 0L })
+            ?: (((data["dueDate"] as? Number)?.toLong() ?: (todayEpoch * 86_400_000L)) / 86_400_000L)
+        val categoryStr = (data["category"] as? String) ?: TaskCategory.OTHER.name
+        val priorityStr = (data["priority"] as? String) ?: TaskPriority.MEDIUM.name
+        val recurrenceStr = (data["recurrence"] as? String) ?: TaskRecurrence.ONCE.name
+        val dueTime = (data["dueTimeFormatted"] as? String)
+            ?: (data["due_time"] as? String)
+            ?: "17:00"
+        val resolvedFamilyId = (data["familyId"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["family_id"] as? String)?.takeIf { it.isNotBlank() }
+            ?: fallbackFamilyId
+        val updatedAtMillis = extractTimestampMillis(data["updatedAt"])
+            ?: extractTimestampMillis(data["updated_at"])
+            ?: System.currentTimeMillis()
+
+        return FamilyTask(
+            id = docId,
+            familyId = resolvedFamilyId,
+            title = title,
+            description = description,
+            category = runCatching { TaskCategory.valueOf(categoryStr) }.getOrDefault(TaskCategory.OTHER),
+            assignedToMemberId = resolvedAssignedId,
+            dateEpochDay = epochDay,
+            dueTimeFormatted = dueTime,
+            isCompleted = completed,
+            priority = runCatching { TaskPriority.valueOf(priorityStr) }.getOrDefault(TaskPriority.MEDIUM),
+            recurrence = runCatching { TaskRecurrence.valueOf(recurrenceStr) }.getOrDefault(TaskRecurrence.ONCE),
+            points = points,
+            approvedByParent = approvedByParent,
+            completedAtMillis = completedAtMillis,
+            completedByMemberId = completedByMemberId,
+            updatedAtMillis = updatedAtMillis
+        )
+    }
+
+    /**
      * V1.6 Requirement 6:
      * Real-time Firestore snapshot listeners for:
      * 1) `/families/{familyId}` (family name & metadata)
@@ -2573,37 +2701,93 @@ class FamilyRepository(
 
         // 1. Real-time Tasks Listener
         runCatching {
+            var hasProcessedInitialTasksSnapshot = false
             tasksListenerRegistration = familyRef.collection("tasks")
-                .addSnapshotListener { snapshot, error ->
+                .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
                     if (error != null || snapshot == null) return@addSnapshotListener
-                    val remoteTasks = snapshot.documents.mapNotNull { doc ->
-                        val title = doc.getString("title") ?: return@mapNotNull null
-                        val description = doc.getString("description") ?: ""
-                        val assignedUid = doc.getString("assignedUid") ?: "m_kid1"
-                        val points = (doc.getLong("pointsValue") ?: 10L).toInt()
-                        val completed = doc.getBoolean("isCompleted") ?: false
-                        val dueMillis = doc.getLong("dueDate") ?: (todayEpoch * 86_400_000L)
-                        val epochDay = dueMillis / 86_400_000L
-                        val categoryStr = doc.getString("category") ?: TaskCategory.OTHER.name
-                        val priorityStr = doc.getString("priority") ?: TaskPriority.MEDIUM.name
-                        val recurrenceStr = doc.getString("recurrence") ?: TaskRecurrence.ONCE.name
-                        val dueTime = doc.getString("dueTimeFormatted") ?: "17:00"
+                    val currentSyncStates = _taskSyncStates.value
+                    val previousTasksById = _tasks.value.associateBy { it.id }
+                    val pendingWriteTaskIds = mutableSetOf<String>()
 
-                        FamilyTask(
-                            id = doc.id,
-                            title = title,
-                            description = description,
-                            category = runCatching { TaskCategory.valueOf(categoryStr) }.getOrDefault(TaskCategory.OTHER),
-                            assignedToMemberId = assignedUid,
-                            dateEpochDay = epochDay,
-                            dueTimeFormatted = dueTime,
-                            isCompleted = completed,
-                            priority = runCatching { TaskPriority.valueOf(priorityStr) }.getOrDefault(TaskPriority.MEDIUM),
-                            recurrence = runCatching { TaskRecurrence.valueOf(recurrenceStr) }.getOrDefault(TaskRecurrence.ONCE),
-                            points = points
-                        )
+                    val remoteTasks = snapshot.documents.mapNotNull { doc ->
+                        val data = doc.data ?: return@mapNotNull null
+                        if (doc.metadata.hasPendingWrites()) {
+                            pendingWriteTaskIds.add(doc.id)
+                        }
+                        val parsed = parseTaskDocument(doc.id, data, familyId) ?: return@mapNotNull null
+                        // If a local completion/approval write is currently in flight (SAVING),
+                        // or if a local write has not yet been committed by the server,
+                        // preserve the in-flight state until the server confirms or rejects the write.
+                        if (currentSyncStates[doc.id] == TaskCompletionSyncState.SAVING || doc.metadata.hasPendingWrites()) {
+                            previousTasksById[doc.id] ?: parsed
+                        } else {
+                            parsed
+                        }
                     }
+
                     if (remoteTasks.isNotEmpty() || _isGoogleSignedIn.value) {
+                        val updatedSyncStates = currentSyncStates.toMutableMap()
+                        val selfUid = currentUid()
+                        for (remoteTask in remoteTasks) {
+                            val prev = previousTasksById[remoteTask.id]
+                            val isPendingServerCommit = remoteTask.id in pendingWriteTaskIds
+                            if (currentSyncStates[remoteTask.id] != TaskCompletionSyncState.SAVING && !isPendingServerCommit) {
+                                updatedSyncStates[remoteTask.id] = when {
+                                    remoteTask.isCompleted && remoteTask.approvedByParent ->
+                                        TaskCompletionSyncState.SAVED_APPROVED
+                                    remoteTask.isCompleted && !remoteTask.approvedByParent ->
+                                        TaskCompletionSyncState.PENDING_APPROVAL
+                                    currentSyncStates[remoteTask.id] == TaskCompletionSyncState.FAILED ->
+                                        TaskCompletionSyncState.FAILED
+                                    else ->
+                                        TaskCompletionSyncState.IDLE
+                                }
+                            }
+
+                            if (!hasProcessedInitialTasksSnapshot) {
+                                if (remoteTask.isCompleted && !isPendingServerCommit) {
+                                    notifiedTaskCompletionKeys.add("${remoteTask.id}:completed")
+                                    if (remoteTask.approvedByParent) {
+                                        notifiedTaskCompletionKeys.add("${remoteTask.id}:approved")
+                                    }
+                                }
+                            } else if (!isPendingServerCommit) {
+                                // Real-time cross-device notification ONLY for server-committed writes (deduplicated)
+                                if (remoteTask.isCompleted && (prev == null || !prev.isCompleted)) {
+                                    val completedByOther = !remoteTask.completedByMemberId.isNullOrBlank() &&
+                                        remoteTask.completedByMemberId != selfUid
+                                    if (completedByOther && notifiedTaskCompletionKeys.add("${remoteTask.id}:completed")) {
+                                        val assignee = _members.value.find { it.id == remoteTask.assignedToMemberId }
+                                        val assigneeName = assignee?.name ?: "חבר משפחה"
+                                        val assigneeEmoji = assignee?.avatarEmoji ?: "🎉"
+                                        if (remoteTask.approvedByParent) {
+                                            pushAlert(
+                                                title = "משימה הושלמה ואושרה! +${remoteTask.points} נק' 🎉",
+                                                message = "$assigneeName השלים/ה את המשימה: ${remoteTask.title}",
+                                                targetName = assigneeName,
+                                                targetEmoji = assigneeEmoji,
+                                                reason = AlertReason.TASK_COMPLETED
+                                            )
+                                        } else {
+                                            pushAlert(
+                                                title = "משימה הושלמה וממתינה לאישור הורה ⏳",
+                                                message = "$assigneeName סימן/ה כבוצע: ${remoteTask.title} (+${remoteTask.points} נק')",
+                                                targetName = assigneeName,
+                                                targetEmoji = assigneeEmoji,
+                                                reason = AlertReason.TASK_COMPLETED
+                                            )
+                                        }
+                                    }
+                                } else if (!remoteTask.isCompleted) {
+                                    notifiedTaskCompletionKeys.remove("${remoteTask.id}:completed")
+                                    notifiedTaskCompletionKeys.remove("${remoteTask.id}:approved")
+                                }
+                            }
+                        }
+                        if (!snapshot.metadata.hasPendingWrites()) {
+                            hasProcessedInitialTasksSnapshot = true
+                        }
+                        _taskSyncStates.value = updatedSyncStates
                         _tasks.value = remoteTasks
                         repoScope.launch {
                             runCatching {
@@ -2790,8 +2974,37 @@ class FamilyRepository(
         }
     }
 
+    private fun buildFullTaskFirestoreMap(
+        task: FamilyTask,
+        familyId: String,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Map<String, Any?> {
+        return mapOf(
+            "id" to task.id,
+            "familyId" to familyId,
+            "title" to task.title,
+            "description" to task.description,
+            "assignedUid" to task.assignedToMemberId,
+            "assignedToMemberId" to task.assignedToMemberId,
+            "assignedMemberId" to task.assignedToMemberId,
+            "points" to task.points,
+            "pointsValue" to task.points,
+            "isCompleted" to task.isCompleted,
+            "approvedByParent" to task.approvedByParent,
+            "completedAtMillis" to task.completedAtMillis,
+            "completedByMemberId" to task.completedByMemberId,
+            "dateEpochDay" to task.dateEpochDay,
+            "dueDate" to (task.dateEpochDay * 86_400_000L),
+            "category" to task.category.name,
+            "priority" to task.priority.name,
+            "recurrence" to task.recurrence.name,
+            "dueTimeFormatted" to task.dueTimeFormatted,
+            "updatedAt" to nowMillis
+        )
+    }
+
     private fun pushTaskToFirestoreOrQueue(task: FamilyTask, isDelete: Boolean = false) {
-        val familyId = _activeFamilyId.value
+        val familyId = task.familyId.ifBlank { _activeFamilyId.value }
         val coreTask = task.toCoreTask(familyId)
 
         repoScope.launch {
@@ -2806,31 +3019,59 @@ class FamilyRepository(
             val db = firestoreProvider()
             val user = authProvider()?.currentUser
             if (db != null && user != null) {
+                val path = "families/$familyId/tasks/${task.id}"
+                val stage = when {
+                    isDelete -> FirestoreErrorHandler.TaskStage.DELETE_TASK_WRITE
+                    else -> FirestoreErrorHandler.TaskStage.UPDATE_TASK_WRITE
+                }
                 try {
                     val docRef = db.collection("families").document(familyId)
                         .collection("tasks").document(task.id)
                     if (isDelete) {
-                        docRef.delete().await()
-                    } else {
-                        val payload = mapOf(
-                            "id" to task.id,
-                            "title" to task.title,
-                            "description" to task.description,
-                            "assignedUid" to task.assignedToMemberId,
-                            "pointsValue" to task.points,
-                            "isCompleted" to task.isCompleted,
-                            "dueDate" to (task.dateEpochDay * 86_400_000L),
-                            "familyId" to familyId,
-                            "approvedByParent" to task.isCompleted,
-                            "category" to task.category.name,
-                            "priority" to task.priority.name,
-                            "recurrence" to task.recurrence.name,
-                            "dueTimeFormatted" to task.dueTimeFormatted
+                        FirestoreErrorHandler.logTaskMilestone(
+                            stage = FirestoreErrorHandler.TaskStage.DELETE_TASK_WRITE,
+                            path = path,
+                            databaseId = configuredDatabaseId,
+                            note = "Deleting task document from named database"
                         )
+                        docRef.delete().await()
+                    } else if (!_currentMember.value.isParent) {
+                        // Safety guard: CHILD must NEVER send full-document set() with protected fields
+                        val nowMillis = System.currentTimeMillis()
+                        FirestoreErrorHandler.logTaskMilestone(
+                            stage = FirestoreErrorHandler.TaskStage.CHILD_COMPLETE_TASK_WRITE,
+                            path = path,
+                            databaseId = configuredDatabaseId,
+                            note = "Updating child completion-only fields in named database"
+                        )
+                        docRef.update(
+                            mapOf(
+                                "isCompleted" to task.isCompleted,
+                                "completedAtMillis" to (if (task.isCompleted) (task.completedAtMillis ?: nowMillis) else null),
+                                "completedByMemberId" to (if (task.isCompleted) (task.completedByMemberId ?: user.uid) else null),
+                                "updatedAt" to nowMillis
+                            )
+                        ).await()
+                    } else {
+                        val nowMillis = System.currentTimeMillis()
+                        FirestoreErrorHandler.logTaskMilestone(
+                            stage = FirestoreErrorHandler.TaskStage.CREATE_TASK_WRITE,
+                            path = path,
+                            databaseId = configuredDatabaseId,
+                            note = "Writing parent task definition to named database"
+                        )
+                        val payload = buildFullTaskFirestoreMap(task, familyId, nowMillis)
                         docRef.set(payload, SetOptions.merge()).await()
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Cloud write deferred to offline queue: ${e.message}")
+                    val classified = FirestoreErrorHandler.classifyTaskFailure(
+                        error = e,
+                        stage = stage,
+                        path = path,
+                        databaseId = configuredDatabaseId
+                    )
+                    lastClassifiedTaskFailure = classified
+                    _taskOperationError.value = classified.messageHe
                     offlineSyncDao?.enqueueAction(
                         OfflineSyncQueueEntity(
                             taskId = task.id,
@@ -3476,39 +3717,123 @@ class FamilyRepository(
      * - PARENT can toggle any task.
      * - CHILD can only mark tasks assigned to them as completed.
      */
-    fun toggleTaskCompletion(taskId: String): Boolean {
+    /**
+     * Emits a deduplicated task completion notification ONLY after the completion/approval write
+     * has been confirmed in Firestore (or immediately in pure in-memory unit-test mode).
+     */
+    private fun emitTaskCompletionNotificationIfNeeded(
+        task: FamilyTask,
+        isParentApprovalEvent: Boolean = false
+    ) {
+        if (!task.isCompleted) {
+            notifiedTaskCompletionKeys.remove("${task.id}:completed")
+            notifiedTaskCompletionKeys.remove("${task.id}:approved")
+            return
+        }
+        val assignee = _members.value.find { it.id == task.assignedToMemberId }
+        val assigneeName = assignee?.name ?: _currentMember.value.name.ifBlank { "חבר משפחה" }
+        val assigneeEmoji = assignee?.avatarEmoji ?: _currentMember.value.avatarEmoji.ifBlank { "🎉" }
+
+        if (isParentApprovalEvent) {
+            if (notifiedTaskCompletionKeys.add("${task.id}:approved")) {
+                pushAlert(
+                    title = "ביצוע המשימה אושר! +${task.points} נק' 🎉",
+                    message = "אושרה המשימה של $assigneeName: ${task.title}",
+                    targetName = assigneeName,
+                    targetEmoji = assigneeEmoji,
+                    reason = AlertReason.TASK_COMPLETED
+                )
+            }
+        } else {
+            if (notifiedTaskCompletionKeys.add("${task.id}:completed")) {
+                if (task.approvedByParent) {
+                    notifiedTaskCompletionKeys.add("${task.id}:approved")
+                    pushAlert(
+                        title = "משימה הושלמה! +${task.points} נק' 🎉",
+                        message = "$assigneeName השלים/ה את המשימה: ${task.title}",
+                        targetName = assigneeName,
+                        targetEmoji = assigneeEmoji,
+                        reason = AlertReason.TASK_COMPLETED
+                    )
+                } else {
+                    pushAlert(
+                        title = "משימה הושלמה! ממתינה לאישור הורה ⏳",
+                        message = "$assigneeName השלים/ה את המשימה: ${task.title} (+${task.points} נק')",
+                        targetName = assigneeName,
+                        targetEmoji = assigneeEmoji,
+                        reason = AlertReason.TASK_COMPLETED
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * V1.6 Requirement 1, 4, 6, 7, 8:
+     * - PARENT can toggle any task (and marks `approvedByParent = newStatus`).
+     * - CHILD can only mark tasks assigned to their authenticated UID as completed,
+     *   updating ONLY completion-related fields (`isCompleted`, `completedAtMillis`, `completedByMemberId`, `updatedAt`)
+     *   and setting `approvedByParent = false` (pending parent approval).
+     * - Tracks `TaskCompletionSyncState` (`SAVING`, `PENDING_APPROVAL`, `SAVED_APPROVED`, `FAILED`).
+     * - Sends push notifications ONLY after Firestore confirms the write.
+     * - On failure, restores the previous state and sets a clear Hebrew error message in `taskOperationError`.
+     */
+    suspend fun toggleTaskCompletionAsync(taskId: String): Result<FamilyTask> {
         val current = _currentMember.value
-        val targetTask = _tasks.value.find { it.id == taskId } ?: return false
+        val uid = currentUid()
+        val targetTask = _tasks.value.find { it.id == taskId }
+            ?: return Result.failure(IllegalArgumentException("המשימה לא נמצאה"))
+        val resolvedFamilyId = targetTask.familyId.ifBlank { _activeFamilyId.value }
+        val taskPath = "families/$resolvedFamilyId/tasks/$taskId"
 
         if (!current.isParent) {
             val isAssignedToCurrentChild = targetTask.assignedToMemberId == current.id ||
-                targetTask.assignedToMemberId == currentUid()
+                (uid.isNotBlank() && targetTask.assignedToMemberId == uid)
             if (!isAssignedToCurrentChild) {
-                Log.w(TAG, "Blocked CHILD ${current.id} from toggling task assigned to ${targetTask.assignedToMemberId}")
-                return false
+                val classified = FirestoreErrorHandler.classifyTaskFailure(
+                    error = SecurityException("Blocked CHILD ${current.id} from toggling task assigned to ${targetTask.assignedToMemberId}"),
+                    stage = FirestoreErrorHandler.TaskStage.VERIFY_TASK_AUTHORIZATION,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId,
+                    overrideCategory = FirestoreErrorHandler.TaskFailureCategory.ASSIGNEE_MISMATCH
+                )
+                lastClassifiedTaskFailure = classified
+                _taskOperationError.value = classified.messageHe
+                return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified))
             }
         }
 
-        var completedTask: FamilyTask? = null
-        var becameCompleted = false
+        val previousTask = targetTask
+        val previousMembers = _members.value
+        val previousCurrentMember = _currentMember.value
 
-        _tasks.value = _tasks.value.map { task ->
-            if (task.id == taskId) {
-                val newStatus = !task.isCompleted
-                becameCompleted = newStatus
-                val updated = task.copy(isCompleted = newStatus)
-                completedTask = updated
-                updated
-            } else {
-                task
-            }
-        }
+        val newStatus = !targetTask.isCompleted
+        val nowMillis = System.currentTimeMillis()
+        val actorId = uid.ifBlank { current.id }
+        val newApprovedByParent = if (current.isParent) newStatus else false
 
-        completedTask?.let { task ->
-            val delta = if (becameCompleted) task.points else -task.points
+        val updatedTask = targetTask.copy(
+            familyId = resolvedFamilyId,
+            isCompleted = newStatus,
+            approvedByParent = newApprovedByParent,
+            completedAtMillis = if (newStatus) nowMillis else null,
+            completedByMemberId = if (newStatus) actorId else null,
+            updatedAtMillis = nowMillis
+        )
+
+        _taskOperationError.value = null
+        _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVING)
+
+        // Optimistically update local task & points state while write is in flight
+        _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
+
+        var updatedAssigneePoints: Int? = null
+        if (current.isParent) {
+            val delta = if (newStatus) updatedTask.points else -updatedTask.points
             _members.value = _members.value.map { member ->
-                if (member.id == task.assignedToMemberId) {
+                if (member.id == updatedTask.assignedToMemberId) {
                     val newPts = (member.earnedPoints + delta).coerceAtLeast(0)
+                    updatedAssigneePoints = newPts
                     val updatedMember = member.copy(earnedPoints = newPts)
                     if (_currentMember.value.id == member.id) {
                         _currentMember.value = updatedMember
@@ -3518,21 +3843,465 @@ class FamilyRepository(
                     member
                 }
             }
+        }
 
-            if (becameCompleted) {
-                val assignee = _members.value.find { it.id == task.assignedToMemberId }
-                if (assignee != null) {
-                    pushAlert(
-                        title = "משימה הושלמה! +${task.points} נק' 🎉",
-                        message = "${assignee.name} השלים/ה את המשימה: ${task.title}",
-                        targetName = assignee.name,
-                        targetEmoji = assignee.avatarEmoji,
-                        reason = AlertReason.TASK_COMPLETED
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        val writeStage = if (current.isParent) {
+            FirestoreErrorHandler.TaskStage.PARENT_COMPLETE_TASK_WRITE
+        } else {
+            FirestoreErrorHandler.TaskStage.CHILD_COMPLETE_TASK_WRITE
+        }
+
+        if (simulateOfflineNetworkFailure) {
+            val offlineErr = FirebaseFirestoreException(
+                "Simulated offline network failure during task completion",
+                FirebaseFirestoreException.Code.UNAVAILABLE
+            )
+            // Revert optimistic UI state on failure
+            _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
+            _members.value = previousMembers
+            _currentMember.value = previousCurrentMember
+            _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
+            val classified = FirestoreErrorHandler.classifyTaskFailure(
+                error = offlineErr,
+                stage = writeStage,
+                path = taskPath,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedTaskFailure = classified
+            _taskOperationError.value = classified.messageHe
+            return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified, offlineErr))
+        }
+
+        if (db != null && authUser != null) {
+            try {
+                FirestoreErrorHandler.logTaskMilestone(
+                    stage = writeStage,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId,
+                    note = "Persisting task completion (isCompleted=$newStatus, isParent=${current.isParent})"
+                )
+                val docRef = db.collection("families").document(resolvedFamilyId)
+                    .collection("tasks").document(updatedTask.id)
+
+                if (!current.isParent) {
+                    // CHILD completion-only update: strictly modifies ONLY fields allowed by isChildTaskCompletionOnly()
+                    val childUpdateMap = mapOf<String, Any?>(
+                        "isCompleted" to updatedTask.isCompleted,
+                        "completedAtMillis" to updatedTask.completedAtMillis,
+                        "completedByMemberId" to if (updatedTask.isCompleted) (updatedTask.completedByMemberId ?: authUser.uid) else null,
+                        "updatedAt" to nowMillis
                     )
+                    docRef.update(childUpdateMap).await()
+                } else {
+                    // PARENT update: updates completion & approval status and persists assignee earnedPoints
+                    val parentUpdateMap = mapOf<String, Any?>(
+                        "isCompleted" to updatedTask.isCompleted,
+                        "approvedByParent" to updatedTask.approvedByParent,
+                        "completedAtMillis" to updatedTask.completedAtMillis,
+                        "completedByMemberId" to (updatedTask.completedByMemberId ?: authUser.uid),
+                        "updatedAt" to nowMillis
+                    )
+                    try {
+                        docRef.update(parentUpdateMap).await()
+                    } catch (_: Exception) {
+                        docRef.set(buildFullTaskFirestoreMap(updatedTask, resolvedFamilyId, nowMillis), SetOptions.merge()).await()
+                    }
+
+                    if (updatedAssigneePoints != null && updatedTask.assignedToMemberId.isNotBlank()) {
+                        runCatching {
+                            db.collection("families").document(resolvedFamilyId)
+                                .collection("members").document(updatedTask.assignedToMemberId)
+                                .update(
+                                    mapOf(
+                                        "earnedPoints" to updatedAssigneePoints,
+                                        "updatedAt" to nowMillis
+                                    )
+                                ).await()
+                        }
+                    }
+                }
+
+                FirestoreErrorHandler.logTaskMilestone(
+                    stage = writeStage,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId,
+                    note = "Confirmed task completion commit in Firestore"
+                )
+            } catch (e: Exception) {
+                // Restore previous state so UI never silently diverges from Firestore
+                _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
+                _members.value = previousMembers
+                _currentMember.value = previousCurrentMember
+                _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
+
+                val classified = FirestoreErrorHandler.classifyTaskFailure(
+                    error = e,
+                    stage = writeStage,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId
+                )
+                lastClassifiedTaskFailure = classified
+                _taskOperationError.value = classified.messageHe
+                return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified, e))
+            }
+        }
+
+        // Write succeeded (or pure local unit-test mode): update sync state, Room cache, and emit notification
+        val finalSyncState = when {
+            !updatedTask.isCompleted -> TaskCompletionSyncState.IDLE
+            updatedTask.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
+            else -> TaskCompletionSyncState.PENDING_APPROVAL
+        }
+        _taskSyncStates.value = _taskSyncStates.value + (taskId to finalSyncState)
+        _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
+
+        repoScope.launch {
+            runCatching {
+                taskDao?.upsertTask(updatedTask.toCoreTask(resolvedFamilyId))
+            }
+        }
+
+        emitTaskCompletionNotificationIfNeeded(updatedTask, isParentApprovalEvent = false)
+        return Result.success(updatedTask)
+    }
+
+    fun toggleTaskCompletion(taskId: String): Boolean {
+        val current = _currentMember.value
+        val uid = currentUid()
+        val targetTask = _tasks.value.find { it.id == taskId } ?: return false
+        val resolvedFamilyId = targetTask.familyId.ifBlank { _activeFamilyId.value }
+        val taskPath = "families/$resolvedFamilyId/tasks/$taskId"
+
+        if (!current.isParent) {
+            val isAssignedToCurrentChild = targetTask.assignedToMemberId == current.id ||
+                (uid.isNotBlank() && targetTask.assignedToMemberId == uid)
+            if (!isAssignedToCurrentChild) {
+                val classified = FirestoreErrorHandler.classifyTaskFailure(
+                    error = SecurityException("Blocked CHILD ${current.id} from toggling task assigned to ${targetTask.assignedToMemberId}"),
+                    stage = FirestoreErrorHandler.TaskStage.VERIFY_TASK_AUTHORIZATION,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId,
+                    overrideCategory = FirestoreErrorHandler.TaskFailureCategory.ASSIGNEE_MISMATCH
+                )
+                lastClassifiedTaskFailure = classified
+                _taskOperationError.value = classified.messageHe
+                return false
+            }
+        }
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            // Synchronous in-memory execution for local unit tests
+            return kotlinx.coroutines.runBlocking {
+                toggleTaskCompletionAsync(taskId).isSuccess
+            }
+        }
+
+        if (simulateOfflineNetworkFailure) {
+            kotlinx.coroutines.runBlocking {
+                toggleTaskCompletionAsync(taskId)
+            }
+            return false
+        }
+
+        // Apply immediate optimistic state and launch cloud commit on repoScope
+        val previousTask = targetTask
+        val previousMembers = _members.value
+        val previousCurrentMember = _currentMember.value
+        val newStatus = !targetTask.isCompleted
+        val nowMillis = System.currentTimeMillis()
+        val actorId = uid.ifBlank { current.id }
+        val newApprovedByParent = if (current.isParent) newStatus else false
+
+        val updatedTask = targetTask.copy(
+            familyId = resolvedFamilyId,
+            isCompleted = newStatus,
+            approvedByParent = newApprovedByParent,
+            completedAtMillis = if (newStatus) nowMillis else null,
+            completedByMemberId = if (newStatus) actorId else null,
+            updatedAtMillis = nowMillis
+        )
+
+        _taskOperationError.value = null
+        _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVING)
+        _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
+
+        var updatedAssigneePoints: Int? = null
+        if (current.isParent) {
+            val delta = if (newStatus) updatedTask.points else -updatedTask.points
+            _members.value = _members.value.map { member ->
+                if (member.id == updatedTask.assignedToMemberId) {
+                    val newPts = (member.earnedPoints + delta).coerceAtLeast(0)
+                    updatedAssigneePoints = newPts
+                    val updatedMember = member.copy(earnedPoints = newPts)
+                    if (_currentMember.value.id == member.id) {
+                        _currentMember.value = updatedMember
+                    }
+                    updatedMember
+                } else {
+                    member
                 }
             }
+        }
 
-            pushTaskToFirestoreOrQueue(task, isDelete = false)
+        val isParentCaller = current.isParent
+        val writeStage = if (isParentCaller) {
+            FirestoreErrorHandler.TaskStage.PARENT_COMPLETE_TASK_WRITE
+        } else {
+            FirestoreErrorHandler.TaskStage.CHILD_COMPLETE_TASK_WRITE
+        }
+
+        repoScope.launch {
+            try {
+                if (db != null && authUser != null) {
+                    FirestoreErrorHandler.logTaskMilestone(
+                        stage = writeStage,
+                        path = taskPath,
+                        databaseId = configuredDatabaseId,
+                        note = "Persisting task completion (isCompleted=$newStatus, isParent=$isParentCaller)"
+                    )
+                    val docRef = db.collection("families").document(resolvedFamilyId)
+                        .collection("tasks").document(updatedTask.id)
+
+                    if (!isParentCaller) {
+                        val childUpdateMap = mapOf<String, Any?>(
+                            "isCompleted" to updatedTask.isCompleted,
+                            "completedAtMillis" to updatedTask.completedAtMillis,
+                            "completedByMemberId" to if (updatedTask.isCompleted) (updatedTask.completedByMemberId ?: authUser.uid) else null,
+                            "updatedAt" to nowMillis
+                        )
+                        docRef.update(childUpdateMap).await()
+                    } else {
+                        val parentUpdateMap = mapOf<String, Any?>(
+                            "isCompleted" to updatedTask.isCompleted,
+                            "approvedByParent" to updatedTask.approvedByParent,
+                            "completedAtMillis" to updatedTask.completedAtMillis,
+                            "completedByMemberId" to if (updatedTask.isCompleted) (updatedTask.completedByMemberId ?: authUser.uid) else null,
+                            "updatedAt" to nowMillis
+                        )
+                        try {
+                            docRef.update(parentUpdateMap).await()
+                        } catch (_: Exception) {
+                            docRef.set(buildFullTaskFirestoreMap(updatedTask, resolvedFamilyId, nowMillis), SetOptions.merge()).await()
+                        }
+
+                        if (updatedAssigneePoints != null && updatedTask.assignedToMemberId.isNotBlank()) {
+                            runCatching {
+                                db.collection("families").document(resolvedFamilyId)
+                                    .collection("members").document(updatedTask.assignedToMemberId)
+                                    .update(
+                                        mapOf(
+                                            "earnedPoints" to updatedAssigneePoints,
+                                            "updatedAt" to nowMillis
+                                        )
+                                    ).await()
+                            }
+                        }
+                    }
+                }
+
+                val finalSyncState = when {
+                    !updatedTask.isCompleted -> TaskCompletionSyncState.IDLE
+                    updatedTask.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
+                    else -> TaskCompletionSyncState.PENDING_APPROVAL
+                }
+                _taskSyncStates.value = _taskSyncStates.value + (taskId to finalSyncState)
+                _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
+                runCatching {
+                    taskDao?.upsertTask(updatedTask.toCoreTask(resolvedFamilyId))
+                }
+                emitTaskCompletionNotificationIfNeeded(updatedTask, isParentApprovalEvent = false)
+            } catch (e: Exception) {
+                // Revert optimistic state on Firestore write failure
+                _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
+                _members.value = previousMembers
+                _currentMember.value = previousCurrentMember
+                _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
+
+                val classified = FirestoreErrorHandler.classifyTaskFailure(
+                    error = e,
+                    stage = writeStage,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId
+                )
+                lastClassifiedTaskFailure = classified
+                _taskOperationError.value = classified.messageHe
+            }
+        }
+        return true
+    }
+
+    /**
+     * V1.6 Requirement 6 & 9:
+     * Allows an authenticated PARENT to approve a child's completed task (`approvedByParent = true`),
+     * persisting the approval to `/families/{familyId}/tasks/{taskId}` and awarding points to the
+     * child's member document in Firestore.
+     */
+    suspend fun approveTaskCompletionAsync(taskId: String): Result<FamilyTask> {
+        val current = _currentMember.value
+        val targetTask = _tasks.value.find { it.id == taskId }
+            ?: return Result.failure(IllegalArgumentException("המשימה לא נמצאה"))
+        val resolvedFamilyId = targetTask.familyId.ifBlank { _activeFamilyId.value }
+        val taskPath = "families/$resolvedFamilyId/tasks/$taskId"
+
+        if (!current.isParent) {
+            val classified = FirestoreErrorHandler.classifyTaskFailure(
+                error = SecurityException("Only a PARENT can approve task completion"),
+                stage = FirestoreErrorHandler.TaskStage.VERIFY_TASK_AUTHORIZATION,
+                path = taskPath,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.TaskFailureCategory.UNAUTHORIZED_ROLE
+            )
+            lastClassifiedTaskFailure = classified
+            _taskOperationError.value = classified.messageHe
+            return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified))
+        }
+
+        val previousTask = targetTask
+        val previousMembers = _members.value
+        val previousCurrentMember = _currentMember.value
+        val nowMillis = System.currentTimeMillis()
+        val wasAlreadyApproved = targetTask.isCompleted && targetTask.approvedByParent
+
+        val approvedTask = targetTask.copy(
+            familyId = resolvedFamilyId,
+            isCompleted = true,
+            approvedByParent = true,
+            completedAtMillis = targetTask.completedAtMillis ?: nowMillis,
+            completedByMemberId = targetTask.completedByMemberId ?: targetTask.assignedToMemberId,
+            updatedAtMillis = nowMillis
+        )
+
+        _taskOperationError.value = null
+        _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVING)
+        _tasks.value = _tasks.value.map { if (it.id == taskId) approvedTask else it }
+
+        var updatedAssigneePoints: Int? = null
+        _members.value = _members.value.map { member ->
+            if (member.id == approvedTask.assignedToMemberId) {
+                val pointsToAward = if (!wasAlreadyApproved) approvedTask.points else 0
+                val newPts = (member.earnedPoints + pointsToAward).coerceAtLeast(0)
+                updatedAssigneePoints = newPts
+                val updatedMember = member.copy(earnedPoints = newPts)
+                if (_currentMember.value.id == member.id) {
+                    _currentMember.value = updatedMember
+                }
+                updatedMember
+            } else {
+                member
+            }
+        }
+
+        if (simulateOfflineNetworkFailure) {
+            val offlineErr = FirebaseFirestoreException(
+                "Simulated offline network failure during parent task approval",
+                FirebaseFirestoreException.Code.UNAVAILABLE
+            )
+            _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
+            _members.value = previousMembers
+            _currentMember.value = previousCurrentMember
+            _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
+            val classified = FirestoreErrorHandler.classifyTaskFailure(
+                error = offlineErr,
+                stage = FirestoreErrorHandler.TaskStage.PARENT_APPROVE_TASK_WRITE,
+                path = taskPath,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedTaskFailure = classified
+            _taskOperationError.value = classified.messageHe
+            return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified, offlineErr))
+        }
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                FirestoreErrorHandler.logTaskMilestone(
+                    stage = FirestoreErrorHandler.TaskStage.PARENT_APPROVE_TASK_WRITE,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId,
+                    note = "Parent approving task completion in named database"
+                )
+                val docRef = db.collection("families").document(resolvedFamilyId)
+                    .collection("tasks").document(approvedTask.id)
+                docRef.update(
+                    mapOf(
+                        "isCompleted" to true,
+                        "approvedByParent" to true,
+                        "completedAtMillis" to approvedTask.completedAtMillis,
+                        "completedByMemberId" to approvedTask.completedByMemberId,
+                        "updatedAt" to nowMillis
+                    )
+                ).await()
+
+                if (approvedTask.assignedToMemberId.isNotBlank()) {
+                    val memberRef = db.collection("families").document(resolvedFamilyId)
+                        .collection("members").document(approvedTask.assignedToMemberId)
+                    runCatching {
+                        val memberSnap = memberRef.get().await()
+                        if (memberSnap.exists()) {
+                            val currentCloudPts = (memberSnap.getLong("earnedPoints") ?: 0L).toInt()
+                            val newCloudPts = (currentCloudPts + approvedTask.points).coerceAtLeast(updatedAssigneePoints ?: 0)
+                            memberRef.update(
+                                mapOf(
+                                    "earnedPoints" to newCloudPts,
+                                    "updatedAt" to nowMillis
+                                )
+                            ).await()
+                            _members.value = _members.value.map { m ->
+                                if (m.id == approvedTask.assignedToMemberId) m.copy(earnedPoints = newCloudPts) else m
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
+                _members.value = previousMembers
+                _currentMember.value = previousCurrentMember
+                _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
+                val classified = FirestoreErrorHandler.classifyTaskFailure(
+                    error = e,
+                    stage = FirestoreErrorHandler.TaskStage.PARENT_APPROVE_TASK_WRITE,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId
+                )
+                lastClassifiedTaskFailure = classified
+                _taskOperationError.value = classified.messageHe
+                return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified, e))
+            }
+        }
+
+        _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVED_APPROVED)
+        _tasks.value = _tasks.value.map { if (it.id == taskId) approvedTask else it }
+        emitTaskCompletionNotificationIfNeeded(approvedTask, isParentApprovalEvent = true)
+        return Result.success(approvedTask)
+    }
+
+    fun approveTaskCompletion(taskId: String): Boolean {
+        if (!_currentMember.value.isParent) {
+            val classified = FirestoreErrorHandler.classifyTaskFailure(
+                error = SecurityException("Only a PARENT can approve task completion"),
+                stage = FirestoreErrorHandler.TaskStage.VERIFY_TASK_AUTHORIZATION,
+                path = "families/${_activeFamilyId.value}/tasks/$taskId",
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.TaskFailureCategory.UNAUTHORIZED_ROLE
+            )
+            lastClassifiedTaskFailure = classified
+            _taskOperationError.value = classified.messageHe
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                approveTaskCompletionAsync(taskId).isSuccess
+            }
+        }
+        repoScope.launch {
+            approveTaskCompletionAsync(taskId)
         }
         return true
     }
@@ -3983,6 +4752,7 @@ class FamilyRepository(
     suspend fun updateTaskInCloud(task: FamilyTask): Result<Unit> {
         val db = firestoreProvider() ?: return Result.failure(IllegalStateException("Firestore unavailable"))
         val uid = authProvider()?.currentUser?.uid ?: return Result.failure(SecurityException("Not authenticated"))
+        val path = if (task.familyId.isNotBlank()) "families/${task.familyId}/tasks/${task.id}" else "tasks/${task.id}"
         return try {
             if (task.familyId.isNotBlank()) {
                 val familyRef = db.collection("families").document(task.familyId)
@@ -3993,16 +4763,31 @@ class FamilyRepository(
                 val isParentInCloud = memberSnap?.exists() == true && memberRole == UserRole.PARENT
 
                 val taskRef = familyRef.collection("tasks").document(task.id)
-                if (!isParentInCloud && task.assignedToMemberId == uid) {
+                val nowMillis = System.currentTimeMillis()
+                if (!isParentInCloud) {
                     // Child completion-only update path: preserves parent's title/description/priority/points edits
+                    // and strictly sends ONLY fields permitted by isChildTaskCompletionOnly() in firestore.rules
+                    FirestoreErrorHandler.logTaskMilestone(
+                        stage = FirestoreErrorHandler.TaskStage.CHILD_COMPLETE_TASK_WRITE,
+                        path = path,
+                        databaseId = configuredDatabaseId,
+                        note = "Executing child completion-only update in updateTaskInCloud"
+                    )
                     taskRef.update(
                         mapOf(
                             "isCompleted" to task.isCompleted,
-                            "completedAtMillis" to (task.completedAtMillis ?: System.currentTimeMillis()),
-                            "completedByMemberId" to (task.completedByMemberId ?: uid)
+                            "completedAtMillis" to (if (task.isCompleted) (task.completedAtMillis ?: nowMillis) else null),
+                            "completedByMemberId" to (if (task.isCompleted) (task.completedByMemberId ?: uid) else null),
+                            "updatedAt" to nowMillis
                         )
                     ).await()
                 } else {
+                    FirestoreErrorHandler.logTaskMilestone(
+                        stage = FirestoreErrorHandler.TaskStage.UPDATE_TASK_WRITE,
+                        path = path,
+                        databaseId = configuredDatabaseId,
+                        note = "Executing parent task update in updateTaskInCloud"
+                    )
                     taskRef.update(
                         mapOf(
                             "title" to task.title,
@@ -4010,6 +4795,7 @@ class FamilyRepository(
                             "category" to task.category.name,
                             "assignedUid" to task.assignedToMemberId,
                             "assignedToMemberId" to task.assignedToMemberId,
+                            "assignedMemberId" to task.assignedToMemberId,
                             "dateEpochDay" to task.dateEpochDay,
                             "dueDate" to (task.dateEpochDay * 86_400_000L),
                             "isCompleted" to task.isCompleted,
@@ -4019,7 +4805,8 @@ class FamilyRepository(
                             "pointsValue" to task.points,
                             "approvedByParent" to task.approvedByParent,
                             "completedAtMillis" to task.completedAtMillis,
-                            "completedByMemberId" to task.completedByMemberId
+                            "completedByMemberId" to task.completedByMemberId,
+                            "updatedAt" to nowMillis
                         )
                     ).await()
                 }
@@ -4035,6 +4822,13 @@ class FamilyRepository(
             }
             Result.success(Unit)
         } catch (e: Exception) {
+            val classified = FirestoreErrorHandler.classifyTaskFailure(
+                error = e,
+                stage = FirestoreErrorHandler.TaskStage.UPDATE_TASK_WRITE,
+                path = path,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedTaskFailure = classified
             Result.failure(e)
         }
     }
@@ -4046,18 +4840,34 @@ class FamilyRepository(
         completedByMemberId: String
     ): Result<Unit> {
         val db = firestoreProvider() ?: return Result.failure(IllegalStateException("Firestore unavailable"))
+        val path = "families/$familyId/tasks/$taskId"
         return try {
+            val nowMillis = System.currentTimeMillis()
+            FirestoreErrorHandler.logTaskMilestone(
+                stage = FirestoreErrorHandler.TaskStage.CHILD_COMPLETE_TASK_WRITE,
+                path = path,
+                databaseId = configuredDatabaseId,
+                note = "Executing completeTaskInCloud (isCompleted=$isCompleted)"
+            )
             db.collection("families").document(familyId)
                 .collection("tasks").document(taskId)
                 .update(
                     mapOf(
                         "isCompleted" to isCompleted,
-                        "completedAtMillis" to System.currentTimeMillis(),
-                        "completedByMemberId" to completedByMemberId
+                        "completedAtMillis" to (if (isCompleted) nowMillis else null),
+                        "completedByMemberId" to (if (isCompleted) completedByMemberId else null),
+                        "updatedAt" to nowMillis
                     )
                 ).await()
             Result.success(Unit)
         } catch (e: Exception) {
+            val classified = FirestoreErrorHandler.classifyTaskFailure(
+                error = e,
+                stage = FirestoreErrorHandler.TaskStage.CHILD_COMPLETE_TASK_WRITE,
+                path = path,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedTaskFailure = classified
             Result.failure(e)
         }
     }
