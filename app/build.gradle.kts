@@ -13,25 +13,36 @@ android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
-  // Release Version Management
-  // Logical Step to increment for future releases:
-  // 1. Increment currentVersionCode by +1 (required by Android Package Manager & Google Play)
-  // 2. Bump versionMinor (e.g. 1.0 -> 1.1 -> 1.2) for feature updates, or versionPatch for bugfixes
-  // 3. BuildConfig.VERSION_NAME and BuildConfig.VERSION_CODE will automatically update on build
-  val versionMajor = 1
-  val versionMinor = 6
-  val currentVersionCode = 6
-  val currentVersionName = "$versionMajor.$versionMinor"
+  // Release Version Management (V1.0.0 Semantic Baseline + Monotonic versionCode > V1.6's 6)
+  // Authoritative release versions are injected by GitHub Actions via -PreleaseVersionName / -PreleaseVersionCode
+  // (or RELEASE_VERSION_NAME / RELEASE_VERSION_CODE env vars) ONLY when building a new APK release.
+  val defaultVersionName = "1.0.0"
+  val minimumMonotonicVersionCode = 7 // V1.6 used versionCode = 6; never reset to 1
+  val configuredVersionName = (project.findProperty("releaseVersionName") as? String)
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+    ?: System.getenv("RELEASE_VERSION_NAME")?.trim()?.takeIf { it.isNotEmpty() }
+    ?: defaultVersionName
+
+  val configuredVersionCode = ((project.findProperty("releaseVersionCode") as? String)?.trim()?.toIntOrNull()
+    ?: System.getenv("RELEASE_VERSION_CODE")?.trim()?.toIntOrNull()
+    ?: minimumMonotonicVersionCode).coerceAtLeast(minimumMonotonicVersionCode)
+
+  val versionParts = configuredVersionName.split(".")
+  val majorPart = versionParts.getOrNull(0)?.toIntOrNull() ?: 1
+  val minorPart = versionParts.getOrNull(1)?.toIntOrNull() ?: 0
+  val patchPart = versionParts.getOrNull(2)?.toIntOrNull() ?: 0
+  val nextPatchVersionName = "$majorPart.$minorPart.${patchPart + 1}"
 
   defaultConfig {
     applicationId = "com.aistudio.familytasks.qkxmva"
     minSdk = 24
     targetSdk = 36
-    versionCode = currentVersionCode
-    versionName = currentVersionName
+    versionCode = configuredVersionCode
+    versionName = configuredVersionName
 
-    buildConfigField("String", "NEXT_RELEASE_VERSION_NAME", "\"$versionMajor.${versionMinor + 1}\"")
-    buildConfigField("int", "NEXT_RELEASE_VERSION_CODE", "${currentVersionCode + 1}")
+    buildConfigField("String", "NEXT_RELEASE_VERSION_NAME", "\"$nextPatchVersionName\"")
+    buildConfigField("int", "NEXT_RELEASE_VERSION_CODE", "${configuredVersionCode + 1}")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -122,8 +133,9 @@ dependencies {
   implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
-  // Firestore cloud data synchronization
+  // Firestore cloud data synchronization & Firebase Cloud Messaging (FCM)
   implementation(libs.firebase.firestore)
+  implementation(libs.firebase.messaging)
 
   // Firebase Auth and Google Sign-In via Credential Manager
   implementation(libs.firebase.auth)

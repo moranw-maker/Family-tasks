@@ -7,9 +7,11 @@ import com.example.data.local.OfflineSyncDao
 import com.example.data.local.OfflineSyncQueueEntity
 import com.example.data.local.TaskDao
 import com.example.model.*
+import com.example.notifications.FcmTokenManager
 import com.example.util.FirestoreErrorHandler
 import com.example.util.FirestoreErrorHandler.StartupFailureCategory
 import com.example.util.FirestoreErrorHandler.StartupStage
+import com.example.util.NotificationHelper
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
@@ -52,7 +54,7 @@ import java.util.UUID
  * - Protects the last remaining PARENT from removal or demotion
  */
 class FamilyRepository(
-    context: Context? = null,
+    private val context: Context? = null,
     private val taskDao: TaskDao? = context?.let { AppDatabase.getInstance(it).taskDao() },
     private val offlineSyncDao: OfflineSyncDao? = context?.let { AppDatabase.getInstance(it).offlineSyncDao() },
     val configuredDatabaseId: String = resolveConfiguredDatabaseId(context),
@@ -63,6 +65,9 @@ class FamilyRepository(
         runCatching { FirebaseAuth.getInstance() }.getOrNull()
     }
 ) {
+    private val appContext: Context?
+        get() = context
+
     constructor(
         firestore: FirebaseFirestore,
         auth: FirebaseAuth
@@ -2673,6 +2678,15 @@ class FamilyRepository(
         val db = firestoreProvider() ?: return
         detachFirestoreListeners()
 
+        // Synchronize the authenticated user's FCM token for this device in the named database
+        FcmTokenManager.syncCurrentDeviceTokenAsync(
+            context = appContext,
+            dbOverride = db,
+            uidOverride = authProvider()?.currentUser?.uid,
+            familyId = familyId,
+            role = _currentMember.value.role
+        )
+
         val familyRef = db.collection("families").document(familyId)
 
         // 0. Real-time Family Document Listener
@@ -2745,37 +2759,155 @@ class FamilyRepository(
                             }
 
                             if (!hasProcessedInitialTasksSnapshot) {
-                                if (remoteTask.isCompleted && !isPendingServerCommit) {
-                                    notifiedTaskCompletionKeys.add("${remoteTask.id}:completed")
-                                    if (remoteTask.approvedByParent) {
-                                        notifiedTaskCompletionKeys.add("${remoteTask.id}:approved")
+                                if (!isPendingServerCommit) {
+                                    if (remoteTask.assignedToMemberId.isNotBlank()) {
+                                        notifiedTaskCompletionKeys.add("assign:${remoteTask.id}:${remoteTask.assignedToMemberId}")
+                                    }
+                                    if (remoteTask.isCompleted) {
+                                        notifiedTaskCompletionKeys.add("${remoteTask.id}:completed")
+                                        if (remoteTask.approvedByParent) {
+                                            notifiedTaskCompletionKeys.add("${remoteTask.id}:approved")
+                                        }
                                     }
                                 }
                             } else if (!isPendingServerCommit) {
-                                // Real-time cross-device notification ONLY for server-committed writes (deduplicated)
+                                val assignee = _members.value.find { it.id == remoteTask.assignedToMemberId }
+                                val assigneeName = assignee?.name ?: "חבר משפחה"
+                                val assigneeEmoji = assignee?.avatarEmoji ?: "🎉"
+
+                                // Event A: Parent assigned a new task to this user
+                                if (prev == null && remoteTask.assignedToMemberId.isNotBlank() && remoteTask.assignedToMemberId == selfUid) {
+                                    val assignKey = "assign:${remoteTask.id}:$selfUid"
+                                    if (notifiedTaskCompletionKeys.add(assignKey) && FcmTokenManager.markEventDispatchedIfNew(assignKey)) {
+                                        val title = "משימה חדשה שובצה עבורך 📋"
+                                        val body = "שובצה לך משימה חדשה: \"${remoteTask.title}\" (שעה ${remoteTask.dueTimeFormatted} • +${remoteTask.points} נק')"
+                                        pushAlert(
+                                            title = title,
+                                            message = body,
+                                            targetName = assigneeName,
+                                            targetEmoji = assigneeEmoji,
+                                            reason = AlertReason.TASK_REMINDER,
+                                            showBanner = true
+                                        )
+                                        appContext?.let { ctx ->
+                                            NotificationHelper.showIncomingFcmNotification(
+                                                context = ctx,
+                                                title = title,
+                                                message = body,
+                                                eventKey = assignKey,
+                                                taskId = remoteTask.id
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Event D: Task was reassigned to this user
+                                if (prev != null && prev.assignedToMemberId != remoteTask.assignedToMemberId && remoteTask.assignedToMemberId == selfUid) {
+                                    val reassignKey = "reassign:${remoteTask.id}:$selfUid:${remoteTask.updatedAtMillis}"
+                                    if (notifiedTaskCompletionKeys.add(reassignKey) && FcmTokenManager.markEventDispatchedIfNew(reassignKey)) {
+                                        val title = "משימה הועברה אליך 🔄"
+                                        val body = "המשימה \"${remoteTask.title}\" שובצה אליך (שעה ${remoteTask.dueTimeFormatted} • +${remoteTask.points} נק')"
+                                        pushAlert(
+                                            title = title,
+                                            message = body,
+                                            targetName = assigneeName,
+                                            targetEmoji = assigneeEmoji,
+                                            reason = AlertReason.TASK_REMINDER,
+                                            showBanner = true
+                                        )
+                                        appContext?.let { ctx ->
+                                            NotificationHelper.showIncomingFcmNotification(
+                                                context = ctx,
+                                                title = title,
+                                                message = body,
+                                                eventKey = reassignKey,
+                                                taskId = remoteTask.id
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Event B & C: Real-time cross-device completion / parent approval notification ONLY for server-committed writes
                                 if (remoteTask.isCompleted && (prev == null || !prev.isCompleted)) {
                                     val completedByOther = !remoteTask.completedByMemberId.isNullOrBlank() &&
                                         remoteTask.completedByMemberId != selfUid
                                     if (completedByOther && notifiedTaskCompletionKeys.add("${remoteTask.id}:completed")) {
-                                        val assignee = _members.value.find { it.id == remoteTask.assignedToMemberId }
-                                        val assigneeName = assignee?.name ?: "חבר משפחה"
-                                        val assigneeEmoji = assignee?.avatarEmoji ?: "🎉"
                                         if (remoteTask.approvedByParent) {
-                                            pushAlert(
-                                                title = "משימה הושלמה ואושרה! +${remoteTask.points} נק' 🎉",
-                                                message = "$assigneeName השלים/ה את המשימה: ${remoteTask.title}",
-                                                targetName = assigneeName,
-                                                targetEmoji = assigneeEmoji,
-                                                reason = AlertReason.TASK_COMPLETED
-                                            )
+                                            val approveKey = "approve:${remoteTask.id}"
+                                            if (FcmTokenManager.markEventDispatchedIfNew(approveKey)) {
+                                                val title = "משימה הושלמה ואושרה! +${remoteTask.points} נק' 🎉"
+                                                val body = "$assigneeName השלים/ה את המשימה: ${remoteTask.title}"
+                                                pushAlert(
+                                                    title = title,
+                                                    message = body,
+                                                    targetName = assigneeName,
+                                                    targetEmoji = assigneeEmoji,
+                                                    reason = AlertReason.TASK_COMPLETED,
+                                                    showBanner = true
+                                                )
+                                                if (remoteTask.assignedToMemberId == selfUid) {
+                                                    appContext?.let { ctx ->
+                                                        NotificationHelper.showIncomingFcmNotification(
+                                                            context = ctx,
+                                                            title = title,
+                                                            message = body,
+                                                            eventKey = approveKey,
+                                                            taskId = remoteTask.id
+                                                        )
+                                                    }
+                                                }
+                                            }
                                         } else {
-                                            pushAlert(
-                                                title = "משימה הושלמה וממתינה לאישור הורה ⏳",
-                                                message = "$assigneeName סימן/ה כבוצע: ${remoteTask.title} (+${remoteTask.points} נק')",
-                                                targetName = assigneeName,
-                                                targetEmoji = assigneeEmoji,
-                                                reason = AlertReason.TASK_COMPLETED
-                                            )
+                                            val submitKey = "submit:${remoteTask.id}:${remoteTask.completedAtMillis ?: remoteTask.updatedAtMillis}"
+                                            if (FcmTokenManager.markEventDispatchedIfNew(submitKey)) {
+                                                val title = "משימה הושלמה וממתינה לאישור הורה ⏳"
+                                                val body = "$assigneeName סימן/ה כבוצע: ${remoteTask.title} (+${remoteTask.points} נק')"
+                                                pushAlert(
+                                                    title = title,
+                                                    message = body,
+                                                    targetName = assigneeName,
+                                                    targetEmoji = assigneeEmoji,
+                                                    reason = AlertReason.TASK_COMPLETED,
+                                                    showBanner = _currentMember.value.isParent
+                                                )
+                                                if (_currentMember.value.isParent) {
+                                                    appContext?.let { ctx ->
+                                                        NotificationHelper.showIncomingFcmNotification(
+                                                            context = ctx,
+                                                            title = title,
+                                                            message = body,
+                                                            eventKey = submitKey,
+                                                            taskId = remoteTask.id
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if (remoteTask.isCompleted && remoteTask.approvedByParent && prev != null && !prev.approvedByParent) {
+                                    // Event C: Parent approved a previously submitted task -> notify the assigned child
+                                    val approveKey = "approve:${remoteTask.id}"
+                                    if (notifiedTaskCompletionKeys.add("${remoteTask.id}:approved") && FcmTokenManager.markEventDispatchedIfNew(approveKey)) {
+                                        val title = "המשימה שלך אושרה! +${remoteTask.points} נק' 🎉"
+                                        val body = "כל הכבוד $assigneeName! ביצוע המשימה \"${remoteTask.title}\" אושר וקיבלת +${remoteTask.points} נקודות!"
+                                        pushAlert(
+                                            title = title,
+                                            message = body,
+                                            targetName = assigneeName,
+                                            targetEmoji = assigneeEmoji,
+                                            reason = AlertReason.TASK_COMPLETED,
+                                            showBanner = remoteTask.assignedToMemberId == selfUid
+                                        )
+                                        if (remoteTask.assignedToMemberId == selfUid) {
+                                            appContext?.let { ctx ->
+                                                NotificationHelper.showIncomingFcmNotification(
+                                                    context = ctx,
+                                                    title = title,
+                                                    message = body,
+                                                    eventKey = approveKey,
+                                                    taskId = remoteTask.id
+                                                )
+                                            }
                                         }
                                     }
                                 } else if (!remoteTask.isCompleted) {
@@ -3419,6 +3551,12 @@ class FamilyRepository(
     }
 
     fun signOutGoogle() {
+        val currentUidBeforeLogout = runCatching { authProvider()?.currentUser?.uid }.getOrNull()
+        FcmTokenManager.unregisterCurrentDeviceTokenAsync(
+            context = appContext,
+            dbOverride = firestoreProvider(),
+            uidOverride = currentUidBeforeLogout
+        )
         runCatching { authProvider()?.signOut() }
         detachFirestoreListeners()
         _isGoogleSignedIn.value = false
@@ -4461,7 +4599,8 @@ class FamilyRepository(
         message: String,
         targetName: String,
         targetEmoji: String,
-        reason: AlertReason
+        reason: AlertReason,
+        showBanner: Boolean = false
     ) {
         val nowStr = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm"))
         val alert = FamilyNotificationAlert(
@@ -4473,7 +4612,9 @@ class FamilyRepository(
             timestampFormatted = nowStr
         )
         _notifications.value = listOf(alert) + _notifications.value
-        _activeBannerAlert.value = alert
+        if (showBanner) {
+            _activeBannerAlert.value = alert
+        }
     }
 
     fun dismissActiveBanner() {
@@ -5074,6 +5215,61 @@ class FamilyRepository(
                     earnedPoints = (snap.getLong("earnedPoints") ?: 0L).toInt()
                 )
             )
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Registers or refreshes an FCM device token in the named Firestore database under
+     * `/users/{uid}/fcm_tokens/{tokenId}` for the currently authenticated user.
+     */
+    suspend fun registerDeviceFcmTokenInCloud(
+        token: String,
+        familyId: String = _activeFamilyId.value,
+        role: UserRole = _currentMember.value.role
+    ): Result<String> {
+        val db = firestoreProvider() ?: return Result.failure(IllegalStateException("Firestore unavailable"))
+        val uid = authProvider()?.currentUser?.uid ?: return Result.failure(SecurityException("Not authenticated"))
+        return FcmTokenManager.registerTokenInFirestore(
+            db = db,
+            uid = uid,
+            token = token,
+            familyId = familyId,
+            role = role
+        )
+    }
+
+    /**
+     * Removes a specific device's FCM token from `/users/{uid}/fcm_tokens/{tokenId}` on logout
+     * or invalid-token cleanup.
+     */
+    suspend fun unregisterDeviceFcmTokenInCloud(token: String): Result<Unit> {
+        val db = firestoreProvider() ?: return Result.failure(IllegalStateException("Firestore unavailable"))
+        val uid = authProvider()?.currentUser?.uid ?: return Result.failure(SecurityException("Not authenticated"))
+        return FcmTokenManager.unregisterTokenFromFirestore(
+            db = db,
+            uid = uid,
+            token = token
+        )
+    }
+
+    suspend fun deleteDeviceFcmTokenInCloud(token: String): Result<Unit> =
+        unregisterDeviceFcmTokenInCloud(token)
+
+    /**
+     * Reads all registered device FCM tokens under `/users/{targetUid}/fcm_tokens`.
+     * Enforced by Firestore security rules so only the authenticated owner can read their own tokens.
+     */
+    suspend fun getDeviceFcmTokensFromCloud(targetUid: String): Result<List<String>> {
+        val db = firestoreProvider() ?: return Result.failure(IllegalStateException("Firestore unavailable"))
+        return try {
+            val snap = db.collection("users").document(targetUid)
+                .collection("fcm_tokens")
+                .get()
+                .await()
+            val tokens = snap.documents.mapNotNull { it.getString("token")?.takeIf { t -> t.isNotBlank() } }
+            Result.success(tokens)
         } catch (e: Exception) {
             Result.failure(e)
         }

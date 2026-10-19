@@ -1519,4 +1519,85 @@ test("Regression V1.6: CHILD can complete assigned task (pending approval), cann
   );
 });
 
+test("V1.0.0 FCM Push Security: Authenticated user can register/refresh/delete own multi-device FCM tokens, cannot access another user's tokens, and notification_dispatches is server-only", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+
+  // 1. Unauthenticated user cannot read or register FCM tokens
+  await assertFails(
+    unauthDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_device_1").set({
+      uid: ALICE_UID,
+      tokenId: "tok_device_1",
+      token: "fcm_token_string_device_1_valid_length",
+      platform: "ANDROID",
+    })
+  );
+
+  // 2. Alice can register multiple devices under her own /users/{uid}/fcm_tokens/{tokenId}
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_phone_1").set({
+      uid: ALICE_UID,
+      tokenId: "tok_phone_1",
+      token: "fcm_token_string_phone_1_valid_length",
+      familyId: "fam_v16_tasks",
+      role: "PARENT",
+      platform: "ANDROID",
+      appVersion: "1.0.0",
+      updatedAt: 1700000020000,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_tablet_2").set({
+      uid: ALICE_UID,
+      tokenId: "tok_tablet_2",
+      token: "fcm_token_string_tablet_2_valid_length",
+      familyId: "fam_v16_tasks",
+      role: "PARENT",
+      platform: "ANDROID",
+      appVersion: "1.0.0",
+      updatedAt: 1700000021000,
+    })
+  );
+
+  // 3. Alice can refresh and delete her own token on logout
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_phone_1").update({
+      token: "fcm_token_string_phone_1_refreshed_valid",
+      updatedAt: 1700000025000,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_tablet_2").delete()
+  );
+
+  // 4. Bob cannot read, overwrite, or delete Alice's FCM tokens
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_phone_1").get()
+  );
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_phone_1").update({
+      token: "hijacked_token_string_valid_length",
+    })
+  );
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_phone_1").delete()
+  );
+
+  // 5. Client cannot spoof uid or write to server-only /families/{familyId}/notification_dispatches
+  await assertFails(
+    bobDb.collection("users").doc(BOB_UID).collection("fcm_tokens").doc("tok_spoof").set({
+      uid: ALICE_UID,
+      tokenId: "tok_spoof",
+      token: "fcm_token_string_spoof_valid_length",
+    })
+  );
+  await assertFails(
+    aliceDb.collection("families").doc("fam_v16_tasks").collection("notification_dispatches").doc("disp_1").set({
+      dispatchedAt: 1700000030000,
+    })
+  );
+});
+
+
 

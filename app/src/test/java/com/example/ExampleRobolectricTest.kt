@@ -34,11 +34,11 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `verify build config version name and code incremented to V1_6`() {
-        assertEquals("1.6", BuildConfig.VERSION_NAME)
-        assertEquals(6, BuildConfig.VERSION_CODE)
-        assertEquals("1.7", BuildConfig.NEXT_RELEASE_VERSION_NAME)
-        assertEquals(7, BuildConfig.NEXT_RELEASE_VERSION_CODE)
+    fun `verify build config version name and code incremented to V1_0_0`() {
+        assertEquals("1.0.0", BuildConfig.VERSION_NAME)
+        assertTrue("VERSION_CODE must be strictly greater than V1.6 (6)", BuildConfig.VERSION_CODE >= 7)
+        assertEquals("1.0.1", BuildConfig.NEXT_RELEASE_VERSION_NAME)
+        assertEquals(BuildConfig.VERSION_CODE + 1, BuildConfig.NEXT_RELEASE_VERSION_CODE)
     }
 
     @Test
@@ -547,7 +547,120 @@ class ExampleRobolectricTest {
         val roiPointsAfter = repository.members.value.first { it.id == roiChild.id }.earnedPoints
         assertEquals(roiPointsBefore + assignedTask.points, roiPointsAfter)
     }
+
+    @Test
+    fun `test automatic semantic versioning 1_0_0 progression and idempotent release allocation`() {
+        // 1. When no 1.0.x release tags exist yet, allocateReleaseVersion starts at 1.0.0 with versionCode >= 7
+        val initialAlloc = com.example.util.AppVersionManager.allocateReleaseVersion(
+            candidateCommitSha = "abc111",
+            existingReleases = emptyList()
+        )
+        assertEquals("1.0.0", initialAlloc.versionName)
+        assertEquals(7, initialAlloc.versionCode)
+        assertEquals("v1.0.0-vc7", initialAlloc.releaseTag)
+        assertFalse(initialAlloc.isAlreadyReleasedForCommit)
+
+        // 2. Subsequent release on a new commit increments patch to 1.0.1 and versionCode to 8
+        val secondAlloc = com.example.util.AppVersionManager.allocateReleaseVersion(
+            candidateCommitSha = "def222",
+            existingReleases = listOf(
+                com.example.util.ReleasedTagRecord(
+                    versionName = initialAlloc.versionName,
+                    versionCode = initialAlloc.versionCode,
+                    commitSha = "abc111"
+                )
+            )
+        )
+        assertEquals("1.0.1", secondAlloc.versionName)
+        assertEquals(8, secondAlloc.versionCode)
+        assertEquals("v1.0.1-vc8", secondAlloc.releaseTag)
+        assertFalse(secondAlloc.isAlreadyReleasedForCommit)
+
+        // 3. Re-running on the same commit SHA is idempotent and does not create duplicate tags
+        val duplicateRunAlloc = com.example.util.AppVersionManager.allocateReleaseVersion(
+            candidateCommitSha = "def222",
+            existingReleases = listOf(
+                com.example.util.ReleasedTagRecord(
+                    versionName = initialAlloc.versionName,
+                    versionCode = initialAlloc.versionCode,
+                    commitSha = "abc111"
+                ),
+                com.example.util.ReleasedTagRecord(
+                    versionName = secondAlloc.versionName,
+                    versionCode = secondAlloc.versionCode,
+                    commitSha = "def222"
+                )
+            )
+        )
+        assertTrue(duplicateRunAlloc.isAlreadyReleasedForCommit)
+        assertEquals("1.0.1", duplicateRunAlloc.versionName)
+        assertEquals(8, duplicateRunAlloc.versionCode)
+    }
+
+    @Test
+    fun `test strict 24 hour time formatting without AM PM and date preserving timestamp`() {
+        // 1. Strict 24-hour HH:mm formatting
+        assertEquals("00:05", com.example.ui.components.TimeFormatUtils.format24Hour(0, 5))
+        assertEquals("14:30", com.example.ui.components.TimeFormatUtils.format24Hour(14, 30))
+        assertEquals("23:59", com.example.ui.components.TimeFormatUtils.format24Hour(23, 59))
+
+        // 2. Parsing and normalizing legacy AM/PM or single-digit strings into strict 24-hour HH:mm
+        assertEquals("05:05", com.example.ui.components.TimeFormatUtils.normalize24HourString("5:05 PM"))
+        assertEquals("12:15", com.example.ui.components.TimeFormatUtils.normalize24HourString("12:15 AM"))
+        assertEquals("08:30", com.example.ui.components.TimeFormatUtils.normalize24HourString("8:30"))
+        assertFalse(com.example.ui.components.TimeFormatUtils.normalize24HourString("09:45 PM").contains("PM"))
+        assertFalse(com.example.ui.components.TimeFormatUtils.normalize24HourString("09:45 AM").contains("AM"))
+
+        // 3. Preserving selected date when changing only the time
+        val targetDate = LocalDate.of(2026, 10, 25)
+        val epochDay = targetDate.toEpochDay()
+        val (preservedDayMorning, morningMillis) =
+            com.example.ui.components.TimeFormatUtils.combineDateAnd24HourTimeToEpochMillis(epochDay, "08:15")
+        val (preservedDayEvening, eveningMillis) =
+            com.example.ui.components.TimeFormatUtils.combineDateAnd24HourTimeToEpochMillis(epochDay, "21:45")
+        assertEquals(epochDay, preservedDayMorning)
+        assertEquals(epochDay, preservedDayEvening)
+        assertTrue("Evening timestamp on same date must be after morning timestamp", eveningMillis > morningMillis)
+
+        val zone = java.time.ZoneId.systemDefault()
+        val morningZdt = java.time.Instant.ofEpochMilli(morningMillis).atZone(zone)
+        val eveningZdt = java.time.Instant.ofEpochMilli(eveningMillis).atZone(zone)
+        assertEquals(targetDate, morningZdt.toLocalDate())
+        assertEquals(targetDate, eveningZdt.toLocalDate())
+        assertEquals(8, morningZdt.hour)
+        assertEquals(15, morningZdt.minute)
+        assertEquals(21, eveningZdt.hour)
+        assertEquals(45, eveningZdt.minute)
+    }
+
+    @Test
+    fun `test FCM token deterministic ID generation deduplication and logout cleanup`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.notifications.FcmTokenManager.clearAllDispatchedEventsForTesting()
+
+        // 1. Deterministic 32-char hex tokenId per device registration token
+        val tokenA = "fcm_device_token_alpha_1234567890"
+        val tokenB = "fcm_device_token_beta_0987654321"
+        val idA1 = com.example.notifications.FcmTokenManager.computeTokenId(tokenA)
+        val idA2 = com.example.notifications.FcmTokenManager.computeTokenId(tokenA)
+        val idB = com.example.notifications.FcmTokenManager.computeTokenId(tokenB)
+        assertEquals(32, idA1.length)
+        assertEquals(idA1, idA2)
+        assertNotEquals(idA1, idB)
+
+        // 2. Local token persistence and cleanup on logout
+        com.example.notifications.FcmTokenManager.cacheTokenLocally(context, tokenA, "uid_test_1")
+        assertEquals(tokenA, com.example.notifications.FcmTokenManager.getCachedToken(context))
+        com.example.notifications.FcmTokenManager.unregisterCurrentDeviceTokenAsync(context = context)
+        assertNull(com.example.notifications.FcmTokenManager.getCachedToken(context))
+
+        // 3. Deduplication prevents duplicate notifications for the same eventKey
+        val eventKey = "task_submit_approval:fam_1:task_99:1700000005000"
+        assertTrue("First presentation of eventKey must succeed", com.example.notifications.FcmTokenManager.markEventDispatchedIfNew(eventKey))
+        assertFalse("Duplicate presentation of same eventKey must be suppressed", com.example.notifications.FcmTokenManager.markEventDispatchedIfNew(eventKey))
+    }
 }
+
 
 
 

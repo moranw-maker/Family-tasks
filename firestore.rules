@@ -249,6 +249,18 @@ service cloud.firestore {
       );
 
       allow delete: if isOwner(userId);
+
+      // Multi-device FCM registration tokens associated with the authenticated user's UID.
+      // Only the authenticated owner may read, register, refresh, or remove their own device tokens.
+      match /fcm_tokens/{tokenId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && request.resource.data.get('uid', '') == request.auth.uid
+          && request.resource.data.get('token', '') is string
+          && request.resource.data.get('token', '').size() > 0
+          && (!('platform' in request.resource.data) || request.resource.data.platform == 'ANDROID');
+        allow delete: if isOwner(userId);
+      }
     }
 
     // =========================================================================
@@ -419,6 +431,14 @@ service cloud.firestore {
       match /schedule/{periodId} {
         allow get, list: if isFamilyMember(familyId);
         allow create, update, delete: if isParent(familyId);
+      }
+
+      // -----------------------------------------------------------------------
+      // 2f. Server-Side Notification Dispatches (/families/{familyId}/notification_dispatches/{dispatchId})
+      // Managed exclusively by Firebase Cloud Functions (Admin SDK) for idempotency.
+      // -----------------------------------------------------------------------
+      match /notification_dispatches/{dispatchId} {
+        allow read, write: if false;
       }
     }
 

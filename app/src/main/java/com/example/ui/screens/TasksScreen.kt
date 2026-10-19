@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
@@ -21,7 +20,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -30,6 +28,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.*
+import com.example.ui.components.TimeFormatUtils
 import com.example.ui.dialogs.TaskDetailDialog
 import com.example.ui.theme.*
 import java.time.LocalDate
@@ -74,7 +73,9 @@ fun TasksScreen(
     // so children see pending-approval status and parents see tasks awaiting their approval.
     val filteredTasks = tasks.filter { task ->
         val matchesMember = selectedMemberFilter == null || task.assignedToMemberId == selectedMemberFilter
-        val matchesSearch = searchQuery.isBlank() || task.title.contains(searchQuery, ignoreCase = true) || task.description.contains(searchQuery, ignoreCase = true)
+        val matchesSearch = searchQuery.isBlank() ||
+            task.title.contains(searchQuery, ignoreCase = true) ||
+            task.description.contains(searchQuery, ignoreCase = true)
         val syncState = taskSyncStates[task.id] ?: when {
             task.isCompleted && task.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
             task.isCompleted && !task.approvedByParent -> TaskCompletionSyncState.PENDING_APPROVAL
@@ -96,16 +97,27 @@ fun TasksScreen(
     }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = onAddNewTask,
-                shape = CircleShape,
-                containerColor = VibrantActionBlue,
-                contentColor = Color.White,
-                elevation = FloatingActionButtonDefaults.elevation(6.dp),
-                modifier = Modifier.testTag("add_task_fab")
-            ) {
-                Icon(imageVector = Icons.Default.Add, contentDescription = "Add Task", modifier = Modifier.size(24.dp))
+            // Role-aware interface: hide task creation FAB from CHILD users
+            if (currentMember.isParent) {
+                FloatingActionButton(
+                    onClick = onAddNewTask,
+                    shape = RoundedCornerShape(18.dp),
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = Color.White,
+                    elevation = FloatingActionButtonDefaults.elevation(
+                        defaultElevation = 3.dp,
+                        pressedElevation = 6.dp
+                    ),
+                    modifier = Modifier.testTag("add_task_fab")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = if (isHebrew) "הוסף משימה" else "Add Task",
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
             }
         }
     ) { innerPadding ->
@@ -113,133 +125,129 @@ fun TasksScreen(
             contentPadding = PaddingValues(
                 start = 16.dp,
                 end = 16.dp,
-                top = 10.dp,
-                bottom = innerPadding.calculateBottomPadding() + 90.dp
+                top = 8.dp,
+                bottom = innerPadding.calculateBottomPadding() + 88.dp
             ),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            Color(0xFFF3F7FE),
-                            Color(0xFFF8FAFD),
-                            Color(0xFFFFFFFF)
-                        )
-                    )
-                )
+                .background(MaterialTheme.colorScheme.background)
+                .testTag("tasks_screen")
         ) {
-            // 1. Welcome Greeting Banner (matches Image 2 Screen 2)
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column {
-                        Text(
-                            text = if (isHebrew) "שלום, ${currentMember.name}! 👋" else "Hello, ${currentMember.name}! 👋",
-                            style = MaterialTheme.typography.titleLarge.copy(
-                                fontWeight = FontWeight.ExtraBold,
-                                color = TextPrimary
-                            )
-                        )
-                        Text(
-                            text = if (isHebrew) "המשפחה שלך מחכה לך" else "Your family is waiting for you",
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                color = TextSecondary,
-                                fontWeight = FontWeight.Medium
-                            )
-                        )
-                    }
-
-                    // Sunny weather / cheerful icon
-                    Text(text = "☀️", fontSize = 26.sp)
-                }
-            }
-
-            // 2. Top "Our Family" Card (matches Image 1 Right Phone)
+            // 1. Compact Header + Family Summary Card
             item {
                 Surface(
-                    onClick = onOpenFamilyAdmin,
-                    shape = RoundedCornerShape(20.dp),
-                    color = Color.White,
-                    tonalElevation = 2.dp,
-                    border = BorderStroke(1.dp, OutlineLight),
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 1.dp,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                     modifier = Modifier
                         .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .then(
+                            if (currentMember.isParent) {
+                                Modifier.clickable { onOpenFamilyAdmin() }
+                            } else {
+                                Modifier
+                            }
+                        )
                         .testTag("our_family_banner_card")
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier.weight(1f)
                         ) {
                             // Stacked family avatars
                             Row(horizontalArrangement = Arrangement.spacedBy((-6).dp)) {
                                 members.take(4).forEach { m ->
                                     Box(
                                         modifier = Modifier
-                                            .size(34.dp)
+                                            .size(32.dp)
                                             .clip(CircleShape)
-                                            .background(Color(m.colorHex).copy(alpha = 0.2f))
-                                            .border(1.5.dp, Color.White, CircleShape),
+                                            .background(Color(m.colorHex).copy(alpha = 0.18f))
+                                            .border(1.5.dp, MaterialTheme.colorScheme.surface, CircleShape),
                                         contentAlignment = Alignment.Center
                                     ) {
-                                        Text(text = m.avatarEmoji, fontSize = 17.sp)
+                                        Text(text = m.avatarEmoji, fontSize = 15.sp)
                                     }
                                 }
                             }
 
                             Column {
                                 Text(
-                                    text = if (isHebrew) "המשפחה שלנו" else "Our Family",
+                                    text = if (isHebrew) "שלום, ${currentMember.name}" else "Hello, ${currentMember.name}",
                                     style = MaterialTheme.typography.titleMedium.copy(
                                         fontWeight = FontWeight.Bold,
-                                        color = TextPrimary
+                                        color = MaterialTheme.colorScheme.onSurface
                                     )
                                 )
                                 Text(
-                                    text = if (isHebrew) "${members.size} חברים בבית" else "${members.size} members",
+                                    text = if (isHebrew)
+                                        "המשפחה שלנו • ${members.size} חברים פעילים"
+                                    else
+                                        "Our Family • ${members.size} active members",
                                     style = MaterialTheme.typography.labelSmall.copy(
-                                        color = TextSecondary,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         fontWeight = FontWeight.Medium
                                     )
                                 )
                             }
                         }
 
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
-                            contentDescription = null,
-                            tint = VibrantActionBlue,
-                            modifier = Modifier.size(16.dp)
-                        )
+                        if (currentMember.isParent) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = GoogleBlueLight,
+                                border = BorderStroke(1.dp, GoogleBlue.copy(alpha = 0.2f))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        text = if (isHebrew) "ניהול" else "Manage",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = GoogleBlueDark
+                                        )
+                                    )
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
+                                        contentDescription = null,
+                                        tint = GoogleBlueDark,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
 
-            // 3. Stats Row (matches Image 1 Right Phone & Image 2 Screen 2)
+            // 2. Compact Soft-Tactile Stats Row
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // Total Points Card (Yellow pastel)
+                    // Total Points Card (Soft warm amber/coral)
                     Surface(
                         onClick = onOpenRewards,
-                        shape = RoundedCornerShape(22.dp),
+                        shape = RoundedCornerShape(18.dp),
                         color = PastelYellowBackground,
                         border = BorderStroke(1.dp, PastelYellowBorder),
                         modifier = Modifier
                             .weight(1f)
-                            .height(88.dp)
+                            .height(74.dp)
                             .testTag("stat_card_points")
                     ) {
                         Row(
@@ -252,32 +260,45 @@ fun TasksScreen(
                             Column(verticalArrangement = Arrangement.Center) {
                                 Text(
                                     text = "$totalPoints",
-                                    style = MaterialTheme.typography.headlineMedium.copy(
+                                    style = MaterialTheme.typography.titleLarge.copy(
                                         fontWeight = FontWeight.ExtraBold,
                                         color = PastelYellowDark
                                     )
                                 )
                                 Text(
-                                    text = if (isHebrew) "נקודות כוללות" else "Total Points",
+                                    text = if (isHebrew) "נקודות לפרסים" else "Reward Points",
                                     style = MaterialTheme.typography.labelSmall.copy(
-                                        color = PastelYellowDark.copy(alpha = 0.8f),
-                                        fontWeight = FontWeight.Bold
+                                        color = PastelYellowDark.copy(alpha = 0.85f),
+                                        fontWeight = FontWeight.SemiBold
                                     )
                                 )
                             }
-                            Text(text = "⭐", fontSize = 28.sp)
+                            Surface(
+                                shape = CircleShape,
+                                color = PastelYellowBorder.copy(alpha = 0.45f),
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.EmojiEvents,
+                                        contentDescription = null,
+                                        tint = PastelYellowDark,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
                         }
                     }
 
-                    // Completed Chores Card (Green pastel)
+                    // Completed Chores Card (Soft sage/mint)
                     Surface(
                         onClick = { filterTab = 3 },
-                        shape = RoundedCornerShape(22.dp),
+                        shape = RoundedCornerShape(18.dp),
                         color = PastelGreenBackground,
                         border = BorderStroke(1.dp, PastelGreenBorder),
                         modifier = Modifier
                             .weight(1f)
-                            .height(88.dp)
+                            .height(74.dp)
                             .testTag("stat_card_completed")
                     ) {
                         Row(
@@ -290,89 +311,30 @@ fun TasksScreen(
                             Column(verticalArrangement = Arrangement.Center) {
                                 Text(
                                     text = "$completedThisMonth",
-                                    style = MaterialTheme.typography.headlineMedium.copy(
+                                    style = MaterialTheme.typography.titleLarge.copy(
                                         fontWeight = FontWeight.ExtraBold,
                                         color = PastelGreenDark
                                     )
                                 )
                                 Text(
-                                    text = if (isHebrew) "משימות החודש" else "Monthly Tasks",
+                                    text = if (isHebrew) "הושלמו החודש" else "Done This Month",
                                     style = MaterialTheme.typography.labelSmall.copy(
-                                        color = PastelGreenDark.copy(alpha = 0.8f),
-                                        fontWeight = FontWeight.Bold
+                                        color = PastelGreenDark.copy(alpha = 0.85f),
+                                        fontWeight = FontWeight.SemiBold
                                     )
                                 )
                             }
-                            Text(text = "✅", fontSize = 28.sp)
-                        }
-                    }
-                }
-            }
-
-            // 4. Section Title & Role-Appropriate Action Banner (PARENT can create tasks; CHILD views assigned tasks)
-            item {
-                Column {
-                    Text(
-                        text = if (isHebrew) "המשימות שלי" else "My Tasks",
-                        style = MaterialTheme.typography.titleLarge.copy(
-                            fontWeight = FontWeight.ExtraBold,
-                            color = TextPrimary
-                        ),
-                        modifier = Modifier.padding(bottom = 10.dp)
-                    )
-
-                    if (currentMember.isParent) {
-                        Button(
-                            onClick = onAddNewTask,
-                            shape = RoundedCornerShape(28.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = VibrantActionBlue),
-                            elevation = ButtonDefaults.buttonElevation(defaultElevation = 4.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(54.dp)
-                                .testTag("add_task_primary_button")
-                        ) {
-                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = if (isHebrew) "+ הוסף משימה" else "+ Add Task",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp,
-                                color = Color.White
-                            )
-                        }
-                    } else {
-                        Surface(
-                            shape = RoundedCornerShape(20.dp),
-                            color = PastelGreenBackground,
-                            border = BorderStroke(1.dp, PastelGreenBorder),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("child_role_info_banner")
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            Surface(
+                                shape = CircleShape,
+                                color = PastelGreenBorder.copy(alpha = 0.45f),
+                                modifier = Modifier.size(36.dp)
                             ) {
-                                Text(text = "🌟", fontSize = 22.sp)
-                                Column {
-                                    Text(
-                                        text = if (isHebrew)
-                                            "מחובר כילד/ה (${currentMember.name})"
-                                        else
-                                            "Signed in as Child (${currentMember.name})",
-                                        style = MaterialTheme.typography.labelLarge.copy(
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = PastelGreenDark
-                                        )
-                                    )
-                                    Text(
-                                        text = if (isHebrew)
-                                            "סמנו כבוצע את המשימות שמשויכות אליכם כדי לצבור נקודות לפרסים!"
-                                        else
-                                            "Complete tasks assigned to you to earn reward points!",
-                                        style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.TaskAlt,
+                                        contentDescription = null,
+                                        tint = PastelGreenDark,
+                                        modifier = Modifier.size(20.dp)
                                     )
                                 }
                             }
@@ -381,7 +343,90 @@ fun TasksScreen(
                 }
             }
 
-            // 5. Filter Tabs & Search Bar (matches Image 2 Screen 3)
+            // 3. Role-Appropriate Action / Status Bar (PARENT can create tasks; CHILD views assigned tasks)
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = if (isHebrew) "משימות המשפחה" else "Family Tasks",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    )
+
+                    if (currentMember.isParent) {
+                        Button(
+                            onClick = onAddNewTask,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                            elevation = ButtonDefaults.buttonElevation(defaultElevation = 1.dp),
+                            modifier = Modifier
+                                .height(38.dp)
+                                .testTag("add_task_primary_button")
+                        ) {
+                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isHebrew) "+ הוסף משימה" else "+ Add Task",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+
+                if (!currentMember.isParent) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = PastelGreenBackground,
+                        border = BorderStroke(1.dp, PastelGreenBorder),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("child_role_info_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.VerifiedUser,
+                                contentDescription = null,
+                                tint = PastelGreenDark,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = if (isHebrew)
+                                        "מחובר כילד/ה (${currentMember.name})"
+                                    else
+                                        "Signed in as Child (${currentMember.name})",
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = PastelGreenDark
+                                    )
+                                )
+                                Text(
+                                    text = if (isHebrew)
+                                        "סמנו כבוצע את המשימות שמשויכות אליכם כדי לשלוח לאישור הורה ולצבור נקודות"
+                                    else
+                                        "Complete tasks assigned to you to submit for parent approval",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Compact Filter Tabs, Search Bar & Member Chips
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     // Filter Pills
@@ -411,26 +456,42 @@ fun TasksScreen(
                         )
                     }
 
-                    // Search text field
+                    // Compact Search field
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
-                        placeholder = { Text(if (isHebrew) "חיפוש משימות..." else "Search chores...") },
-                        leadingIcon = { Icon(imageVector = Icons.Default.Search, contentDescription = null, tint = TextSecondary) },
+                        placeholder = {
+                            Text(
+                                text = if (isHebrew) "חיפוש משימות..." else "Search tasks...",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
                         trailingIcon = {
                             if (searchQuery.isNotBlank()) {
                                 IconButton(onClick = { searchQuery = "" }) {
-                                    Icon(imageVector = Icons.Default.Close, contentDescription = "Clear")
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Clear",
+                                        modifier = Modifier.size(18.dp)
+                                    )
                                 }
                             }
                         },
                         singleLine = true,
-                        shape = RoundedCornerShape(16.dp),
+                        shape = RoundedCornerShape(14.dp),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedContainerColor = Color.White,
-                            unfocusedContainerColor = Color.White,
-                            focusedBorderColor = VibrantActionBlue,
-                            unfocusedBorderColor = OutlineLight
+                            focusedContainerColor = MaterialTheme.colorScheme.surface,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -439,24 +500,29 @@ fun TasksScreen(
 
                     // Member Avatars Filter
                     LazyRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         item {
+                            val isAllSelected = selectedMemberFilter == null
                             Surface(
-                                shape = RoundedCornerShape(14.dp),
-                                color = if (selectedMemberFilter == null) GoogleBlueLight else Color.White,
-                                border = BorderStroke(1.dp, if (selectedMemberFilter == null) VibrantActionBlue else OutlineLight),
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isAllSelected) GoogleBlueLight else MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isAllSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                                ),
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(14.dp))
+                                    .clip(RoundedCornerShape(12.dp))
                                     .clickable { onFilterChange(null) }
+                                    .testTag("filter_member_all")
                             ) {
                                 Text(
                                     text = if (isHebrew) "כל החברים" else "All Members",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 12.sp,
-                                    color = if (selectedMemberFilter == null) VibrantActionBlue else TextSecondary,
+                                    color = if (isAllSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                                 )
                             }
@@ -465,24 +531,28 @@ fun TasksScreen(
                         items(members) { m ->
                             val isSelected = selectedMemberFilter == m.id
                             Surface(
-                                shape = RoundedCornerShape(14.dp),
-                                color = if (isSelected) GoogleBlueLight else Color.White,
-                                border = BorderStroke(1.dp, if (isSelected) VibrantActionBlue else OutlineLight),
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isSelected) GoogleBlueLight else MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                                ),
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(14.dp))
+                                    .clip(RoundedCornerShape(12.dp))
                                     .clickable { onFilterChange(m.id) }
+                                    .testTag("filter_member_${m.id}")
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
-                                    Text(text = m.avatarEmoji, fontSize = 14.sp)
+                                    Text(text = m.avatarEmoji, fontSize = 13.sp)
                                     Text(
                                         text = m.name,
                                         fontSize = 12.sp,
                                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (isSelected) VibrantActionBlue else TextPrimary
+                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                                     )
                                 }
                             }
@@ -491,12 +561,12 @@ fun TasksScreen(
                 }
             }
 
-            // 5b. Clear Hebrew Error Banner when a task write or approval fails
+            // 5. Clear Hebrew Error Banner when a task write or approval fails
             if (!taskOperationError.isNullOrBlank()) {
                 item {
                     Surface(
-                        shape = RoundedCornerShape(18.dp),
-                        color = Color(0xFFFEF2F2),
+                        shape = RoundedCornerShape(16.dp),
+                        color = GoogleRedLight,
                         border = BorderStroke(1.dp, GoogleRed),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -505,7 +575,7 @@ fun TasksScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
@@ -514,12 +584,17 @@ fun TasksScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Text(text = "⚠️", fontSize = 20.sp)
+                                Icon(
+                                    imageVector = Icons.Default.ErrorOutline,
+                                    contentDescription = null,
+                                    tint = GoogleRed,
+                                    modifier = Modifier.size(20.dp)
+                                )
                                 Column {
                                     Text(
                                         text = if (isHebrew) "שגיאה בשמירת המשימה בענן" else "Cloud Task Sync Error",
                                         style = MaterialTheme.typography.labelLarge.copy(
-                                            fontWeight = FontWeight.ExtraBold,
+                                            fontWeight = FontWeight.Bold,
                                             color = GoogleRed
                                         )
                                     )
@@ -551,28 +626,33 @@ fun TasksScreen(
             if (filteredTasks.isEmpty()) {
                 item {
                     Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = Color.White,
-                        border = BorderStroke(1.dp, OutlineLight),
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 20.dp)
+                            .padding(vertical = 12.dp)
                     ) {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier.padding(28.dp)
+                            modifier = Modifier.padding(24.dp)
                         ) {
-                            Text(text = if (filterTab == 3) "🏆" else "✨", fontSize = 42.sp)
-                            Spacer(modifier = Modifier.height(10.dp))
+                            Icon(
+                                imageVector = if (filterTab == 3) Icons.Default.EmojiEvents else Icons.Default.CheckCircleOutline,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
                             Text(
                                 text = if (filterTab == 3) {
                                     if (isHebrew) "אין משימות שהושלמו בסינון זה" else "No completed tasks in this view"
                                 } else {
-                                    if (isHebrew) "אין משימות ממתינות! הכל נקי ומסודר 👏" else "All chores are done! Awesome"
+                                    if (isHebrew) "אין משימות ממתינות! הכל נקי ומסודר" else "All tasks are done!"
                                 },
                                 fontWeight = FontWeight.Bold,
-                                color = TextPrimary,
-                                fontSize = 15.sp
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontSize = 14.sp
                             )
                         }
                     }
@@ -593,72 +673,64 @@ fun TasksScreen(
                         isHebrew = isHebrew,
                         onToggle = { onToggleTask(task.id) },
                         onApprove = { onApproveTask(task.id) },
+                        onEdit = { onEditTask(task) },
+                        onDelete = { onDeleteTask(task.id) },
+                        onSendNudge = { onSendNudge(task) },
                         onCardClick = { selectedTaskForDetail = task }
                     )
                 }
             }
 
-            // 7. "🏆 ההישגים שלנו" (Our Achievements - matches Image 1 Right Phone)
+            // 7. Compact Soft-Lavender Household Champion Card
             item {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = if (isHebrew) "ההישגים שלנו 🏆" else "Our Achievements 🏆",
-                    style = MaterialTheme.typography.titleMedium.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary
-                    )
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
                 Surface(
                     onClick = onOpenRewards,
-                    shape = RoundedCornerShape(22.dp),
+                    shape = RoundedCornerShape(18.dp),
                     color = PastelPurpleBackground,
                     border = BorderStroke(1.dp, PastelPurpleBorder),
-                    tonalElevation = 2.dp,
+                    tonalElevation = 1.dp,
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("achievement_champion_card")
                 ) {
-                    Box(
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(
-                                Brush.horizontalGradient(
-                                    colors = listOf(
-                                        Color(0xFFEDE4FF),
-                                        Color(0xFFF7F3FF),
-                                        Color(0xFFE9DCFC)
-                                    )
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(
+                                text = if (isHebrew) "מוביל הנקודות במשפחה" else "Household Points Leader",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = PastelPurpleDark
                                 )
                             )
-                            .padding(18.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column {
-                                Text(
-                                    text = if (isHebrew) "!אלוף המשפחה" else "Household Champion!",
-                                    style = MaterialTheme.typography.titleLarge.copy(
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = PastelPurpleDark
-                                    )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "${topChampion.avatarEmoji} ${topChampion.name} • ${topChampion.earnedPoints} ${if (isHebrew) "נקודות" else "points"}",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = TextSecondary,
+                                    fontWeight = FontWeight.SemiBold
                                 )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = "${topChampion.name} • ${topChampion.earnedPoints} ${if (isHebrew) "נקודות" else "points"}",
-                                    style = MaterialTheme.typography.bodyMedium.copy(
-                                        color = TextSecondary,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
+                            )
+                        }
+
+                        Surface(
+                            shape = CircleShape,
+                            color = PastelPurpleBorder.copy(alpha = 0.5f),
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.WorkspacePremium,
+                                    contentDescription = null,
+                                    tint = PastelPurpleDark,
+                                    modifier = Modifier.size(22.dp)
                                 )
                             }
-
-                            Text(text = "👑", fontSize = 36.sp)
                         }
                     }
                 }
@@ -666,7 +738,7 @@ fun TasksScreen(
         }
     }
 
-    // Modal Task Details Dialog (matches Image 2 Screen 4)
+    // Modal Task Details Bottom Sheet / Dialog
     selectedTaskForDetail?.let { activeTask ->
         val latestTask = tasks.find { it.id == activeTask.id } ?: activeTask
         val activeAssignee = members.find { it.id == latestTask.assignedToMemberId }
@@ -695,24 +767,32 @@ fun TasksScreen(
 private fun TaskItemCardModern(
     task: FamilyTask,
     assignedMember: FamilyMember?,
-    currentMember: FamilyMember = FamilyMember(id = "", name = "", role = UserRole.PARENT, colorHex = 0xFF1A73E8),
+    currentMember: FamilyMember = FamilyMember(id = "", name = "", role = UserRole.PARENT, colorHex = 0xFF2B6CB0),
     syncState: TaskCompletionSyncState = TaskCompletionSyncState.IDLE,
     isHebrew: Boolean,
     onToggle: () -> Unit,
     onApprove: () -> Unit = {},
+    onEdit: () -> Unit = {},
+    onDelete: () -> Unit = {},
+    onSendNudge: () -> Unit = {},
     onCardClick: () -> Unit
 ) {
     val isPendingApproval = task.isCompleted && !task.approvedByParent
     val isFullyApproved = task.isCompleted && task.approvedByParent
     val isSaving = syncState == TaskCompletionSyncState.SAVING
     val isFailed = syncState == TaskCompletionSyncState.FAILED
+    val canToggle = currentMember.isParent ||
+        task.assignedToMemberId == currentMember.id ||
+        task.assignedToMemberId.isBlank()
+
+    var showContextMenu by remember { mutableStateOf(false) }
 
     val checkBgColor by animateColorAsState(
         targetValue = when {
-            isSaving -> VibrantActionBlue.copy(alpha = 0.2f)
-            isFailed -> Color(0xFFFEE2E2)
-            isFullyApproved -> Color(0xFF10B981)
-            isPendingApproval -> Color(0xFFF59E0B)
+            isSaving -> GoogleBlue.copy(alpha = 0.18f)
+            isFailed -> GoogleRedLight
+            isFullyApproved -> GoogleGreen
+            isPendingApproval -> GoogleYellow
             else -> Color.Transparent
         },
         animationSpec = spring(),
@@ -721,20 +801,24 @@ private fun TaskItemCardModern(
 
     val cardBorderColor = when {
         isFailed -> GoogleRed
-        isSaving -> VibrantActionBlue
+        isSaving -> GoogleBlue
         isFullyApproved -> PastelGreenBorder
         isPendingApproval -> PastelYellowBorder
-        else -> OutlineLight
+        else -> MaterialTheme.colorScheme.outlineVariant
+    }
+
+    val normalizedTime = remember(task.dueTimeFormatted) {
+        TimeFormatUtils.normalize24HourString(task.dueTimeFormatted)
     }
 
     Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = Color.White,
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
         border = BorderStroke(1.dp, cardBorderColor),
-        tonalElevation = 2.dp,
+        tonalElevation = 1.dp,
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(18.dp))
             .clickable { onCardClick() }
             .testTag("task_card_${task.id}")
     ) {
@@ -748,7 +832,7 @@ private fun TaskItemCardModern(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // Checkbox button on the left (RTL aligned)
+                // Checkbox button (interactive only if user is permitted to toggle this task)
                 Box(
                     modifier = Modifier
                         .size(34.dp)
@@ -758,14 +842,15 @@ private fun TaskItemCardModern(
                             2.dp,
                             when {
                                 isFailed -> GoogleRed
-                                isSaving -> VibrantActionBlue
-                                isFullyApproved -> Color(0xFF10B981)
-                                isPendingApproval -> Color(0xFFF59E0B)
-                                else -> Color(0xFFCBD5E1)
+                                isSaving -> GoogleBlue
+                                isFullyApproved -> GoogleGreen
+                                isPendingApproval -> GoogleYellow
+                                canToggle -> Color(0xFF94A3B8)
+                                else -> Color(0xFFE2E8F0)
                             },
                             CircleShape
                         )
-                        .clickable(enabled = !isSaving) { onToggle() }
+                        .clickable(enabled = !isSaving && canToggle) { onToggle() }
                         .testTag("task_toggle_${task.id}"),
                     contentAlignment = Alignment.Center
                 ) {
@@ -774,7 +859,7 @@ private fun TaskItemCardModern(
                             CircularProgressIndicator(
                                 modifier = Modifier.size(16.dp),
                                 strokeWidth = 2.dp,
-                                color = VibrantActionBlue
+                                color = GoogleBlue
                             )
                         }
                         task.isCompleted -> {
@@ -782,7 +867,15 @@ private fun TaskItemCardModern(
                                 imageVector = Icons.Default.Check,
                                 contentDescription = "Completed",
                                 tint = Color.White,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        !canToggle -> {
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = "Read Only",
+                                tint = Color(0xFFCBD5E1),
+                                modifier = Modifier.size(14.dp)
                             )
                         }
                     }
@@ -790,27 +883,27 @@ private fun TaskItemCardModern(
 
                 Spacer(modifier = Modifier.width(12.dp))
 
-                // Task Title, Points, Sync Status & Member info
+                // Task Title, 24h Time, Points, Sync Status & Member info
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = task.title,
                         style = MaterialTheme.typography.bodyLarge.copy(
-                            fontWeight = FontWeight.Bold,
+                            fontWeight = FontWeight.SemiBold,
                             textDecoration = if (isFullyApproved) TextDecoration.LineThrough else TextDecoration.None,
-                            color = if (isFullyApproved) Color(0xFF94A3B8) else TextPrimary
+                            color = if (isFullyApproved) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
                         ),
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
 
-                    Spacer(modifier = Modifier.height(3.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
 
                     val statusLabel = when {
-                        isSaving -> if (isHebrew) "שומר בענן... ⏳" else "Saving... ⏳"
-                        isFailed -> if (isHebrew) "שגיאה בשמירה • שוחזר ⚠️" else "Save failed ⚠️"
-                        isPendingApproval -> if (isHebrew) "נשמר • ממתין לאישור הורה ⏳" else "Pending approval ⏳"
+                        isSaving -> if (isHebrew) "שומר בענן..." else "Saving..."
+                        isFailed -> if (isHebrew) "שגיאה בשמירה • שוחזר" else "Save failed"
+                        isPendingApproval -> if (isHebrew) "נשמר • ממתין לאישור הורה" else "Pending approval"
                         isFullyApproved -> if (isHebrew) "נשמר • הושלם ואושר ✓" else "Saved & Approved ✓"
-                        else -> if (isHebrew) "היום" else "Today"
+                        else -> normalizedTime
                     }
                     val statusTag = when {
                         isSaving -> "task_status_saving_${task.id}"
@@ -820,11 +913,11 @@ private fun TaskItemCardModern(
                         else -> "task_status_idle_${task.id}"
                     }
                     val statusColor = when {
-                        isSaving -> VibrantActionBlue
+                        isSaving -> GoogleBlue
                         isFailed -> GoogleRed
                         isPendingApproval -> PastelYellowDark
-                        isFullyApproved -> Color(0xFF10B981)
-                        else -> TextSecondary
+                        isFullyApproved -> GoogleGreenDark
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
                     }
 
                     Row(
@@ -832,10 +925,10 @@ private fun TaskItemCardModern(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = "${task.points} ${if (isHebrew) "נקודות" else "pts"}",
+                            text = "${task.points} ${if (isHebrew) "נק׳" else "pts"}",
                             style = MaterialTheme.typography.labelSmall.copy(
                                 fontWeight = FontWeight.Bold,
-                                color = if (isFullyApproved) Color(0xFF10B981) else Color(0xFFE11D48)
+                                color = if (isFullyApproved) GoogleGreenDark else WarmCoralDark
                             )
                         )
 
@@ -855,32 +948,100 @@ private fun TaskItemCardModern(
                             Text(
                                 text = "${assignedMember.avatarEmoji} ${assignedMember.name}",
                                 style = MaterialTheme.typography.labelSmall.copy(
-                                    color = TextSecondary,
-                                    fontWeight = FontWeight.SemiBold
-                                )
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontWeight = FontWeight.Medium
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.width(10.dp))
+                Spacer(modifier = Modifier.width(8.dp))
 
-                // Right Category Icon badge (matches Image 1 Right Phone)
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = when (task.category) {
-                        TaskCategory.BEDROOM -> Color(0xFFEFF6FF)
-                        TaskCategory.DISHES -> Color(0xFFECFDF5)
-                        TaskCategory.HOMEWORK -> Color(0xFFFAF5FF)
-                        TaskCategory.CLEANING -> Color(0xFFF0FDF4)
-                        TaskCategory.GROCERIES -> Color(0xFFFDF2F8)
-                        TaskCategory.PETS -> Color(0xFFFFFBEB)
-                        else -> Color(0xFFF8FAFC)
-                    },
-                    modifier = Modifier.size(44.dp)
+                // Category badge + Contextual menu for PARENT secondary actions
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(text = task.category.defaultEmoji, fontSize = 22.sp)
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = when (task.category) {
+                            TaskCategory.BEDROOM -> GoogleBlueLight
+                            TaskCategory.DISHES -> PastelGreenBackground
+                            TaskCategory.HOMEWORK -> SoftLavenderLight
+                            TaskCategory.CLEANING -> SoftTealLight
+                            TaskCategory.GROCERIES -> WarmCoralLight
+                            TaskCategory.PETS -> PastelYellowBackground
+                            else -> MaterialTheme.colorScheme.surfaceVariant
+                        },
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(text = task.category.defaultEmoji, fontSize = 18.sp)
+                        }
+                    }
+
+                    if (currentMember.isParent) {
+                        Box {
+                            IconButton(
+                                onClick = { showContextMenu = true },
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .testTag("task_menu_${task.id}")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.MoreVert,
+                                    contentDescription = if (isHebrew) "אפשרויות משימה" else "Task Options",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+
+                            DropdownMenu(
+                                expanded = showContextMenu,
+                                onDismissRequest = { showContextMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(if (isHebrew) "ערוך משימה" else "Edit Task") },
+                                    leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                                    onClick = {
+                                        showContextMenu = false
+                                        onEdit()
+                                    }
+                                )
+                                if (!task.isCompleted) {
+                                    DropdownMenuItem(
+                                        text = { Text(if (isHebrew) "שלח תזכורת" else "Send Reminder") },
+                                        leadingIcon = { Icon(Icons.Default.NotificationsActive, contentDescription = null) },
+                                        onClick = {
+                                            showContextMenu = false
+                                            onSendNudge()
+                                        }
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = if (isHebrew) "מחק משימה" else "Delete Task",
+                                            color = GoogleRed
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Default.DeleteOutline,
+                                            contentDescription = null,
+                                            tint = GoogleRed
+                                        )
+                                    },
+                                    onClick = {
+                                        showContextMenu = false
+                                        onDelete()
+                                    }
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -888,38 +1049,47 @@ private fun TaskItemCardModern(
             // Parent Approval Action Bar when a child has marked the task completed
             if (currentMember.isParent && isPendingApproval && !isSaving) {
                 Spacer(modifier = Modifier.height(10.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = PastelYellowBackground,
+                    border = BorderStroke(1.dp, PastelYellowBorder),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        text = if (isHebrew)
-                            "סומן כבוצע ע\"י ${assignedMember?.name ?: "הילד/ה"} וממתין לאישורך"
-                        else
-                            "Completed by ${assignedMember?.name ?: "child"} — awaiting parent approval",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            color = PastelYellowDark,
-                            fontWeight = FontWeight.SemiBold
-                        ),
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = onApprove,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    Row(
                         modifier = Modifier
-                            .height(34.dp)
-                            .testTag("approve_task_${task.id}")
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
-                            text = if (isHebrew) "אשר ביצוע ✓" else "Approve ✓",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
+                            text = if (isHebrew)
+                                "סומן כבוצע ע\"י ${assignedMember?.name ?: "הילד/ה"} וממתין לאישורך"
+                            else
+                                "Completed by ${assignedMember?.name ?: "child"} — awaiting approval",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = PastelYellowDark,
+                                fontWeight = FontWeight.SemiBold
+                            ),
+                            modifier = Modifier.weight(1f)
                         )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = onApprove,
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = GoogleGreen),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .height(34.dp)
+                                .testTag("approve_task_${task.id}")
+                        ) {
+                            Text(
+                                text = if (isHebrew) "אשר ביצוע ✓" else "Approve ✓",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
                     }
                 }
             }
@@ -934,12 +1104,15 @@ private fun RowScope.FilterPillChip(
     onClick: () -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = if (isSelected) VibrantActionBlue else Color.White,
-        border = BorderStroke(1.dp, if (isSelected) VibrantActionBlue else OutlineLight),
+        shape = RoundedCornerShape(14.dp),
+        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+        border = BorderStroke(
+            1.dp,
+            if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+        ),
         modifier = Modifier
             .weight(1f)
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(14.dp))
             .clickable { onClick() }
     ) {
         Box(
@@ -948,9 +1121,9 @@ private fun RowScope.FilterPillChip(
         ) {
             Text(
                 text = label,
-                color = if (isSelected) Color.White else TextSecondary,
+                color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
                 fontWeight = FontWeight.Bold,
-                fontSize = 13.sp
+                fontSize = 12.sp
             )
         }
     }
@@ -970,8 +1143,12 @@ fun TaskCardItem(
     TaskItemCardModern(
         task = task,
         assignedMember = assignedMember,
+        currentMember = currentMember,
         isHebrew = isHebrew,
         onToggle = onToggle,
+        onEdit = onEdit,
+        onDelete = onDelete,
+        onSendNudge = onSendNudge,
         onCardClick = onEdit
     )
 }

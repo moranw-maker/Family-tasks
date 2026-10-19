@@ -2087,6 +2087,74 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         )
     }
 
+    @Test
+    fun testV100_multiDeviceFcmTokenRegistrationRefreshLogoutAndCrossUserIsolation() = runBlocking {
+        val ts = System.currentTimeMillis()
+        val aliceEmail = "alice_fcm_$ts@test.com"
+        val bobEmail = "bob_fcm_$ts@test.com"
+
+        // 1. Alice signs in and registers two devices (phone + tablet) under her authenticated UID
+        val aliceUid = signInTestUser(aliceEmail)
+        val aliceRepo = repo()
+        val phoneToken = "fcm_token_alice_phone_$ts"
+        val tabletToken = "fcm_token_alice_tablet_$ts"
+
+        val regPhoneRes = withTimeout(timeoutMs) {
+            aliceRepo.registerDeviceFcmTokenInCloud(
+                token = phoneToken,
+                familyId = "fam_fcm_$ts",
+                role = UserRole.PARENT
+            )
+        }
+        assertTrue("Alice registering phone FCM token must succeed: ${regPhoneRes.exceptionOrNull()}", regPhoneRes.isSuccess)
+
+        val regTabletRes = withTimeout(timeoutMs) {
+            aliceRepo.registerDeviceFcmTokenInCloud(
+                token = tabletToken,
+                familyId = "fam_fcm_$ts",
+                role = UserRole.PARENT
+            )
+        }
+        assertTrue("Alice registering tablet FCM token must succeed: ${regTabletRes.exceptionOrNull()}", regTabletRes.isSuccess)
+
+        val aliceTokens = withTimeout(timeoutMs) {
+            aliceRepo.getDeviceFcmTokensFromCloud(aliceUid)
+        }.getOrThrow()
+        assertEquals("Alice must have 2 registered device tokens", 2, aliceTokens.size)
+        assertTrue(aliceTokens.contains(phoneToken))
+        assertTrue(aliceTokens.contains(tabletToken))
+
+        // 2. Bob signs in and attempts to read or delete Alice's FCM tokens -> MUST FAIL (PERMISSION_DENIED)
+        val bobUid = signInTestUser(bobEmail)
+        val bobRepo = repo()
+        val bobReadAliceTokens = withTimeout(timeoutMs) {
+            bobRepo.getDeviceFcmTokensFromCloud(aliceUid)
+        }
+        assertTrue("Bob must be denied reading Alice's FCM tokens", bobReadAliceTokens.isFailure)
+
+        val phoneTokenId = com.example.notifications.FcmTokenManager.computeTokenId(phoneToken)
+        val bobDeleteAliceToken = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("users").document(aliceUid)
+                    .collection("fcm_tokens").document(phoneTokenId)
+                    .delete().awaitTask()
+            }
+        }
+        assertTrue("Bob must be denied deleting Alice's FCM token", bobDeleteAliceToken.isFailure)
+
+        // 3. Alice signs back in and cleans up her tablet token on logout
+        signInTestUser(aliceEmail)
+        val deleteTabletRes = withTimeout(timeoutMs) {
+            aliceRepo.deleteDeviceFcmTokenInCloud(tabletToken)
+        }
+        assertTrue("Alice deleting her own tablet token on logout must succeed", deleteTabletRes.isSuccess)
+
+        val remainingTokens = withTimeout(timeoutMs) {
+            aliceRepo.getDeviceFcmTokensFromCloud(aliceUid)
+        }.getOrThrow()
+        assertEquals("Only phone token should remain after tablet logout", listOf(phoneToken), remainingTokens)
+    }
+
     private val activeRepos = mutableListOf<FamilyRepository>()
 
     private fun repo(): FamilyRepository {

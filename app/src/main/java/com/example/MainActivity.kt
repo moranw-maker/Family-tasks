@@ -306,7 +306,9 @@ fun FamilyTasksApp(
                                             onEditTask = { viewModel.openAddTaskDialog(it) },
                                             onDeleteTask = { viewModel.deleteTask(it) },
                                             onSendNudge = { viewModel.sendParentNudge(it) },
-                                            onAddNewTask = { viewModel.openAddTaskDialog(null) }
+                                            onAddNewTask = { viewModel.openAddTaskDialog(null) },
+                                            taskSyncStates = taskSyncStates,
+                                            onApproveTask = { viewModel.approveTaskCompletion(it) }
                                         )
                                     }
 
