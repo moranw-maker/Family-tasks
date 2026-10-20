@@ -402,8 +402,8 @@ test("Security: Child cannot create task with unauthorized self-approval or exce
     })
   );
 
-  // Child proposing a task (points = 0, approvedByParent = false) -> SUCCEEDS
-  await assertSucceeds(
+  // V1.6 Requirement 5: Child creating any task (even with 0 points) -> MUST FAIL
+  await assertFails(
     bobDb.collection("families").doc("fam_wexler").collection("tasks").doc("task_proposal").set({
       id: "task_proposal",
       familyId: "fam_wexler",
@@ -414,7 +414,21 @@ test("Security: Child cannot create task with unauthorized self-approval or exce
     })
   );
 
-  // Child attempting to approve proposal and give self points -> MUST FAIL
+  // Parent creating a task assigned to Bob -> SUCCEEDS
+  await assertSucceeds(
+    aliceDb.collection("families").doc("fam_wexler").collection("tasks").doc("task_proposal").set({
+      id: "task_proposal",
+      familyId: "fam_wexler",
+      title: "Assigned chore",
+      assignedUid: BOB_UID,
+      assignedToMemberId: BOB_UID,
+      points: 25,
+      approvedByParent: false,
+      isCompleted: false,
+    })
+  );
+
+  // Child attempting to approve task or alter points -> MUST FAIL
   await assertFails(
     bobDb.collection("families").doc("fam_wexler").collection("tasks").doc("task_proposal").update({
       approvedByParent: true,
@@ -422,11 +436,21 @@ test("Security: Child cannot create task with unauthorized self-approval or exce
     })
   );
 
-  // Parent authorizing proposal and assigning points -> SUCCEEDS
+  // Child completing assigned task (without self-approving) -> SUCCEEDS
+  await assertSucceeds(
+    bobDb.collection("families").doc("fam_wexler").collection("tasks").doc("task_proposal").update({
+      isCompleted: true,
+      completedAtMillis: 1700000000000,
+      completedByMemberId: BOB_UID,
+      updatedAt: 1700000000000,
+    })
+  );
+
+  // Parent approving the completed task -> SUCCEEDS
   await assertSucceeds(
     aliceDb.collection("families").doc("fam_wexler").collection("tasks").doc("task_proposal").update({
       approvedByParent: true,
-      points: 25,
+      updatedAt: 1700000005000,
     })
   );
 });
@@ -1332,4 +1356,248 @@ test("Regression V1.6: User can get own non-existent member doc and V1.5 legacy 
     })
   );
 });
+
+test("Regression V1.6: CHILD can complete assigned task (pending approval), cannot tamper with protected fields or sibling tasks, and PARENT can approve", async () => {
+  const parentDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const roiDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const siblingDb = testEnv.authenticatedContext("noa_child_789").firestore();
+
+  await parentDb.collection("families").doc("fam_v16_tasks").set({
+    id: "fam_v16_tasks",
+    familyId: "fam_v16_tasks",
+    familyName: "משפחת משימות",
+    createdById: ALICE_UID,
+    createdBy: ALICE_UID,
+    ownerUid: ALICE_UID,
+    memberIds: [ALICE_UID],
+    memberUids: [ALICE_UID],
+    adminUids: [ALICE_UID],
+  });
+  await parentDb.collection("families").doc("fam_v16_tasks").collection("members").doc(ALICE_UID).set({
+    id: ALICE_UID,
+    uid: ALICE_UID,
+    familyId: "fam_v16_tasks",
+    name: "אבא",
+    role: "PARENT",
+    familyIdentity: "FATHER",
+    earnedPoints: 0,
+    spentPoints: 0,
+  });
+  await parentDb.collection("families").doc("fam_v16_tasks").update({
+    memberIds: [ALICE_UID, BOB_UID, "noa_child_789"],
+    memberUids: [ALICE_UID, BOB_UID, "noa_child_789"],
+  });
+  await parentDb.collection("families").doc("fam_v16_tasks").collection("members").doc(BOB_UID).set({
+    id: BOB_UID,
+    uid: BOB_UID,
+    familyId: "fam_v16_tasks",
+    name: "רועי",
+    role: "CHILD",
+    familyIdentity: "SON",
+    earnedPoints: 0,
+    spentPoints: 0,
+  });
+  await parentDb.collection("families").doc("fam_v16_tasks").collection("members").doc("noa_child_789").set({
+    id: "noa_child_789",
+    uid: "noa_child_789",
+    familyId: "fam_v16_tasks",
+    name: "נועה",
+    role: "CHILD",
+    familyIdentity: "DAUGHTER",
+    earnedPoints: 0,
+    spentPoints: 0,
+  });
+
+  // Parent creates task assigned to Roi and task assigned to Noa
+  await assertSucceeds(
+    parentDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_roi").set({
+      id: "task_roi",
+      familyId: "fam_v16_tasks",
+      title: "סידור החדר של רועי",
+      assignedUid: BOB_UID,
+      assignedToMemberId: BOB_UID,
+      assignedMemberId: BOB_UID,
+      points: 20,
+      pointsValue: 20,
+      isCompleted: false,
+      approvedByParent: false,
+      updatedAt: 1700000000000,
+    })
+  );
+  await assertSucceeds(
+    parentDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_noa").set({
+      id: "task_noa",
+      familyId: "fam_v16_tasks",
+      title: "פינוי מדיח",
+      assignedUid: "noa_child_789",
+      assignedToMemberId: "noa_child_789",
+      assignedMemberId: "noa_child_789",
+      points: 15,
+      pointsValue: 15,
+      isCompleted: false,
+      approvedByParent: false,
+      updatedAt: 1700000000000,
+    })
+  );
+
+  // 1. Roi (CHILD) completes his assigned task -> SUCCEEDS
+  await assertSucceeds(
+    roiDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_roi").update({
+      isCompleted: true,
+      completedAtMillis: 1700000005000,
+      completedByMemberId: BOB_UID,
+      updatedAt: 1700000005000,
+    })
+  );
+
+  // 2. Roi is denied completing Noa's task -> MUST FAIL
+  await assertFails(
+    roiDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_noa").update({
+      isCompleted: true,
+      completedAtMillis: 1700000006000,
+      completedByMemberId: BOB_UID,
+      updatedAt: 1700000006000,
+    })
+  );
+
+  // 3. Roi is denied changing title, assignee, points, or self-approving (approvedByParent: true) -> MUST FAIL
+  await assertFails(
+    roiDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_roi").update({
+      title: "משימה קלה",
+      updatedAt: 1700000007000,
+    })
+  );
+  await assertFails(
+    roiDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_roi").update({
+      assignedToMemberId: "noa_child_789",
+      updatedAt: 1700000007000,
+    })
+  );
+  await assertFails(
+    roiDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_roi").update({
+      points: 500,
+      updatedAt: 1700000007000,
+    })
+  );
+  await assertFails(
+    roiDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_roi").update({
+      isCompleted: true,
+      approvedByParent: true,
+      updatedAt: 1700000007000,
+    })
+  );
+
+  // 4. Roi is denied creating or deleting tasks -> MUST FAIL
+  await assertFails(
+    roiDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_illegal").set({
+      id: "task_illegal",
+      familyId: "fam_v16_tasks",
+      title: "Illegal",
+      assignedUid: BOB_UID,
+      points: 0,
+      isCompleted: false,
+      approvedByParent: false,
+    })
+  );
+  await assertFails(
+    roiDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_roi").delete()
+  );
+
+  // 5. Parent approves Roi's completed task and awards points -> SUCCEEDS
+  await assertSucceeds(
+    parentDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_roi").update({
+      isCompleted: true,
+      approvedByParent: true,
+      updatedAt: 1700000010000,
+    })
+  );
+  await assertSucceeds(
+    parentDb.collection("families").doc("fam_v16_tasks").collection("members").doc(BOB_UID).update({
+      earnedPoints: 20,
+      updatedAt: 1700000010000,
+    })
+  );
+});
+
+test("V1.0.0 FCM Push Security: Authenticated user can register/refresh/delete own multi-device FCM tokens, cannot access another user's tokens, and notification_dispatches is server-only", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+
+  // 1. Unauthenticated user cannot read or register FCM tokens
+  await assertFails(
+    unauthDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_device_1").set({
+      uid: ALICE_UID,
+      tokenId: "tok_device_1",
+      token: "fcm_token_string_device_1_valid_length",
+      platform: "ANDROID",
+    })
+  );
+
+  // 2. Alice can register multiple devices under her own /users/{uid}/fcm_tokens/{tokenId}
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_phone_1").set({
+      uid: ALICE_UID,
+      tokenId: "tok_phone_1",
+      token: "fcm_token_string_phone_1_valid_length",
+      familyId: "fam_v16_tasks",
+      role: "PARENT",
+      platform: "ANDROID",
+      appVersion: "1.0.0",
+      updatedAt: 1700000020000,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_tablet_2").set({
+      uid: ALICE_UID,
+      tokenId: "tok_tablet_2",
+      token: "fcm_token_string_tablet_2_valid_length",
+      familyId: "fam_v16_tasks",
+      role: "PARENT",
+      platform: "ANDROID",
+      appVersion: "1.0.0",
+      updatedAt: 1700000021000,
+    })
+  );
+
+  // 3. Alice can refresh and delete her own token on logout
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_phone_1").update({
+      token: "fcm_token_string_phone_1_refreshed_valid",
+      updatedAt: 1700000025000,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_tablet_2").delete()
+  );
+
+  // 4. Bob cannot read, overwrite, or delete Alice's FCM tokens
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_phone_1").get()
+  );
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_phone_1").update({
+      token: "hijacked_token_string_valid_length",
+    })
+  );
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).collection("fcm_tokens").doc("tok_phone_1").delete()
+  );
+
+  // 5. Client cannot spoof uid or write to server-only /families/{familyId}/notification_dispatches
+  await assertFails(
+    bobDb.collection("users").doc(BOB_UID).collection("fcm_tokens").doc("tok_spoof").set({
+      uid: ALICE_UID,
+      tokenId: "tok_spoof",
+      token: "fcm_token_string_spoof_valid_length",
+    })
+  );
+  await assertFails(
+    aliceDb.collection("families").doc("fam_v16_tasks").collection("notification_dispatches").doc("disp_1").set({
+      dispatchedAt: 1700000030000,
+    })
+  );
+});
+
+
 

@@ -44,6 +44,8 @@ class FamilyViewModel(
     val startupState: StateFlow<StartupState> = repository.startupState
     val membershipState: StateFlow<FamilyMembershipState> = repository.membershipState
     val pendingInvitations: StateFlow<List<FamilyInvitation>> = repository.pendingInvitations
+    val taskSyncStates: StateFlow<Map<String, TaskCompletionSyncState>> = repository.taskSyncStates
+    val taskOperationError: StateFlow<String?> = repository.taskOperationError
 
     private val _validatedInvitationPreview = MutableStateFlow<FamilyInvitation?>(null)
     val validatedInvitationPreview: StateFlow<FamilyInvitation?> = _validatedInvitationPreview.asStateFlow()
@@ -53,6 +55,15 @@ class FamilyViewModel(
 
     private val _isProcessingFamilyAction = MutableStateFlow(false)
     val isProcessingFamilyAction: StateFlow<Boolean> = _isProcessingFamilyAction.asStateFlow()
+
+    private val _isCreatingInvitation = MutableStateFlow(false)
+    val isCreatingInvitation: StateFlow<Boolean> = _isCreatingInvitation.asStateFlow()
+
+    private val _invitationCreationError = MutableStateFlow<String?>(null)
+    val invitationCreationError: StateFlow<String?> = _invitationCreationError.asStateFlow()
+
+    private val _lastCreatedRoleFilter = MutableStateFlow(UserRole.CHILD)
+    val lastCreatedRoleFilter: StateFlow<UserRole> = _lastCreatedRoleFilter.asStateFlow()
 
     // Google Auth & Cloud Family Group streams
     val isGoogleSignedIn: StateFlow<Boolean> = repository.isGoogleSignedIn
@@ -97,8 +108,16 @@ class FamilyViewModel(
     private val _selectedChildForTimetable = MutableStateFlow("m_kid1")
     val selectedChildForTimetable: StateFlow<String> = _selectedChildForTimetable.asStateFlow()
 
-    private val _selectedFolderId = MutableStateFlow<String?>("f_school")
-    val selectedFolderId: StateFlow<String?> = _selectedFolderId.asStateFlow()
+    val selectedFolderId: StateFlow<String?> = repository.selectedFolderId
+    val activeUploads: StateFlow<List<FileUploadTaskState>> = repository.activeUploads
+    val fileSortOption: StateFlow<FileSortOption> = repository.fileSortOption
+    val fileSortAscending: StateFlow<Boolean> = repository.fileSortAscending
+    val fileSearchQuery: StateFlow<String> = repository.fileSearchQuery
+    val familyDriveConfig: StateFlow<FamilyDriveConfig> = repository.familyDriveConfig
+    val driveConsentPendingIntent: StateFlow<android.app.PendingIntent?> = repository.driveConsentPendingIntent
+    val driveConsentIntent: StateFlow<android.content.Intent?> = repository.driveConsentIntent
+    val pendingDrivePickerRequest: StateFlow<DrivePickerAuthorizationRequest?> = repository.pendingDrivePickerRequest
+    val drivePickerVerificationError: StateFlow<String?> = repository.drivePickerVerificationError
 
     // Dialog / BottomSheet Visibility States
     private val _showAddTaskDialog = MutableStateFlow(false)
@@ -145,6 +164,24 @@ class FamilyViewModel(
 
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            repository.taskOperationError.collect { err ->
+                if (!err.isNullOrBlank()) {
+                    _snackbarMessage.value = err
+                }
+            }
+        }
+        viewModelScope.launch {
+            repository.driveOperationMessage.collect { msg ->
+                if (!msg.isNullOrBlank()) {
+                    _snackbarMessage.value = msg
+                    repository.clearDriveOperationMessage()
+                }
+            }
+        }
+    }
 
     /**
      * Restores an existing FirebaseAuth session on application launch without restarting
@@ -204,7 +241,19 @@ class FamilyViewModel(
     }
 
     fun selectFolder(folderId: String?) {
-        _selectedFolderId.value = folderId
+        repository.selectFolder(folderId)
+    }
+
+    fun navigateUpFolder(): Boolean {
+        return repository.navigateUpFolder()
+    }
+
+    fun setFileSortOption(option: FileSortOption) {
+        repository.setFileSortOption(option)
+    }
+
+    fun setFileSearchQuery(query: String) {
+        repository.setFileSearchQuery(query)
     }
 
     // --- Dialog & Sheet Controls ---
@@ -228,11 +277,17 @@ class FamilyViewModel(
             _snackbarMessage.value = "רק הורים יכולים להזמין חברים למשפחה 🔒"
             return
         }
+        _invitationCreationError.value = null
         _showInviteMemberDialog.value = true
     }
 
     fun closeInviteMemberDialog() {
+        _invitationCreationError.value = null
         _showInviteMemberDialog.value = false
+    }
+
+    fun clearInvitationCreationError() {
+        _invitationCreationError.value = null
     }
 
     fun openEditFamilyNameDialog() {
@@ -524,29 +579,50 @@ class FamilyViewModel(
     /**
      * V1.6 Requirement 4:
      * Generates a role-specific invitation (`PARENT` or `CHILD`) and persists it in Firestore.
+     * Never exposes or shares a code until Firestore confirms that `/family_invites/{code}` was committed.
      */
     fun createRoleSpecificInvitation(
         invitedRole: UserRole,
         invitedNickname: String = "",
+        intendedEmail: String = "",
+        schoolGrade: String? = null,
         onCreated: ((FamilyInvitation) -> Unit)? = null
     ) {
         if (!currentMember.value.isParent) {
-            _snackbarMessage.value = "רק הורה רשאי ליצור הזמנות למשפחה 🔒"
+            val err = "רק הורה רשאי ליצור הזמנות למשפחה 🔒"
+            _invitationCreationError.value = err
+            _snackbarMessage.value = err
             return
         }
+        _lastCreatedRoleFilter.value = invitedRole
+        _isCreatingInvitation.value = true
+        _invitationCreationError.value = null
         viewModelScope.launch {
             val result = repository.createRoleSpecificInvitation(
                 invitedRole = invitedRole,
-                invitedNickname = invitedNickname
+                invitedNickname = invitedNickname,
+                intendedEmail = intendedEmail,
+                schoolGrade = schoolGrade
             )
+            _isCreatingInvitation.value = false
             result.onSuccess { invitation ->
+                _invitationCreationError.value = null
                 val roleHe = if (invitation.invitedRole == UserRole.PARENT) "הורה" else "ילד/ה"
-                _snackbarMessage.value = "נוצר קוד הזמנה (${invitation.code}) לתפקיד $roleHe 🔑"
+                _snackbarMessage.value = "נוצר ונשמר בענן קוד הזמנה (${invitation.code}) לתפקיד $roleHe 🔑"
                 onCreated?.invoke(invitation)
             }.onFailure { err ->
-                _snackbarMessage.value = err.localizedMessage ?: "שגיאה ביצירת קוד ההזמנה"
+                val msg = err.localizedMessage ?: "שגיאה בשמירת קוד ההזמנה בענן. נסו שוב."
+                _invitationCreationError.value = msg
+                _snackbarMessage.value = msg
             }
         }
+    }
+
+    fun retryLastRoleInvitation(onCreated: ((FamilyInvitation) -> Unit)? = null) {
+        createRoleSpecificInvitation(
+            invitedRole = _lastCreatedRoleFilter.value,
+            onCreated = onCreated
+        )
     }
 
     fun inviteMember(
@@ -558,8 +634,16 @@ class FamilyViewModel(
     ): FamilyInvitation? {
         val created = repository.inviteNewMember(name, emoji, role, googleEmail, schoolGrade)
         if (created == null) {
-            _snackbarMessage.value = "רק הורה רשאי להזמין חברים למשפחה 🔒"
+            val errMsg = repository.lastClassifiedInvitationFailure?.messageHe
+                ?: if (!currentMember.value.isParent) {
+                    "רק הורה רשאי להזמין חברים למשפחה 🔒"
+                } else {
+                    "שגיאה בשמירת קוד ההזמנה בענן. נסו שוב."
+                }
+            _invitationCreationError.value = errMsg
+            _snackbarMessage.value = errMsg
         } else {
+            _invitationCreationError.value = null
             val roleHe = if (created.invitedRole == UserRole.PARENT) "הורה" else "ילד/ה"
             _snackbarMessage.value = "נוצרה הזמנה (${created.code}) עבור ${name.ifBlank { roleHe }} בתפקיד $roleHe ✉️"
         }
@@ -611,8 +695,30 @@ class FamilyViewModel(
     fun toggleTask(taskId: String) {
         val ok = repository.toggleTaskCompletion(taskId)
         if (!ok) {
-            _snackbarMessage.value = "ילדים יכולים לסמן כבוצע רק משימות שמשויכות אליהם 🔒"
+            _snackbarMessage.value = repository.taskOperationError.value
+                ?: "ילדים יכולים לסמן כבוצע רק משימות שמשויכות אליהם 🔒"
         }
+    }
+
+    fun approveTaskCompletion(taskId: String) {
+        if (!currentMember.value.isParent) {
+            val err = "רק הורה רשאי לאשר השלמת משימות 🔒"
+            _snackbarMessage.value = err
+            return
+        }
+        val target = tasks.value.find { it.id == taskId }
+        val ok = repository.approveTaskCompletion(taskId)
+        if (ok) {
+            val pts = target?.points ?: 0
+            _snackbarMessage.value = "השלמת המשימה אושרה! +$pts נקודות הוענקו ✓"
+        } else {
+            _snackbarMessage.value = repository.taskOperationError.value
+                ?: "שגיאה באישור המשימה מול הענן. נסו שוב."
+        }
+    }
+
+    fun clearTaskOperationError() {
+        repository.clearTaskOperationError()
     }
 
     fun saveTask(
@@ -745,43 +851,203 @@ class FamilyViewModel(
         repository.triggerTenMinuteClassAlertPreview(period, childName)
     }
 
-    // --- Google Drive Folders & Files Operations ---
+    // --- Shared Family Folders & Files Operations (Google Drive FamilyTasks) ---
 
-    fun createNewFolder(nameHe: String, nameEn: String, emoji: String, colorHex: Long) {
+    fun setupOrReconnectFamilyGoogleDrive() {
+        repository.setupOrReconnectFamilyGoogleDrive { res ->
+            res.onSuccess { cfg ->
+                if (cfg.isConfigured) {
+                    _snackbarMessage.value = "תיקיית Google Drive המשפחתית (${cfg.rootFolderName}) מחוברת ומסונכרנת ✓"
+                } else if (cfg.connectionStatus == DriveConnectionStatus.WAITING_FOR_PARENT_SETUP) {
+                    _snackbarMessage.value = cfg.errorMessageHe ?: "ממתין שהורה יגדיר את תיקיית FamilyTasks ב-Google Drive."
+                }
+            }.onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "חיבור ל-Google Drive נכשל."
+            }
+        }
+    }
+
+    fun clearDriveConsentPrompts() {
+        repository.clearDriveConsentPrompts()
+    }
+
+    fun requestSharedFolderPickerAuthorization() {
+        repository.requestSharedFolderPickerAuthorization()
+    }
+
+    fun dismissDrivePickerAuthorizationDialog() {
+        repository.dismissDrivePickerAuthorizationDialog()
+    }
+
+    fun verifyAndConnectPickedSharedFolder(pickedDriveId: String, pickedName: String) {
+        repository.verifyAndConnectPickedSharedFolder(pickedDriveId, pickedName) { res ->
+            res.onSuccess { cfg ->
+                _snackbarMessage.value = "תיקיית המשפחה המשותפת (${cfg.rootFolderName}) אומתה וחוברה בהצלחה ✓"
+            }.onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "התיקייה שנבחרה אינה תואמת לתיקיית המשפחה המשותפת."
+            }
+        }
+    }
+
+    fun shareFamilyDriveWithMember(memberId: String, email: String) {
+        repository.shareFamilyDriveWithMember(memberId, email) { res ->
+            res.onSuccess {
+                _snackbarMessage.value = "תיקיית FamilyTasks שותפה בהצלחה עם $email ✓"
+            }.onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "שיתוף התיקייה נכשל."
+            }
+        }
+    }
+
+    fun shareFamilyDriveWithAllMembers() {
+        repository.shareFamilyDriveWithAllMembers { res ->
+            res.onSuccess {
+                _snackbarMessage.value = "תיקיית FamilyTasks שותפה עם כל בני המשפחה ב-Google Drive ✓"
+            }.onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "שיתוף התיקייה נכשל."
+            }
+        }
+    }
+
+    fun updateMemberGoogleEmail(memberId: String, email: String) {
+        if (repository.updateMemberGoogleEmail(memberId, email)) {
+            _snackbarMessage.value = "כתובת ה-Google עודכנה ל-$email ✓"
+        }
+    }
+
+    fun createNewFolder(
+        nameHe: String,
+        nameEn: String,
+        emoji: String,
+        colorHex: Long,
+        parentFolderId: String? = selectedFolderId.value
+    ) {
         val folder = DocumentFolder(
             nameHe = nameHe,
             nameEn = nameEn.ifBlank { nameHe },
             iconEmoji = emoji,
-            colorHex = colorHex
+            colorHex = colorHex,
+            familyId = repository.activeFamilyId.value,
+            parentFolderId = parentFolderId,
+            createdByUid = currentMember.value.id,
+            createdByName = currentMember.value.name
         )
         repository.addFolder(folder)
-        _selectedFolderId.value = folder.id
+        repository.selectFolder(folder.id)
         closeAddFolderDialog()
-        _snackbarMessage.value = "תיקייה חדשה נוצרה ב-Google Drive 📁"
+        _snackbarMessage.value = "תיקייה חדשה נוצרה בתיקיית FamilyTasks המשותפת 📁"
+    }
+
+    fun renameSharedFolder(folderId: String, newNameHe: String) {
+        if (repository.renameFolder(folderId, newNameHe, newNameHe)) {
+            _snackbarMessage.value = "שם התיקייה עודכן ל-\"$newNameHe\" ב-Google Drive ✓"
+        } else {
+            _snackbarMessage.value = "נא להזין שם תיקייה תקין"
+        }
+    }
+
+    fun moveSharedFolder(folderId: String, newParentFolderId: String?) {
+        if (repository.moveFolderToParent(folderId, newParentFolderId)) {
+            _snackbarMessage.value = "התיקייה הועברה בהצלחה ב-Google Drive ✓"
+        }
+    }
+
+    fun deleteSharedFolder(folderId: String) {
+        if (repository.deleteFolder(folderId)) {
+            _snackbarMessage.value = "התיקייה המשותפת הוסרה מ-Google Drive 🗑️"
+        }
+    }
+
+    fun uploadBinaryFileToFamily(
+        folderId: String?,
+        fileName: String,
+        extension: String,
+        bytes: ByteArray,
+        thumbnailBase64: String? = null
+    ): String {
+        val targetFolder = folderId?.takeIf { it.isNotBlank() }
+            ?: selectedFolderId.value
+            ?: folders.value.firstOrNull()?.id
+            ?: "f_school"
+        return repository.startFileUpload(
+            folderId = targetFolder,
+            rawFileName = fileName,
+            rawExtension = extension,
+            rawBytes = bytes,
+            thumbnailBase64 = thumbnailBase64
+        ) { res ->
+            res.onSuccess { doc ->
+                _snackbarMessage.value = "הקובץ \"${doc.name}\" הועלה לתיקיית FamilyTasks ב-Google Drive ✓"
+            }.onFailure { err ->
+                if (err !is kotlinx.coroutines.CancellationException) {
+                    _snackbarMessage.value = err.localizedMessage ?: "העלאת הקובץ ל-Google Drive נכשלה. ניתן לנסות שוב."
+                }
+            }
+        }
     }
 
     fun simulateUploadFileToDrive(folderId: String, fileName: String, extension: String, sizeFormatted: String) {
-        val todayStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))
-        val doc = FamilyDocument(
-            folderId = folderId,
-            name = fileName,
-            extension = extension,
-            sizeFormatted = sizeFormatted,
-            uploadedByMemberId = currentMember.value.id,
-            uploadedDateFormatted = todayStr
+        val targetFolder = folderId.ifBlank { selectedFolderId.value ?: "f_school" }
+        val ext = com.example.files.FamilyFileManagerHelper.extractExtension(fileName, extension)
+        val payloadBytes = when {
+            ext == "PDF" -> com.example.files.FamilyFileManagerHelper.generateDocumentPdfBytes(
+                title = fileName,
+                uploaderName = currentMember.value.name,
+                dateFormatted = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm")),
+                bodyLines = listOf("קובץ משפחתי משותף: $fileName", "גודל: $sizeFormatted")
+            )
+            ext in setOf("JPG", "JPEG", "PNG", "WEBP") ->
+                com.example.files.FamilyFileManagerHelper.generateSampleImageBytes(fileName, currentMember.value.name)
+            else -> "קובץ משפחתי משותף: $fileName ($sizeFormatted)".toByteArray(Charsets.UTF_8)
+        }
+        uploadBinaryFileToFamily(
+            folderId = targetFolder,
+            fileName = fileName,
+            extension = ext,
+            bytes = payloadBytes
         )
-        repository.addDocument(doc)
-        _snackbarMessage.value = "הקובץ \"$fileName\" הועלה וסונכרן ל-Google Drive ☁️"
+    }
+
+    fun cancelFileUpload(uploadId: String) {
+        repository.cancelFileUpload(uploadId)
+        _snackbarMessage.value = "העלאת הקובץ בוטלה"
+    }
+
+    fun retryFileUpload(uploadId: String) {
+        repository.retryFileUpload(uploadId) { res ->
+            res.onSuccess { doc ->
+                _snackbarMessage.value = "הקובץ \"${doc.name}\" הועלה ל-Google Drive בהצלחה ✓"
+            }.onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "העלאת הקובץ נכשלה שוב"
+            }
+        }
+    }
+
+    fun dismissUploadTaskState(uploadId: String) {
+        repository.dismissUploadTaskState(uploadId)
     }
 
     fun renameDocument(documentId: String, newName: String) {
-        repository.renameDocument(documentId, newName)
-        _snackbarMessage.value = "שם הקובץ עודכן ל-\"$newName\" ב-Google Drive ✓"
+        if (repository.renameDocument(documentId, newName)) {
+            _snackbarMessage.value = "שם הקובץ עודכן ל-\"$newName\" ב-Google Drive ✓"
+        }
+    }
+
+    fun moveDocumentToFolder(documentId: String, targetFolderId: String) {
+        if (repository.moveDocumentToFolder(documentId, targetFolderId)) {
+            val folderName = folders.value.find { it.id == targetFolderId }?.nameHe ?: "תיקייה"
+            _snackbarMessage.value = "הקובץ הועבר אל \"$folderName\" ב-Google Drive ✓"
+        }
     }
 
     fun deleteDocument(documentId: String) {
-        repository.deleteDocument(documentId)
-        _snackbarMessage.value = "הקובץ הוסר מתיקיית המשפחה 🗑️"
+        if (repository.deleteDocument(documentId)) {
+            _snackbarMessage.value = "הקובץ הוסר מתיקיית FamilyTasks ב-Google Drive 🗑️"
+        }
+    }
+
+    suspend fun fetchDocumentBytes(doc: FamilyDocument): ByteArray? {
+        return repository.fetchDocumentBytes(doc)
     }
 
     fun showCustomSnackbar(message: String) {

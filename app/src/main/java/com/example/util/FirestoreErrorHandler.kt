@@ -296,6 +296,356 @@ object FirestoreErrorHandler {
         }
         Log.i(TAG, payload.toString())
     }
+
+    /**
+     * Explicit invitation lifecycle stages for creation, validation, redemption, and revocation.
+     */
+    enum class InvitationStage(val stageName: String) {
+        VERIFY_PARENT_AUTHORIZATION("VERIFY_PARENT_AUTHORIZATION"),
+        CREATE_INVITATION_WRITE("CREATE_INVITATION_WRITE"),
+        CONFIRM_INVITATION_COMMIT("CONFIRM_INVITATION_COMMIT"),
+        VALIDATE_INVITATION_READ("VALIDATE_INVITATION_READ"),
+        REDEEM_INVITATION_TRANSACTION("REDEEM_INVITATION_TRANSACTION"),
+        REVOKE_INVITATION_WRITE("REVOKE_INVITATION_WRITE")
+    }
+
+    /**
+     * Distinct error categories for invitation creation, validation, and redemption.
+     */
+    enum class InvitationFailureCategory {
+        PERMISSION_DENIED,
+        UNAVAILABLE,
+        NOT_FOUND,
+        UNAUTHORIZED_ROLE,
+        INVALID_FORMAT,
+        EXPIRED,
+        ALREADY_REDEEMED,
+        REVOKED,
+        ALREADY_MEMBER,
+        UNEXPECTED_EXCEPTION
+    }
+
+    data class ClassifiedInvitationFailure(
+        val category: InvitationFailureCategory,
+        val errorCode: String,
+        val stage: InvitationStage,
+        val databaseId: String,
+        val sanitizedPath: String,
+        val sanitizedMessage: String,
+        val causeSummary: String,
+        val messageHe: String,
+        val messageEn: String
+    )
+
+    class InvitationFirestoreException(
+        val classified: ClassifiedInvitationFailure,
+        cause: Throwable? = null
+    ) : Exception(classified.messageHe, cause)
+
+    /**
+     * Redacts sensitive tokens, emails, and the specific invitation code from diagnostic messages
+     * so full invitation codes and credentials are never written to logs.
+     */
+    fun sanitizeInvitationDiagnosticMessage(
+        rawMessage: String?,
+        rawInviteCode: String? = null
+    ): String {
+        var sanitized = sanitizeFirestoreDiagnosticMessage(rawMessage)
+        val cleanCode = rawInviteCode?.trim()?.uppercase()
+        if (!cleanCode.isNullOrBlank() && cleanCode.length >= 4) {
+            sanitized = sanitized.replace(cleanCode, "[REDACTED_INVITE_CODE]", ignoreCase = true)
+        }
+        return sanitized
+    }
+
+    fun logInvitationMilestone(
+        stage: InvitationStage,
+        path: String,
+        databaseId: String = NAMED_DATABASE_ID,
+        rawInviteCode: String? = null,
+        category: String = "OK",
+        note: String = ""
+    ) {
+        val safePath = sanitizeFirestorePath(path)
+        val safeNote = sanitizeInvitationDiagnosticMessage(note, rawInviteCode)
+        val payload = JSONObject().apply {
+            put("event", "INVITATION_DIAGNOSTIC")
+            put("stage", stage.stageName)
+            put("category", category)
+            put("databaseId", databaseId)
+            put("documentPath", safePath)
+            if (note.isNotBlank()) {
+                put("note", safeNote)
+            }
+        }
+        Log.i(TAG, payload.toString())
+    }
+
+    fun classifyInvitationFailure(
+        error: Throwable,
+        stage: InvitationStage,
+        path: String = "family_invites/{inviteCode}",
+        rawInviteCode: String? = null,
+        databaseId: String = NAMED_DATABASE_ID,
+        overrideCategory: InvitationFailureCategory? = null
+    ): ClassifiedInvitationFailure {
+        if (error is InvitationFirestoreException) {
+            return error.classified
+        }
+
+        val (rawCat, code) = classifyFirestoreException(error)
+        val category = overrideCategory ?: when {
+            error is SecurityException -> InvitationFailureCategory.PERMISSION_DENIED
+            rawCat == FirestoreFailureCategory.PERMISSION_DENIED -> InvitationFailureCategory.PERMISSION_DENIED
+            rawCat == FirestoreFailureCategory.UNAVAILABLE -> InvitationFailureCategory.UNAVAILABLE
+            rawCat == FirestoreFailureCategory.NOT_FOUND -> InvitationFailureCategory.NOT_FOUND
+            else -> InvitationFailureCategory.UNEXPECTED_EXCEPTION
+        }
+
+        val safePath = sanitizeFirestorePath(path)
+        val safeMsg = sanitizeInvitationDiagnosticMessage(error.message, rawInviteCode)
+        val safeCause = error.cause?.let {
+            "${it.javaClass.simpleName}: ${sanitizeInvitationDiagnosticMessage(it.message, rawInviteCode)}"
+        } ?: "none"
+
+        val (messageHe, messageEn) = when (category) {
+            InvitationFailureCategory.UNAUTHORIZED_ROLE -> Pair(
+                "רק הורה (מנהל משפחה) רשאי ליצור קודי הזמנה למשפחה.",
+                "Only a PARENT is authorized to create family invitations."
+            )
+            InvitationFailureCategory.PERMISSION_DENIED -> Pair(
+                when (stage) {
+                    InvitationStage.VERIFY_PARENT_AUTHORIZATION,
+                    InvitationStage.CREATE_INVITATION_WRITE,
+                    InvitationStage.CONFIRM_INVITATION_COMMIT ->
+                        "יצירת קוד ההזמנה נדחתה בענן (PERMISSION_DENIED). ודאו שאתם מחוברים כהורה במשפחה ונסו שוב."
+                    InvitationStage.VALIDATE_INVITATION_READ,
+                    InvitationStage.REDEEM_INVITATION_TRANSACTION ->
+                        "קוד ההזמנה אינו זמין למימוש (ייתכן שכבר נוצל או בוטל)."
+                    InvitationStage.REVOKE_INVITATION_WRITE ->
+                        "ביטול קוד ההזמנה נדחה (PERMISSION_DENIED)."
+                },
+                "Invitation operation was denied by Firestore Security Rules (PERMISSION_DENIED at ${stage.stageName})."
+            )
+            InvitationFailureCategory.UNAVAILABLE -> Pair(
+                when (stage) {
+                    InvitationStage.VERIFY_PARENT_AUTHORIZATION,
+                    InvitationStage.CREATE_INVITATION_WRITE,
+                    InvitationStage.CONFIRM_INVITATION_COMMIT ->
+                        "שרתי הענן אינם זמינים כרגע (UNAVAILABLE). קוד ההזמנה לא נשמר בענן — בדקו את החיבור לאינטרנט ונסו שוב."
+                    else ->
+                        "שרתי הענן אינם זמינים כרגע (UNAVAILABLE). בדקו את החיבור לאינטרנט ונסו שוב."
+                },
+                "Cloud servers are temporarily unavailable (UNAVAILABLE at ${stage.stageName}). Check your internet connection and retry."
+            )
+            InvitationFailureCategory.NOT_FOUND -> Pair(
+                when (stage) {
+                    InvitationStage.CONFIRM_INVITATION_COMMIT ->
+                        "שמירת קוד ההזמנה בענן לא אומתה (NOT_FOUND). הקוד לא נשמר — נסו שוב."
+                    else ->
+                        "קוד ההזמנה לא נמצא במסד הנתונים בענן. ודאו שהקוד הוקלד נכון."
+                },
+                "Invitation document was not found in Firestore (NOT_FOUND at ${stage.stageName})."
+            )
+            InvitationFailureCategory.INVALID_FORMAT -> Pair(
+                "נא להזין קוד הזמנה חוקי (6 תווים).",
+                "Please enter a valid 6-character invitation code."
+            )
+            InvitationFailureCategory.EXPIRED -> Pair(
+                "פג תוקפו של קוד ההזמנה. בקשו מההורה ליצור קוד הזמנה חדש.",
+                "This invitation code has expired."
+            )
+            InvitationFailureCategory.ALREADY_REDEEMED -> Pair(
+                "קוד הזמנה זה כבר נוצל ולא ניתן להשתמש בו שוב.",
+                "This invitation code has already been redeemed."
+            )
+            InvitationFailureCategory.REVOKED -> Pair(
+                "קוד הזמנה זה בוטל על ידי הורה במשפחה.",
+                "This invitation code was revoked by a parent."
+            )
+            InvitationFailureCategory.ALREADY_MEMBER -> Pair(
+                "אתם כבר רשומים כחברים במשפחה זו!",
+                "You are already an active member of this family."
+            )
+            InvitationFailureCategory.UNEXPECTED_EXCEPTION -> Pair(
+                "שגיאה בשמירה או אימות קוד ההזמנה בענן ($code). נסו שוב.",
+                "An unexpected error occurred during invitation processing ($code at ${stage.stageName})."
+            )
+        }
+
+        val payload = JSONObject().apply {
+            put("event", "INVITATION_FIRESTORE_FAILURE")
+            put("stage", stage.stageName)
+            put("category", category.name)
+            put("errorCode", code)
+            put("databaseId", databaseId)
+            put("documentPath", safePath)
+            put("message", safeMsg)
+            put("cause", safeCause)
+        }
+        Log.e(TAG, payload.toString())
+
+        return ClassifiedInvitationFailure(
+            category = category,
+            errorCode = code,
+            stage = stage,
+            databaseId = databaseId,
+            sanitizedPath = safePath,
+            sanitizedMessage = safeMsg,
+            causeSummary = safeCause,
+            messageHe = messageHe,
+            messageEn = messageEn
+        )
+    }
+
+    /**
+     * Explicit task lifecycle stages for creation, child completion, parent approval, and deletion.
+     */
+    enum class TaskStage(val stageName: String) {
+        VERIFY_TASK_AUTHORIZATION("VERIFY_TASK_AUTHORIZATION"),
+        CHILD_COMPLETE_TASK_WRITE("CHILD_COMPLETE_TASK_WRITE"),
+        PARENT_COMPLETE_TASK_WRITE("PARENT_COMPLETE_TASK_WRITE"),
+        PARENT_APPROVE_TASK_WRITE("PARENT_APPROVE_TASK_WRITE"),
+        CREATE_TASK_WRITE("CREATE_TASK_WRITE"),
+        UPDATE_TASK_WRITE("UPDATE_TASK_WRITE"),
+        DELETE_TASK_WRITE("DELETE_TASK_WRITE")
+    }
+
+    /**
+     * Distinct error categories for task completion, approval, and management.
+     */
+    enum class TaskFailureCategory {
+        PERMISSION_DENIED,
+        UNAVAILABLE,
+        NOT_FOUND,
+        UNAUTHORIZED_ROLE,
+        ASSIGNEE_MISMATCH,
+        UNEXPECTED_EXCEPTION
+    }
+
+    data class ClassifiedTaskFailure(
+        val category: TaskFailureCategory,
+        val errorCode: String,
+        val stage: TaskStage,
+        val databaseId: String,
+        val sanitizedPath: String,
+        val sanitizedMessage: String,
+        val causeSummary: String,
+        val messageHe: String,
+        val messageEn: String
+    )
+
+    class TaskFirestoreException(
+        val classified: ClassifiedTaskFailure,
+        cause: Throwable? = null
+    ) : Exception(classified.messageHe, cause)
+
+    fun logTaskMilestone(
+        stage: TaskStage,
+        path: String,
+        databaseId: String = NAMED_DATABASE_ID,
+        category: String = "OK",
+        note: String = ""
+    ) {
+        val safePath = sanitizeFirestorePath(path)
+        val safeNote = sanitizeFirestoreDiagnosticMessage(note)
+        val payload = JSONObject().apply {
+            put("event", "TASK_DIAGNOSTIC")
+            put("stage", stage.stageName)
+            put("category", category)
+            put("databaseId", databaseId)
+            put("documentPath", safePath)
+            if (note.isNotBlank()) {
+                put("note", safeNote)
+            }
+        }
+        Log.i(TAG, payload.toString())
+    }
+
+    fun classifyTaskFailure(
+        error: Throwable,
+        stage: TaskStage,
+        path: String = "families/{familyId}/tasks/{taskId}",
+        databaseId: String = NAMED_DATABASE_ID,
+        overrideCategory: TaskFailureCategory? = null
+    ): ClassifiedTaskFailure {
+        if (error is TaskFirestoreException) {
+            return error.classified
+        }
+
+        val (rawCat, code) = classifyFirestoreException(error)
+        val category = overrideCategory ?: when {
+            error is SecurityException -> TaskFailureCategory.PERMISSION_DENIED
+            rawCat == FirestoreFailureCategory.PERMISSION_DENIED -> TaskFailureCategory.PERMISSION_DENIED
+            rawCat == FirestoreFailureCategory.UNAVAILABLE -> TaskFailureCategory.UNAVAILABLE
+            rawCat == FirestoreFailureCategory.NOT_FOUND -> TaskFailureCategory.NOT_FOUND
+            else -> TaskFailureCategory.UNEXPECTED_EXCEPTION
+        }
+
+        val safePath = sanitizeFirestorePath(path)
+        val safeMsg = sanitizeFirestoreDiagnosticMessage(error.message)
+        val safeCause = error.cause?.let {
+            "${it.javaClass.simpleName}: ${sanitizeFirestoreDiagnosticMessage(it.message)}"
+        } ?: "none"
+
+        val (messageHe, messageEn) = when (category) {
+            TaskFailureCategory.ASSIGNEE_MISMATCH -> Pair(
+                "ילדים יכולים לסמן כבוצע רק משימות שמשויכות אליהם 🔒",
+                "Children can only mark tasks assigned to them as completed."
+            )
+            TaskFailureCategory.UNAUTHORIZED_ROLE -> Pair(
+                "רק הורים יכולים ליצור, לערוך, למחוק או לאשר משימות 🔒",
+                "Only parents can create, edit, delete, or approve tasks."
+            )
+            TaskFailureCategory.PERMISSION_DENIED -> Pair(
+                when (stage) {
+                    TaskStage.CHILD_COMPLETE_TASK_WRITE ->
+                        "שמירת ביצוע המשימה נדחתה בענן (PERMISSION_DENIED). המצב הקודם שוחזר — ודאו שהמשימה משויכת לחשבון שלכם ונסו שוב."
+                    TaskStage.PARENT_APPROVE_TASK_WRITE ->
+                        "אישור המשימה נדחה בענן (PERMISSION_DENIED). המצב הקודם שוחזר."
+                    else ->
+                        "הפעולה במשימה נדחתה על ידי חוקי האבטחה בענן (PERMISSION_DENIED). המצב הקודם שוחזר."
+                },
+                "Task operation was denied by Firestore Security Rules (PERMISSION_DENIED at ${stage.stageName}). Previous state restored."
+            )
+            TaskFailureCategory.UNAVAILABLE -> Pair(
+                "שרתי הענן אינם זמינים כרגע (UNAVAILABLE). השינוי במשימה לא נשמר והמצב הקודם שוחזר — בדקו את החיבור לאינטרנט ונסו שוב.",
+                "Cloud servers are temporarily unavailable (UNAVAILABLE at ${stage.stageName}). Previous state restored — check your connection and retry."
+            )
+            TaskFailureCategory.NOT_FOUND -> Pair(
+                "מסמך המשימה לא נמצא בענן (NOT_FOUND). המצב הקודם שוחזר.",
+                "Task document was not found in Firestore (NOT_FOUND at ${stage.stageName}). Previous state restored."
+            )
+            TaskFailureCategory.UNEXPECTED_EXCEPTION -> Pair(
+                "שגיאה בשמירת עדכון המשימה בענן ($code). המצב הקודם שוחזר — נסו שוב.",
+                "An unexpected error occurred while saving the task ($code at ${stage.stageName}). Previous state restored."
+            )
+        }
+
+        val payload = JSONObject().apply {
+            put("event", "TASK_FIRESTORE_FAILURE")
+            put("stage", stage.stageName)
+            put("category", category.name)
+            put("errorCode", code)
+            put("databaseId", databaseId)
+            put("documentPath", safePath)
+            put("message", safeMsg)
+            put("cause", safeCause)
+        }
+        Log.e(TAG, payload.toString())
+
+        return ClassifiedTaskFailure(
+            category = category,
+            errorCode = code,
+            stage = stage,
+            databaseId = databaseId,
+            sanitizedPath = safePath,
+            sanitizedMessage = safeMsg,
+            causeSummary = safeCause,
+            messageHe = messageHe,
+            messageEn = messageEn
+        )
+    }
 }
 
 fun logStartupFirestoreDiagnostic(

@@ -1,0 +1,98 @@
+rules_version = '2';
+
+// Firebase Cloud Storage Security Rules — FamilyTasks V1.0.0 Shared Family File Manager
+// Bucket: gen-lang-client-0640538286.firebasestorage.app (Strictly Private — No Public Access)
+// Note: Deploy to production via Firebase Console -> Storage -> Rules or `firebase deploy --only storage`
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Validates that the file size is > 0 and <= 15 MB
+    function isValidFileSize() {
+      return request.resource != null
+        && request.resource.size > 0
+        && request.resource.size <= 15 * 1024 * 1024;
+    }
+
+    // Validates allowed family document and image content types
+    function isAllowedContentType() {
+      return request.resource != null
+        && (
+          request.resource.contentType.matches('image/(jpeg|jpg|png|webp)')
+          || request.resource.contentType == 'application/pdf'
+          || request.resource.contentType == 'text/plain'
+          || request.resource.contentType == 'application/zip'
+          || request.resource.contentType == 'application/x-zip-compressed'
+          || request.resource.contentType == 'application/msword'
+          || request.resource.contentType == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+          || request.resource.contentType == 'application/vnd.ms-excel'
+          || request.resource.contentType == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          || request.resource.contentType == 'application/vnd.ms-powerpoint'
+          || request.resource.contentType == 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+          || request.resource.contentType == 'application/octet-stream'
+        );
+    }
+
+    // Validates custom metadata uploaded with every family file
+    function hasValidFamilyMetadata(familyId, fileId) {
+      return request.resource != null
+        && request.resource.metadata != null
+        && request.resource.metadata['familyId'] == familyId
+        && request.resource.metadata['uploadedByUid'] == request.auth.uid
+        && request.resource.metadata['fileId'] == fileId;
+    }
+
+    // Checks if caller is in the object's authorizedMemberUids metadata list or is the uploader
+    function isAuthorizedFamilyReader(familyId) {
+      return isSignedIn()
+        && resource != null
+        && resource.metadata != null
+        && resource.metadata['familyId'] == familyId
+        && (
+          resource.metadata['uploadedByUid'] == request.auth.uid
+          || (
+            resource.metadata['authorizedMemberUids'] != null
+            && resource.metadata['authorizedMemberUids'].matches('.*,' + request.auth.uid + ',.*')
+          )
+        );
+    }
+
+    // Canonical Shared Family Storage Path: /families/{familyId}/files/{fileId}/{fileObjectName}
+    // Matches FamilyFileManagerHelper.buildStoragePath(familyId, fileId, sanitizedFileName)
+    match /families/{familyId}/files/{fileId}/{fileObjectName} {
+      allow get: if isAuthorizedFamilyReader(familyId);
+
+      // Prevent bulk listing of storage objects; metadata is listed via named Firestore database
+      allow list: if false;
+
+      // Create: Authenticated family member uploading a new uniquely-identified file
+      allow create: if isSignedIn()
+        && resource == null
+        && isValidFileSize()
+        && isAllowedContentType()
+        && hasValidFamilyMetadata(familyId, fileId)
+        && !fileObjectName.matches('.*\\.\\..*');
+
+      // Update: Disallow overwriting existing file binaries; new uploads use unique fileIds
+      allow update: if false;
+
+      // Delete: Uploader (PARENT or CHILD who uploaded it) or family PARENT in authorizedMemberUids
+      allow delete: if isAuthorizedFamilyReader(familyId)
+        && (
+          resource.metadata['uploadedByUid'] == request.auth.uid
+          || (
+            resource.metadata['parentUids'] != null
+            && resource.metadata['parentUids'].matches('.*,' + request.auth.uid + ',.*')
+          )
+        );
+    }
+
+    // Deny all other paths by default (zero-trust private bucket)
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -12,11 +12,68 @@ jobs:
     runs-on: ubuntu-24.04
 
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine release version (V1.0.0 baseline, PATCH +1 per new APK release, monotonic versionCode >= 7)
+        id: version
+        run: |
+          git fetch --tags --force || true
+          CURRENT_SHA="$(git rev-parse HEAD)"
+
+          # 1. Idempotency check: if CURRENT_SHA already has a published release tag v1.0.X-vcY, reuse it
+          EXISTING_TAG_FOR_SHA="$(git tag --points-at "$CURRENT_SHA" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-vc[0-9]+$' | head -n 1 || true)"
+          if [ -n "$EXISTING_TAG_FOR_SHA" ]; then
+            VER_NAME="$(echo "$EXISTING_TAG_FOR_SHA" | sed -E 's/^v([0-9]+\.[0-9]+\.[0-9]+)-vc([0-9]+)$/\1/')"
+            VER_CODE="$(echo "$EXISTING_TAG_FOR_SHA" | sed -E 's/^v([0-9]+\.[0-9]+\.[0-9]+)-vc([0-9]+)$/\2/')"
+            echo "Commit $CURRENT_SHA already released as $EXISTING_TAG_FOR_SHA (idempotent rebuild)."
+            echo "RELEASE_VERSION_NAME=$VER_NAME" >> "$GITHUB_ENV"
+            echo "RELEASE_VERSION_CODE=$VER_CODE" >> "$GITHUB_ENV"
+            echo "RELEASE_TAG=$EXISTING_TAG_FOR_SHA" >> "$GITHUB_ENV"
+            echo "ALREADY_TAGGED=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # 2. Find highest existing v1.0.X-vcY release tag across repository history
+          ALL_TAGS="$(git tag -l 'v1.0.*-vc*' || true)"
+          if [ -z "$ALL_TAGS" ]; then
+            VER_NAME="1.0.0"
+            VER_CODE="7"
+          else
+            MAX_PATCH=-1
+            MAX_CODE=6
+            for TAG in $ALL_TAGS; do
+              if [[ "$TAG" =~ ^v1\.0\.([0-9]+)-vc([0-9]+)$ ]]; then
+                P="${BASH_REMATCH[1]}"
+                C="${BASH_REMATCH[2]}"
+                if [ "$P" -gt "$MAX_PATCH" ]; then
+                  MAX_PATCH="$P"
+                fi
+                if [ "$C" -gt "$MAX_CODE" ]; then
+                  MAX_CODE="$C"
+                fi
+              fi
+            done
+            NEXT_PATCH=$((MAX_PATCH + 1))
+            NEXT_CODE=$((MAX_CODE + 1))
+            if [ "$NEXT_CODE" -lt 7 ]; then
+              NEXT_CODE=7
+            fi
+            VER_NAME="1.0.${NEXT_PATCH}"
+            VER_CODE="${NEXT_CODE}"
+          fi
+
+          RELEASE_TAG="v${VER_NAME}-vc${VER_CODE}"
+          echo "Allocated new APK release version: versionName=${VER_NAME}, versionCode=${VER_CODE} (tag=${RELEASE_TAG})"
+          echo "RELEASE_VERSION_NAME=$VER_NAME" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION_CODE=$VER_CODE" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "ALREADY_TAGGED=false" >> "$GITHUB_ENV"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -64,8 +121,11 @@ jobs:
             -storepass android \
             -keypass android | grep -E "Alias name:|Owner:|SHA1:|SHA256:"
 
-      - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+      - name: Build debug APK with allocated semantic release version
+        run: |
+          gradle --no-daemon :app:assembleDebug \
+            -PreleaseVersionName="${RELEASE_VERSION_NAME}" \
+            -PreleaseVersionCode="${RELEASE_VERSION_CODE}"
 
       - name: Verify final APK signature and print SHA-1 / SHA-256 fingerprints
         run: |
@@ -74,12 +134,20 @@ jobs:
             echo "::error::Built APK not found in app/build/outputs/apk/debug/!"
             exit 1
           fi
-          echo "=== Final APK Signing Verification ($APK_PATH) ==="
+          echo "=== Final APK Signing Verification ($APK_PATH | v${RELEASE_VERSION_NAME} code ${RELEASE_VERSION_CODE}) ==="
           $ANDROID_HOME/build-tools/36.0.0/apksigner verify --verbose --print-certs "$APK_PATH"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: FamilyTasks-debug-apk
+          name: FamilyTasks-v${{ env.RELEASE_VERSION_NAME }}-vc${{ env.RELEASE_VERSION_CODE }}-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      - name: Record release version tag after successful APK build & upload
+        if: success() && env.ALREADY_TAGGED == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${RELEASE_TAG}" -m "FamilyTasks APK Release ${RELEASE_VERSION_NAME} (versionCode ${RELEASE_VERSION_CODE})"
+          git push origin "${RELEASE_TAG}" || echo "::warning::Could not push tag ${RELEASE_TAG} (check repository write permissions)."

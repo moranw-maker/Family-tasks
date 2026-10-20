@@ -69,6 +69,10 @@ fun FamilyTasksApp(
     val validatedInvitationPreview by viewModel.validatedInvitationPreview.collectAsStateWithLifecycle()
     val invitationErrorMessage by viewModel.invitationErrorMessage.collectAsStateWithLifecycle()
     val isProcessingFamilyAction by viewModel.isProcessingFamilyAction.collectAsStateWithLifecycle()
+    val isCreatingInvitation by viewModel.isCreatingInvitation.collectAsStateWithLifecycle()
+    val invitationCreationError by viewModel.invitationCreationError.collectAsStateWithLifecycle()
+    val taskSyncStates by viewModel.taskSyncStates.collectAsStateWithLifecycle()
+    val taskOperationError by viewModel.taskOperationError.collectAsStateWithLifecycle()
 
     // Google Auth & Cloud Family Group states
     val isGoogleSignedIn by viewModel.isGoogleSignedIn.collectAsStateWithLifecycle()
@@ -98,6 +102,15 @@ fun FamilyTasksApp(
     val selectedMemberFilter by viewModel.selectedMemberFilter.collectAsStateWithLifecycle()
     val selectedChildForTimetable by viewModel.selectedChildForTimetable.collectAsStateWithLifecycle()
     val selectedFolderId by viewModel.selectedFolderId.collectAsStateWithLifecycle()
+    val activeUploads by viewModel.activeUploads.collectAsStateWithLifecycle()
+    val fileSortOption by viewModel.fileSortOption.collectAsStateWithLifecycle()
+    val fileSortAscending by viewModel.fileSortAscending.collectAsStateWithLifecycle()
+    val fileSearchQuery by viewModel.fileSearchQuery.collectAsStateWithLifecycle()
+    val familyDriveConfig by viewModel.familyDriveConfig.collectAsStateWithLifecycle()
+    val driveConsentPendingIntent by viewModel.driveConsentPendingIntent.collectAsStateWithLifecycle()
+    val driveConsentIntent by viewModel.driveConsentIntent.collectAsStateWithLifecycle()
+    val pendingDrivePickerRequest by viewModel.pendingDrivePickerRequest.collectAsStateWithLifecycle()
+    val drivePickerVerificationError by viewModel.drivePickerVerificationError.collectAsStateWithLifecycle()
 
     // Dialog / BottomSheet States
     val showAddTaskDialog by viewModel.showAddTaskDialog.collectAsStateWithLifecycle()
@@ -278,7 +291,11 @@ fun FamilyTasksApp(
                                             onSendNudge = { viewModel.sendParentNudge(it) },
                                             onAddNewTask = { viewModel.openAddTaskDialog(null) },
                                             onOpenFamilyAdmin = { viewModel.navigateTo(AppScreen.ADMIN_DASHBOARD) },
-                                            onOpenRewards = { showRewardsSheet = true }
+                                            onOpenRewards = { showRewardsSheet = true },
+                                            taskSyncStates = taskSyncStates,
+                                            taskOperationError = taskOperationError,
+                                            onApproveTask = { viewModel.approveTaskCompletion(it) },
+                                            onDismissTaskError = { viewModel.clearTaskOperationError() }
                                         )
                                     }
 
@@ -298,7 +315,9 @@ fun FamilyTasksApp(
                                             onEditTask = { viewModel.openAddTaskDialog(it) },
                                             onDeleteTask = { viewModel.deleteTask(it) },
                                             onSendNudge = { viewModel.sendParentNudge(it) },
-                                            onAddNewTask = { viewModel.openAddTaskDialog(null) }
+                                            onAddNewTask = { viewModel.openAddTaskDialog(null) },
+                                            taskSyncStates = taskSyncStates,
+                                            onApproveTask = { viewModel.approveTaskCompletion(it) }
                                         )
                                     }
 
@@ -327,18 +346,65 @@ fun FamilyTasksApp(
                                             selectedFolderId = selectedFolderId,
                                             files = documents,
                                             currentMember = currentMember,
+                                            members = members,
                                             viewMode = filesViewMode,
                                             isHebrew = isHebrew,
+                                            activeUploads = activeUploads,
+                                            sortOption = fileSortOption,
+                                            sortAscending = fileSortAscending,
+                                            searchQuery = fileSearchQuery,
                                             onSelectFolder = { viewModel.selectFolder(it) },
+                                            onNavigateUpFolder = { viewModel.navigateUpFolder() },
                                             onViewModeChange = { viewModel.setFilesViewMode(it) },
+                                            onSortOptionChange = { viewModel.setFileSortOption(it) },
+                                            onSearchQueryChange = { viewModel.setFileSearchQuery(it) },
                                             onAddFolder = { viewModel.openAddFolderDialog() },
+                                            onDeleteFolder = { viewModel.deleteSharedFolder(it) },
                                             onUploadFile = { folderId, name, ext, size ->
                                                 viewModel.simulateUploadFileToDrive(folderId, name, ext, size)
                                             },
+                                            onUploadBinaryFile = { folderId, name, ext, bytes ->
+                                                viewModel.uploadBinaryFileToFamily(folderId, name, ext, bytes)
+                                            },
+                                            onCancelUpload = { viewModel.cancelFileUpload(it) },
+                                            onRetryUpload = { viewModel.retryFileUpload(it) },
+                                            onDismissUpload = { viewModel.dismissUploadTaskState(it) },
                                             onRenameFile = { fileId, newName ->
                                                 viewModel.renameDocument(fileId, newName)
                                             },
+                                            onMoveFile = { fileId, targetFolderId ->
+                                                viewModel.moveDocumentToFolder(fileId, targetFolderId)
+                                            },
+                                            onRenameFolder = { folderId, newNameHe ->
+                                                viewModel.renameSharedFolder(folderId, newNameHe)
+                                            },
                                             onDeleteFile = { viewModel.deleteDocument(it) },
+                                            familyDriveConfig = familyDriveConfig,
+                                            driveConsentPendingIntent = driveConsentPendingIntent,
+                                            driveConsentIntent = driveConsentIntent,
+                                            onConnectFamilyDrive = { viewModel.setupOrReconnectFamilyGoogleDrive() },
+                                            onClearDriveConsentPrompts = { viewModel.clearDriveConsentPrompts() },
+                                            onShareDriveWithMember = { memberId, email ->
+                                                viewModel.shareFamilyDriveWithMember(memberId, email)
+                                            },
+                                            onShareDriveWithAllMembers = {
+                                                viewModel.shareFamilyDriveWithAllMembers()
+                                            },
+                                            onUpdateMemberGoogleEmail = { memberId, email ->
+                                                viewModel.updateMemberGoogleEmail(memberId, email)
+                                            },
+                                            pendingDrivePickerRequest = pendingDrivePickerRequest,
+                                            drivePickerVerificationError = drivePickerVerificationError,
+                                            onRequestSharedFolderPicker = {
+                                                viewModel.requestSharedFolderPickerAuthorization()
+                                            },
+                                            onVerifyPickedSharedFolder = { pickedDriveId, pickedName ->
+                                                viewModel.verifyAndConnectPickedSharedFolder(pickedDriveId, pickedName)
+                                            },
+                                            onDismissDrivePicker = {
+                                                viewModel.dismissDrivePickerAuthorizationDialog()
+                                            },
+                                            fileBytesProvider = { doc -> viewModel.fetchDocumentBytes(doc) },
                                             onShowToast = { viewModel.showToastMessage(it) }
                                         )
                                     }
@@ -487,6 +553,17 @@ fun FamilyTasksApp(
                             },
                             onFormatInvitationShareText = { invite ->
                                 viewModel.getWhatsAppInviteShareText(invite, isHebrew)
+                            },
+                            isCreatingInvitation = isCreatingInvitation,
+                            invitationErrorMessage = invitationCreationError,
+                            onCreateInvitationAsync = { name, _, role, email, grade, onConfirmed ->
+                                viewModel.createRoleSpecificInvitation(
+                                    invitedRole = role,
+                                    invitedNickname = name,
+                                    intendedEmail = email.orEmpty(),
+                                    schoolGrade = grade,
+                                    onCreated = onConfirmed
+                                )
                             },
                             onInvite = { name, emoji, role, email, grade ->
                                 viewModel.inviteMember(name, emoji, role, email, grade)

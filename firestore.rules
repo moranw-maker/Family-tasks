@@ -100,10 +100,16 @@ service cloud.firestore {
     }
 
     // Validates that a CHILD task update only modifies completion status fields
-    // on a task assigned to that child
+    // on a task assigned to that child, and never self-approves (cannot set approvedByParent to true)
     function isChildTaskCompletionOnly() {
       let changedKeys = request.resource.data.diff(resource.data).affectedKeys();
-      return changedKeys.hasOnly(['isCompleted', 'completedAtMillis', 'completedByMemberId', 'updatedAt'])
+      return changedKeys.hasOnly(['isCompleted', 'completedAtMillis', 'completedByMemberId', 'updatedAt', 'approvedByParent'])
+        && (!('approvedByParent' in changedKeys) || request.resource.data.get('approvedByParent', false) == false)
+        && (
+          !('completedByMemberId' in request.resource.data)
+          || request.resource.data.completedByMemberId == null
+          || request.resource.data.completedByMemberId == request.auth.uid
+        )
         && (
           resource.data.get('assignedUid', '') == request.auth.uid
           || resource.data.get('assignedToMemberId', '') == request.auth.uid
@@ -243,6 +249,18 @@ service cloud.firestore {
       );
 
       allow delete: if isOwner(userId);
+
+      // Multi-device FCM registration tokens associated with the authenticated user's UID.
+      // Only the authenticated owner may read, register, refresh, or remove their own device tokens.
+      match /fcm_tokens/{tokenId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && request.resource.data.get('uid', '') == request.auth.uid
+          && request.resource.data.get('token', '') is string
+          && request.resource.data.get('token', '').size() > 0
+          && (!('platform' in request.resource.data) || request.resource.data.platform == 'ANDROID');
+        allow delete: if isOwner(userId);
+      }
     }
 
     // =========================================================================
@@ -377,13 +395,7 @@ service cloud.firestore {
       // -----------------------------------------------------------------------
       match /tasks/{taskId} {
         allow get, list: if isFamilyMember(familyId);
-        allow create: if isParent(familyId)
-          || (
-            isChild(familyId)
-            && request.resource.data.get('points', -1) == 0
-            && request.resource.data.get('approvedByParent', true) == false
-            && request.resource.data.get('isCompleted', true) == false
-          );
+        allow create: if isParent(familyId);
         allow update: if isParent(familyId)
           || (isChild(familyId) && isChildTaskCompletionOnly());
         allow delete: if isParent(familyId);
@@ -419,6 +431,95 @@ service cloud.firestore {
       match /schedule/{periodId} {
         allow get, list: if isFamilyMember(familyId);
         allow create, update, delete: if isParent(familyId);
+      }
+
+      // -----------------------------------------------------------------------
+      // 2f. Server-Side Notification Dispatches (/families/{familyId}/notification_dispatches/{dispatchId})
+      // Managed exclusively by Firebase Cloud Functions (Admin SDK) for idempotency.
+      // -----------------------------------------------------------------------
+      match /notification_dispatches/{dispatchId} {
+        allow read, write: if false;
+      }
+
+      // -----------------------------------------------------------------------
+      // 2g. Shared Family Folders (/families/{familyId}/folders/{folderId})
+      // Metadata index for subfolders inside the shared Google Drive `FamilyTasks` root folder.
+      // Special exception for the Files section ONLY:
+      // All active family members (both PARENT and CHILD) have equal folder-management
+      // permissions (browse, create, rename, move, delete) inside their family's `FamilyTasks` folder.
+      // Users from other families are strictly denied.
+      // -----------------------------------------------------------------------
+      match /folders/{folderId} {
+        allow get, list: if isFamilyMember(familyId);
+
+        allow create: if isFamilyMember(familyId)
+          && request.resource.data.get('familyId', '') == familyId
+          && request.resource.data.get('createdByUid', '') == request.auth.uid
+          && request.resource.data.get('nameHe', '') is string
+          && request.resource.data.get('nameHe', '').size() > 0
+          && request.resource.data.get('nameHe', '').size() <= 120
+          && !request.resource.data.get('nameHe', '').matches('.*(\\.\\.|/|\\\\).*');
+
+        allow update: if isFamilyMember(familyId)
+          && request.resource.data.get('familyId', familyId) == familyId
+          && request.resource.data.get('nameHe', resource.data.get('nameHe', '')) is string
+          && request.resource.data.get('nameHe', resource.data.get('nameHe', '')).size() > 0
+          && request.resource.data.get('nameHe', resource.data.get('nameHe', '')).size() <= 120
+          && !request.resource.data.get('nameHe', resource.data.get('nameHe', '')).matches('.*(\\.\\.|/|\\\\).*');
+
+        allow delete: if isFamilyMember(familyId);
+      }
+
+      // -----------------------------------------------------------------------
+      // 2h. Shared Family Files (/families/{familyId}/files/{fileId})
+      // Non-binary metadata index for files stored exclusively in the shared Google Drive
+      // `FamilyTasks` folder.
+      // Special exception for the Files section ONLY:
+      // All active family members (both PARENT and CHILD) have equal file-management
+      // permissions (browse, open, upload, rename, move, delete) inside their family's `FamilyTasks` folder.
+      // Users from other families are strictly denied.
+      // -----------------------------------------------------------------------
+      match /files/{fileId} {
+        allow get, list: if isFamilyMember(familyId);
+
+        allow create: if isFamilyMember(familyId)
+          && request.resource.data.get('familyId', '') == familyId
+          && request.resource.data.get('uploadedByUid', '') == request.auth.uid
+          && request.resource.data.get('name', '') is string
+          && request.resource.data.get('name', '').size() > 0
+          && request.resource.data.get('name', '').size() <= 160
+          && !request.resource.data.get('name', '').matches('.*(\\.\\.|/|\\\\).*')
+          && request.resource.data.get('extension', '') in [
+            'PDF', 'JPG', 'JPEG', 'PNG', 'WEBP', 'DOC', 'DOCX', 'XLS', 'XLSX', 'PPT', 'PPTX', 'TXT', 'ZIP'
+          ]
+          && request.resource.data.get('sizeBytes', 0) is int
+          && request.resource.data.get('sizeBytes', 0) > 0
+          && request.resource.data.get('sizeBytes', 0) <= 15728640
+          && !('dataBase64' in request.resource.data)
+          && (
+            !('storagePath' in request.resource.data)
+            || request.resource.data.storagePath == ''
+            || (
+              !request.resource.data.storagePath.matches('.*\\.\\..*')
+              && request.resource.data.storagePath.matches('^families/' + familyId + '/files/.*')
+            )
+          );
+
+        allow update: if isFamilyMember(familyId)
+          && request.resource.data.get('familyId', familyId) == familyId
+          && !('dataBase64' in request.resource.data)
+          && request.resource.data.get('name', resource.data.get('name', '')) is string
+          && request.resource.data.get('name', resource.data.get('name', '')).size() > 0
+          && request.resource.data.get('name', resource.data.get('name', '')).size() <= 160
+          && !request.resource.data.get('name', resource.data.get('name', '')).matches('.*(\\.\\.|/|\\\\).*');
+
+        allow delete: if isFamilyMember(familyId);
+
+        // Firestore Base64 binary chunks are strictly prohibited; actual file contents
+        // live exclusively in Google Drive (`FamilyTasks` folder).
+        match /chunks/{chunkId} {
+          allow read, write: if false;
+        }
       }
     }
 

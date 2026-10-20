@@ -56,15 +56,7 @@ fun SettingsScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                androidx.compose.ui.graphics.Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFFEBF3FE),
-                        Color(0xFFF7F9FD),
-                        Color.White
-                    )
-                )
-            )
+            .background(MaterialTheme.colorScheme.background)
             .testTag("settings_screen"),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 110.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -72,7 +64,10 @@ fun SettingsScreen(
         // Quick Screen Help Guide
         item {
             com.example.ui.components.ScreenHelpBanner(
-                title = if (isHebrew) "הגדרות, ענן ואבטחה (V1.6)" else "Settings, Cloud & Security (V1.6)",
+                title = if (isHebrew)
+                    "הגדרות, ענן ואבטחה (${com.example.util.AppVersionManager.displayVersionLabel})"
+                else
+                    "Settings, Cloud & Security (${com.example.util.AppVersionManager.displayVersionLabel})",
                 tips = if (isHebrew) listOf(
                     "ענן משפחתי משותף: נהלו את חיבור Google, קוד ההזמנה של המשפחה וסנכרון ליומן ו-Drive.",
                     "הרשאות הורה מול ילד/ה: ניהול המשפחה ושינוי שם המשפחה פתוחים להורים (PARENT) בלבד.",
@@ -443,8 +438,9 @@ fun SettingsScreen(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = "FamilyTasks Workspace V${BuildConfig.VERSION_NAME} • Google Calendar & Drive Edition",
-                    style = MaterialTheme.typography.labelSmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    text = "FamilyTasks Workspace ${com.example.util.AppVersionManager.displayVersionLabel} (Build ${com.example.util.AppVersionManager.currentVersionCode}) • Google Calendar & Drive Edition",
+                    style = MaterialTheme.typography.labelSmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant),
+                    modifier = Modifier.testTag("settings_app_version_footer")
                 )
             }
         }

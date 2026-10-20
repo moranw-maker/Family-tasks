@@ -114,6 +114,46 @@
         "iconEmoji": { "type": "string", "description": "Emoji icon" }
       },
       "required": ["id", "familyId", "title", "pointsCost"]
+    },
+    "DocumentFolder": {
+      "title": "DocumentFolder",
+      "description": "Shared family folder or subfolder in the family file manager",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique folder ID" },
+        "familyId": { "type": "string", "description": "Owning family ID" },
+        "parentFolderId": { "type": "string", "description": "Parent folder ID when nested, or empty for root" },
+        "nameHe": { "type": "string", "description": "Folder name in Hebrew" },
+        "nameEn": { "type": "string", "description": "Folder name in English" },
+        "iconEmoji": { "type": "string", "description": "Folder icon emoji" },
+        "colorHex": { "type": "integer", "description": "Folder badge color" },
+        "createdByUid": { "type": "string", "description": "Authenticated UID of creator" },
+        "createdByName": { "type": "string", "description": "Display name of creator" },
+        "createdAtMillis": { "type": "integer", "description": "Creation epoch timestamp in milliseconds" }
+      },
+      "required": ["id", "familyId", "nameHe", "createdByUid"]
+    },
+    "FamilyDocument": {
+      "title": "FamilyDocument",
+      "description": "Shared family file metadata stored in Firestore with binary content in Firebase Cloud Storage",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique file ID" },
+        "familyId": { "type": "string", "description": "Owning family ID" },
+        "folderId": { "type": "string", "description": "Target folder ID" },
+        "name": { "type": "string", "description": "Sanitized display filename" },
+        "extension": { "type": "string", "description": "Uppercase file extension" },
+        "mimeType": { "type": "string", "description": "Standard MIME type" },
+        "sizeBytes": { "type": "integer", "description": "File size in bytes" },
+        "sizeFormatted": { "type": "string", "description": "Human-readable file size" },
+        "uploadedByUid": { "type": "string", "description": "Authenticated Firebase UID of uploader" },
+        "uploadedByName": { "type": "string", "description": "Display name of uploader" },
+        "uploadedDateFormatted": { "type": "string", "description": "Formatted upload date" },
+        "uploadedAtMillis": { "type": "integer", "description": "Upload timestamp in milliseconds" },
+        "storagePath": { "type": "string", "description": "Private Firebase Cloud Storage path" },
+        "chunkCount": { "type": "integer", "description": "Number of binary payload chunks in subcollection" }
+      },
+      "required": ["id", "familyId", "folderId", "name", "extension", "sizeBytes", "uploadedByUid"]
     }
   },
   "firestore": {
@@ -140,6 +180,14 @@
     "/families/{familyId}/rewards/{rewardId}": {
       "schema": { "$ref": "#/entities/RewardItem" },
       "description": "Family rewards catalog subcollection"
+    },
+    "/families/{familyId}/folders/{folderId}": {
+      "schema": { "$ref": "#/entities/DocumentFolder" },
+      "description": "Shared family folders and nested subfolders"
+    },
+    "/families/{familyId}/files/{fileId}": {
+      "schema": { "$ref": "#/entities/FamilyDocument" },
+      "description": "Shared family file metadata"
     }
   }
 }

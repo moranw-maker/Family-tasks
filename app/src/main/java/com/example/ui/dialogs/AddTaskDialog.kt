@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.example.model.*
+import com.example.ui.components.TimeFormatUtils
 import com.example.ui.components.TimePickerField
 import com.example.ui.theme.*
 import java.time.LocalDate
@@ -33,6 +34,7 @@ fun AddTaskDialog(
     members: List<FamilyMember>,
     isHebrew: Boolean,
     taskToEdit: FamilyTask? = null,
+    initialDate: LocalDate = LocalDate.now(),
     onDismiss: () -> Unit,
     onSaveTask: (FamilyTask) -> Unit
 ) {
@@ -42,9 +44,13 @@ fun AddTaskDialog(
     var selectedCategory by remember { mutableStateOf(taskToEdit?.category ?: TaskCategory.CLEANING) }
     var selectedPriority by remember { mutableStateOf(taskToEdit?.priority ?: TaskPriority.MEDIUM) }
     var selectedRecurrence by remember { mutableStateOf(taskToEdit?.recurrence ?: TaskRecurrence.DAILY) }
-    var dueTime by remember { mutableStateOf(taskToEdit?.dueTimeFormatted ?: "18:00") }
+    var dueTime by remember { mutableStateOf(TimeFormatUtils.normalize24HourString(taskToEdit?.dueTimeFormatted, "18:00")) }
     var points by remember { mutableIntStateOf(taskToEdit?.points ?: 15) }
-    var dateOffsetDays by remember { mutableIntStateOf(0) } // 0 = Today, 1 = Tomorrow, 2 = In 2 days
+    var selectedTaskDate by remember {
+        mutableStateOf(
+            taskToEdit?.let { LocalDate.ofEpochDay(it.dateEpochDay) } ?: initialDate
+        )
+    }
 
     val scrollState = rememberScrollState()
     val safeDismiss = {
@@ -236,24 +242,31 @@ fun AddTaskDialog(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Date Offset & Time
+                // Date Quick Selection (preserves selectedTaskDate when changing time)
+                val today = remember { LocalDate.now() }
+                val dateOptions = remember(initialDate, today, isHebrew) {
+                    buildList {
+                        add(today to (if (isHebrew) "היום" else "Today"))
+                        add(today.plusDays(1) to (if (isHebrew) "מחר" else "Tomorrow"))
+                        add(today.plusDays(2) to (if (isHebrew) "עוד יומיים" else "In 2 days"))
+                        if (selectedTaskDate != today && selectedTaskDate != today.plusDays(1) && selectedTaskDate != today.plusDays(2)) {
+                            add(selectedTaskDate to "${selectedTaskDate.dayOfMonth}/${selectedTaskDate.monthValue}")
+                        }
+                    }
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    listOf(
-                        0 to (if (isHebrew) "היום" else "Today"),
-                        1 to (if (isHebrew) "מחר" else "Tomorrow"),
-                        2 to (if (isHebrew) "עוד יומיים" else "In 2 days")
-                    ).forEach { (offset, label) ->
-                        val isSelected = dateOffsetDays == offset
+                    dateOptions.forEach { (candidateDate, label) ->
+                        val isSelected = selectedTaskDate == candidateDate
                         Surface(
                             shape = RoundedCornerShape(14.dp),
                             color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.surfaceVariant,
                             modifier = Modifier
                                 .weight(1f)
                                 .clip(RoundedCornerShape(14.dp))
-                                .clickable { dateOffsetDays = offset }
+                                .clickable { selectedTaskDate = candidateDate }
                         ) {
                             Box(
                                 modifier = Modifier.padding(vertical = 8.dp),
@@ -324,14 +337,19 @@ fun AddTaskDialog(
                 Button(
                     onClick = {
                         if (title.isNotBlank()) {
-                            val epochDay = if (taskToEdit != null) taskToEdit.dateEpochDay else LocalDate.now().plusDays(dateOffsetDays.toLong()).toEpochDay()
+                            val normalized24h = TimeFormatUtils.normalize24HourString(dueTime, "18:00")
+                            val (preservedEpochDay, _) = TimeFormatUtils.combineDateAnd24HourTimeToEpochMillis(
+                                dateEpochDay = selectedTaskDate.toEpochDay(),
+                                time24h = normalized24h
+                            )
                             val taskResult = if (taskToEdit != null) {
                                 taskToEdit.copy(
                                     title = title.trim(),
                                     description = description.trim(),
                                     category = selectedCategory,
                                     assignedToMemberId = selectedMemberId,
-                                    dueTimeFormatted = dueTime.ifBlank { "18:00" },
+                                    dateEpochDay = preservedEpochDay,
+                                    dueTimeFormatted = normalized24h,
                                     priority = selectedPriority,
                                     points = points,
                                     recurrence = selectedRecurrence
@@ -343,8 +361,8 @@ fun AddTaskDialog(
                                     description = description.trim(),
                                     category = selectedCategory,
                                     assignedToMemberId = selectedMemberId,
-                                    dateEpochDay = epochDay,
-                                    dueTimeFormatted = dueTime.ifBlank { "18:00" },
+                                    dateEpochDay = preservedEpochDay,
+                                    dueTimeFormatted = normalized24h,
                                     priority = selectedPriority,
                                     points = points,
                                     recurrence = selectedRecurrence,

@@ -165,7 +165,7 @@ fun GoogleOnboardingScreen(
                 Spacer(modifier = Modifier.height(18.dp))
 
                 Text(
-                    text = if (isHebrew) "המשימות המשפחתיות" else "Family Tasks V1.6",
+                    text = if (isHebrew) "המשימות המשפחתיות" else "Family Tasks ${com.example.util.AppVersionManager.displayVersionLabel}",
                     style = MaterialTheme.typography.headlineMedium.copy(
                         fontWeight = FontWeight.ExtraBold,
                         color = TextPrimary,
@@ -718,7 +718,7 @@ fun GoogleOnboardingScreen(
                                     OutlinedTextField(
                                         value = inviteCodeInput,
                                         onValueChange = {
-                                            inviteCodeInput = it.uppercase().take(8)
+                                            inviteCodeInput = it.trim().uppercase().take(12)
                                             localError = null
                                             if (validatedInvitation != null) {
                                                 onClearValidatedInvite()
@@ -959,7 +959,10 @@ fun GoogleOnboardingScreen(
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = if (isHebrew) "מאובטח באמצעות Google Identity & Firebase V1.6" else "Secured by Google Identity & Firebase V1.6",
+                    text = if (isHebrew)
+                        "מאובטח באמצעות Google Identity & Firebase ${com.example.util.AppVersionManager.displayVersionLabel}"
+                    else
+                        "Secured by Google Identity & Firebase ${com.example.util.AppVersionManager.displayVersionLabel}",
                     style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
                 )
             }

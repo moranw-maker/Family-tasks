@@ -474,6 +474,22 @@ data class RewardItem(
     val description: String = ""
 )
 
+/**
+ * Explicit UI & cloud persistence state for task completion and parent approval (V1.6).
+ */
+enum class TaskCompletionSyncState {
+    /** Task is incomplete and idle. */
+    IDLE,
+    /** Task completion or approval write is in flight to Firestore. */
+    SAVING,
+    /** Child completed the task and the write is persisted in Firestore, awaiting parent approval. */
+    PENDING_APPROVAL,
+    /** Task completion is persisted in Firestore and approved by a parent. */
+    SAVED_APPROVED,
+    /** Last completion/approval write failed; previous state was restored. */
+    FAILED
+}
+
 data class FamilyTask(
     val id: String = UUID.randomUUID().toString(),
     val title: String,
@@ -495,6 +511,18 @@ data class FamilyTask(
     val createdAtMillis: Long = System.currentTimeMillis(),
     val updatedAtMillis: Long = System.currentTimeMillis()
 ) {
+    /**
+     * True when the task has been marked completed by a child and is awaiting parent approval.
+     */
+    val isPendingParentApproval: Boolean
+        get() = isCompleted && !approvedByParent
+
+    /**
+     * True when the task is both completed and approved by a parent.
+     */
+    val isFullyApprovedCompletion: Boolean
+        get() = isCompleted && approvedByParent
+
     /**
      * Converts UI FamilyTask to Room/Firestore core Task entity.
      */
@@ -540,14 +568,134 @@ data class SchedulePeriod(
     val isAlertEnabled: Boolean = tenMinuteAlertEnabled
 )
 
+enum class FileSortOption(val labelHe: String, val labelEn: String) {
+    DATE("תאריך", "Date"),
+    NAME("שם", "Name"),
+    SIZE("גודל", "Size"),
+    TYPE("סוג", "Type");
+
+    fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
+}
+
+enum class FileUploadStatus {
+    UPLOADING,
+    SUCCESS,
+    FAILED,
+    CANCELLED
+}
+
+data class FileUploadTaskState(
+    val uploadId: String = UUID.randomUUID().toString(),
+    val fileName: String,
+    val folderId: String,
+    val extension: String,
+    val sizeBytes: Long,
+    val sizeFormatted: String,
+    val progress: Float = 0f,
+    val status: FileUploadStatus = FileUploadStatus.UPLOADING,
+    val errorMessageHe: String? = null,
+    val errorMessageEn: String? = null,
+    val mimeType: String = "application/octet-stream",
+    val rawBytes: ByteArray? = null,
+    val createdAtMillis: Long = System.currentTimeMillis()
+) {
+    fun getErrorMessage(isHebrew: Boolean): String? =
+        if (isHebrew) errorMessageHe else (errorMessageEn ?: errorMessageHe)
+}
+
+const val GOOGLE_DRIVE_ROOT_FOLDER_NAME = "FamilyTasks"
+
+enum class DriveConnectionStatus {
+    NOT_SETUP,
+    WAITING_FOR_PARENT_SETUP,
+    NEEDS_OAUTH_AUTHORIZATION,
+    NEEDS_SHARED_FOLDER_PICKER,
+    CONNECTING,
+    CONNECTED,
+    ERROR
+}
+
+/**
+ * Represents a request for the user to explicitly authorize access to the family's single
+ * shared `FamilyTasks` folder (or a shared item inside it) via the Google Picker API
+ * under the least-privilege `drive.file` scope.
+ */
+data class DrivePickerAuthorizationRequest(
+    val familyId: String,
+    val expectedDriveRootFolderId: String,
+    val expectedItemDriveId: String = expectedDriveRootFolderId,
+    val expectedItemName: String = GOOGLE_DRIVE_ROOT_FOLDER_NAME,
+    val isRootFolderSelection: Boolean = true,
+    val ownerEmail: String = "",
+    val reasonMessageHe: String = "כדי לגשת לתיקיית המשפחה המשותפת (FamilyTasks), יש לבחור ולאשר את התיקייה המשותפת בבורר הקבצים של Google Drive.",
+    val reasonMessageEn: String = "To access the shared FamilyTasks folder, please select and authorize the shared folder in Google Picker."
+)
+
+enum class DriveMemberSharingStatus(val labelHe: String, val labelEn: String) {
+    OWNER("בעלים (Owner)", "Owner"),
+    EDITOR_SHARED("עורך משותף (Editor)", "Shared Editor"),
+    SHARED_EDITOR("עורך משותף (Editor)", "Shared Editor"),
+    INVITED_PENDING("שותף - ממתין לחיבור Drive", "Shared - Pending Drive Connect"),
+    PENDING_SHARE("טרם שותף", "Not Shared Yet"),
+    NOT_SHARED("טרם שותף", "Not Shared Yet"),
+    ERROR("שגיאת שיתוף", "Share Error");
+
+    fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
+    fun getLabel(isHebrew: Boolean): String = getDisplayName(isHebrew)
+}
+
+data class FamilyDriveConfig(
+    val familyId: String = "",
+    val driveRootFolderId: String = "",
+    val driveRootFolderName: String = GOOGLE_DRIVE_ROOT_FOLDER_NAME,
+    val ownerUid: String = "",
+    val ownerEmail: String = "",
+    val ownerName: String = "",
+    val isConnected: Boolean = false,
+    val webViewLink: String = "",
+    val sharedEmails: List<String> = emptyList(),
+    val sharedWithEmails: List<String> = sharedEmails,
+    val memberStatuses: Map<String, String> = emptyMap(),
+    val memberShareStatuses: Map<String, DriveMemberSharingStatus> = emptyMap(),
+    val connectionStatus: DriveConnectionStatus = if (isConnected || driveRootFolderId.isNotBlank()) DriveConnectionStatus.CONNECTED else DriveConnectionStatus.NOT_SETUP,
+    val errorMessageHe: String? = null,
+    val errorMessageEn: String? = null,
+    val connectedAtMillis: Long = 0L,
+    val updatedAtMillis: Long = 0L,
+    val lastSyncedAtMillis: Long = updatedAtMillis
+) {
+    val isConfigured: Boolean
+        get() = isConnected || driveRootFolderId.isNotBlank()
+
+    val rootFolderId: String
+        get() = driveRootFolderId
+
+    val rootFolderName: String
+        get() = driveRootFolderName
+
+    val sharedMemberEmails: List<String>
+        get() = (sharedEmails + sharedWithEmails).distinct()
+
+    val hasValidRootFolder: Boolean
+        get() = driveRootFolderId.isNotBlank() && driveRootFolderName == GOOGLE_DRIVE_ROOT_FOLDER_NAME
+}
+
 data class DocumentFolder(
     val id: String = UUID.randomUUID().toString(),
     val nameHe: String,
     val nameEn: String,
     val iconEmoji: String,
-    val colorHex: Long
+    val colorHex: Long,
+    val familyId: String = "",
+    val parentFolderId: String? = null,
+    val createdByUid: String = "",
+    val createdByName: String = "",
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val driveFolderId: String = id,
+    val driveParentFolderId: String = parentFolderId ?: "",
+    val webViewLink: String = ""
 ) {
-    fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) nameHe else nameEn
+    fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) nameHe else nameEn.ifBlank { nameHe }
     fun getName(isHebrew: Boolean): String = getDisplayName(isHebrew)
 }
 
@@ -555,7 +703,7 @@ data class FamilyDocument(
     val id: String = UUID.randomUUID().toString(),
     val folderId: String,
     val name: String,
-    val extension: String, // PDF, JPG, PNG, DOCX, XLSX
+    val extension: String, // PDF, JPG, PNG, DOCX, XLSX, PPTX, TXT, ZIP
     val sizeFormatted: String,
     val uploadedByMemberId: String = "",
     val uploadedDateFormatted: String = "Today",
@@ -566,8 +714,59 @@ data class FamilyDocument(
     val contentPreviewEn: String = "",
     val uploadedByName: String = uploadedByMemberId,
     val uploadDateFormatted: String = uploadedDateFormatted,
-    val driveFileUrl: String = driveUrl
-)
+    val driveFileUrl: String = driveUrl,
+    val familyId: String = "",
+    val uploadedByUid: String = uploadedByMemberId,
+    val sizeBytes: Long = parseFormattedSizeToBytes(sizeFormatted),
+    val mimeType: String = defaultMimeTypeForExtension(extension),
+    val storagePath: String = "",
+    val uploadedAtMillis: Long = System.currentTimeMillis(),
+    val thumbnailBase64: String? = null,
+    val chunkCount: Int = 0,
+    val driveFileId: String = id,
+    val driveParentFolderId: String = folderId,
+    val webViewLink: String = driveUrl
+) {
+    val isImageFile: Boolean
+        get() = extension.uppercase() in setOf("JPG", "JPEG", "PNG", "WEBP")
+
+    val isPdfFile: Boolean
+        get() = extension.uppercase() == "PDF"
+
+    val isOfficeOrArchiveFile: Boolean
+        get() = extension.uppercase() in setOf("DOC", "DOCX", "XLS", "XLSX", "PPT", "PPTX", "TXT", "ZIP")
+
+    companion object {
+        fun parseFormattedSizeToBytes(formatted: String): Long {
+            val clean = formatted.trim().uppercase()
+            val numberPart = clean.replace(Regex("[^0-9.]"), "").toDoubleOrNull() ?: return 1024L
+            return when {
+                clean.contains("MB") -> (numberPart * 1024.0 * 1024.0).toLong().coerceAtLeast(1L)
+                clean.contains("KB") -> (numberPart * 1024.0).toLong().coerceAtLeast(1L)
+                clean.contains("B") -> numberPart.toLong().coerceAtLeast(1L)
+                else -> (numberPart * 1024.0).toLong().coerceAtLeast(1L)
+            }
+        }
+
+        fun defaultMimeTypeForExtension(ext: String): String {
+            return when (ext.trim().uppercase()) {
+                "PDF" -> "application/pdf"
+                "JPG", "JPEG" -> "image/jpeg"
+                "PNG" -> "image/png"
+                "WEBP" -> "image/webp"
+                "DOC" -> "application/msword"
+                "DOCX" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                "XLS" -> "application/vnd.ms-excel"
+                "XLSX" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                "PPT" -> "application/vnd.ms-powerpoint"
+                "PPTX" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                "TXT" -> "text/plain"
+                "ZIP" -> "application/zip"
+                else -> "application/octet-stream"
+            }
+        }
+    }
+}
 
 enum class NotificationType {
     TASK_COMPLETED,

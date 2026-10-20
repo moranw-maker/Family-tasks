@@ -1,15 +1,22 @@
 package com.example.data
 
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import com.example.data.local.AppDatabase
 import com.example.data.local.OfflineSyncDao
 import com.example.data.local.OfflineSyncQueueEntity
 import com.example.data.local.TaskDao
+import com.example.files.FamilyCloudFileTransferEngine
+import com.example.files.FamilyFileManagerHelper
+import com.example.files.GoogleDriveFamilyService
 import com.example.model.*
+import com.example.notifications.FcmTokenManager
 import com.example.util.FirestoreErrorHandler
 import com.example.util.FirestoreErrorHandler.StartupFailureCategory
 import com.example.util.FirestoreErrorHandler.StartupStage
+import com.example.util.NotificationHelper
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
@@ -19,8 +26,10 @@ import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -34,10 +43,12 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import java.security.SecureRandom
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.util.Date
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Production Hybrid Repository (V1.6):
@@ -52,7 +63,7 @@ import java.util.UUID
  * - Protects the last remaining PARENT from removal or demotion
  */
 class FamilyRepository(
-    context: Context? = null,
+    private val context: Context? = null,
     private val taskDao: TaskDao? = context?.let { AppDatabase.getInstance(it).taskDao() },
     private val offlineSyncDao: OfflineSyncDao? = context?.let { AppDatabase.getInstance(it).offlineSyncDao() },
     val configuredDatabaseId: String = resolveConfiguredDatabaseId(context),
@@ -63,6 +74,9 @@ class FamilyRepository(
         runCatching { FirebaseAuth.getInstance() }.getOrNull()
     }
 ) {
+    private val appContext: Context?
+        get() = context
+
     constructor(
         firestore: FirebaseFirestore,
         auth: FirebaseAuth
@@ -123,6 +137,20 @@ class FamilyRepository(
             }
             return sb.toString()
         }
+
+        private const val FILE_MANAGER_PREFS = "family_tasks_file_manager_prefs"
+        private val persistedSelectedFolderByFamily = ConcurrentHashMap<String, String?>()
+        private val persistedFoldersByFamily = ConcurrentHashMap<String, List<DocumentFolder>>()
+        private val persistedDocumentsByFamily = ConcurrentHashMap<String, List<FamilyDocument>>()
+        private val persistedDriveConfigByFamily = ConcurrentHashMap<String, FamilyDriveConfig>()
+
+        fun defaultStarterFolders(familyId: String = ""): List<DocumentFolder> = listOf(
+            DocumentFolder("f_school", "לימודים ובית ספר", "School & Homework", "🎒", 0xFF1A73E8, familyId = familyId),
+            DocumentFolder("f_medical", "רפואה ובריאות", "Medical & Health", "🩺", 0xFFEA4335, familyId = familyId),
+            DocumentFolder("f_Artwork", "ציורים ויצירות ילדים", "Kids Artwork", "🎨", 0xFF9334E6, familyId = familyId),
+            DocumentFolder("f_home", "מסמכי הבית וחשבונות", "Household & Bills", "🏠", 0xFF34A853, familyId = familyId),
+            DocumentFolder("f_trips", "חופשות וטיולים", "Family Trips", "✈️", 0xFFFBBC04, familyId = familyId)
+        )
     }
 
     private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -142,11 +170,41 @@ class FamilyRepository(
     var lastClassifiedStartupFailure: FirestoreErrorHandler.ClassifiedStartupFailure? = null
         private set
 
+    /** Last classified invitation error for diagnostics and automated tests. */
+    @Volatile
+    var lastClassifiedInvitationFailure: FirestoreErrorHandler.ClassifiedInvitationFailure? = null
+        private set
+
+    /** Last classified task error for diagnostics and automated tests. */
+    @Volatile
+    var lastClassifiedTaskFailure: FirestoreErrorHandler.ClassifiedTaskFailure? = null
+        private set
+
+    /** Deduplication set of task completion/approval notification keys to prevent duplicate alerts from snapshot listeners or retries. */
+    private val notifiedTaskCompletionKeys: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
     private var tasksListenerRegistration: ListenerRegistration? = null
     private var membersListenerRegistration: ListenerRegistration? = null
     private var rewardsListenerRegistration: ListenerRegistration? = null
     private var invitesListenerRegistration: ListenerRegistration? = null
     private var familyDocListenerRegistration: ListenerRegistration? = null
+    private var foldersListenerRegistration: ListenerRegistration? = null
+    private var filesListenerRegistration: ListenerRegistration? = null
+
+    /** Configurable hooks for testing file upload cancellation, progress, and retry behavior. */
+    @Volatile
+    var simulatedFileUploadStepDelayMs: Long = 0L
+
+    @Volatile
+    var simulateNextFileUploadFailure: Boolean = false
+
+    private val activeUploadJobs = ConcurrentHashMap<String, Job>()
+    private val _activeUploads = MutableStateFlow<List<FileUploadTaskState>>(emptyList())
+    val activeUploads: StateFlow<List<FileUploadTaskState>> = _activeUploads.asStateFlow()
+
+    private val _fileOperationError = MutableStateFlow<String?>(null)
+    val fileOperationError: StateFlow<String?> = _fileOperationError.asStateFlow()
 
     private val _activeFamilyId = MutableStateFlow("fam_israeli_8492")
     val activeFamilyId: StateFlow<String> = _activeFamilyId.asStateFlow()
@@ -430,6 +488,18 @@ class FamilyRepository(
     )
     val tasks: StateFlow<List<FamilyTask>> = _tasks.asStateFlow()
 
+    // Explicit per-task synchronization & approval states (IDLE, SAVING, PENDING_APPROVAL, SAVED_APPROVED, FAILED)
+    private val _taskSyncStates = MutableStateFlow<Map<String, TaskCompletionSyncState>>(emptyMap())
+    val taskSyncStates: StateFlow<Map<String, TaskCompletionSyncState>> = _taskSyncStates.asStateFlow()
+
+    // User-facing Hebrew error message when a task completion/approval/edit fails in Firestore
+    private val _taskOperationError = MutableStateFlow<String?>(null)
+    val taskOperationError: StateFlow<String?> = _taskOperationError.asStateFlow()
+
+    fun clearTaskOperationError() {
+        _taskOperationError.value = null
+    }
+
     val localRoomTasksFlow: Flow<List<Task>> = taskDao?.getAllTasksFlow() ?: emptyFlow()
 
     // 7. Kids School Timetable
@@ -511,7 +581,157 @@ class FamilyRepository(
     private val _activeBannerAlert = MutableStateFlow<FamilyNotificationAlert?>(null)
     val activeBannerAlert: StateFlow<FamilyNotificationAlert?> = _activeBannerAlert.asStateFlow()
 
+    private val _selectedFolderId = MutableStateFlow<String?>("f_school")
+    val selectedFolderId: StateFlow<String?> = _selectedFolderId.asStateFlow()
+
+    private val _fileSortOption = MutableStateFlow(FileSortOption.DATE)
+    val fileSortOption: StateFlow<FileSortOption> = _fileSortOption.asStateFlow()
+
+    private val _fileSortAscending = MutableStateFlow(false)
+    val fileSortAscending: StateFlow<Boolean> = _fileSortAscending.asStateFlow()
+
+    private val _fileSearchQuery = MutableStateFlow("")
+    val fileSearchQuery: StateFlow<String> = _fileSearchQuery.asStateFlow()
+
+    // Google Drive FamilyTasks Shared Folder State
+    private val _familyDriveConfig = MutableStateFlow(FamilyDriveConfig(familyId = _activeFamilyId.value))
+    val familyDriveConfig: StateFlow<FamilyDriveConfig> = _familyDriveConfig.asStateFlow()
+
+    private val _driveConsentPendingIntent = MutableStateFlow<PendingIntent?>(null)
+    val driveConsentPendingIntent: StateFlow<PendingIntent?> = _driveConsentPendingIntent.asStateFlow()
+
+    private val _driveConsentIntent = MutableStateFlow<Intent?>(null)
+    val driveConsentIntent: StateFlow<Intent?> = _driveConsentIntent.asStateFlow()
+
+    private val _driveOperationMessage = MutableStateFlow<String?>(null)
+    val driveOperationMessage: StateFlow<String?> = _driveOperationMessage.asStateFlow()
+
+    private val _pendingDrivePickerRequest = MutableStateFlow<DrivePickerAuthorizationRequest?>(null)
+    val pendingDrivePickerRequest: StateFlow<DrivePickerAuthorizationRequest?> = _pendingDrivePickerRequest.asStateFlow()
+
+    private val _drivePickerVerificationError = MutableStateFlow<String?>(null)
+    val drivePickerVerificationError: StateFlow<String?> = _drivePickerVerificationError.asStateFlow()
+
+    fun clearDriveOperationMessage() {
+        _driveOperationMessage.value = null
+    }
+
+    fun clearDriveConsentPrompts() {
+        _driveConsentPendingIntent.value = null
+        _driveConsentIntent.value = null
+    }
+
+    fun dismissDrivePickerAuthorizationDialog() {
+        _pendingDrivePickerRequest.value = null
+        _drivePickerVerificationError.value = null
+    }
+
+    private fun handleSharedFolderPickerException(
+        err: GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException
+    ) {
+        val currentCfg = _familyDriveConfig.value
+        val expectedRoot = err.expectedDriveRootFolderId.ifBlank { currentCfg.rootFolderId }
+        val req = DrivePickerAuthorizationRequest(
+            familyId = err.familyId.ifBlank { _activeFamilyId.value },
+            expectedDriveRootFolderId = expectedRoot,
+            expectedItemDriveId = err.requiredDriveItemId.ifBlank { expectedRoot },
+            expectedItemName = err.requiredItemName.ifBlank { GOOGLE_DRIVE_ROOT_FOLDER_NAME },
+            isRootFolderSelection = err.isRootFolder,
+            ownerEmail = currentCfg.ownerEmail,
+            reasonMessageHe = err.messageHe,
+            reasonMessageEn = err.messageEn
+        )
+        _pendingDrivePickerRequest.value = req
+        _drivePickerVerificationError.value = null
+        _familyDriveConfig.value = currentCfg.copy(
+            driveRootFolderId = expectedRoot.ifBlank { currentCfg.driveRootFolderId },
+            connectionStatus = DriveConnectionStatus.NEEDS_SHARED_FOLDER_PICKER,
+            errorMessageHe = err.messageHe,
+            errorMessageEn = err.messageEn
+        )
+        _fileOperationError.value = err.messageHe
+    }
+
+    fun requestSharedFolderPickerAuthorization() {
+        val cfg = _familyDriveConfig.value
+        val expectedRoot = cfg.rootFolderId.trim()
+            .ifBlank { GoogleDriveFamilyService.getRegisteredRootFolderIdForFamily(_activeFamilyId.value).orEmpty() }
+        if (expectedRoot.isBlank()) {
+            _fileOperationError.value = "תיקיית המשפחה המשותפת ($GOOGLE_DRIVE_ROOT_FOLDER_NAME) טרם הוגדרה על ידי ההורה."
+            return
+        }
+        _drivePickerVerificationError.value = null
+        _pendingDrivePickerRequest.value = DrivePickerAuthorizationRequest(
+            familyId = cfg.familyId.ifBlank { _activeFamilyId.value },
+            expectedDriveRootFolderId = expectedRoot,
+            expectedItemDriveId = expectedRoot,
+            expectedItemName = GOOGLE_DRIVE_ROOT_FOLDER_NAME,
+            isRootFolderSelection = true,
+            ownerEmail = cfg.ownerEmail,
+            reasonMessageHe = "יש לבחור ולאשר את תיקיית המשפחה המשותפת ($GOOGLE_DRIVE_ROOT_FOLDER_NAME) בבורר הקבצים של Google Drive.",
+            reasonMessageEn = "Please select and authorize the shared family folder ($GOOGLE_DRIVE_ROOT_FOLDER_NAME) in Google Picker."
+        )
+    }
+
+    fun verifyAndConnectPickedSharedFolder(
+        pickedDriveId: String,
+        pickedName: String = GOOGLE_DRIVE_ROOT_FOLDER_NAME,
+        onComplete: ((Result<FamilyDriveConfig>) -> Unit)? = null
+    ) {
+        repoScope.launch {
+            val res = verifyAndConnectPickedSharedFolderSuspend(
+                pickedDriveId = pickedDriveId,
+                pickedName = pickedName,
+                targetFamilyId = _activeFamilyId.value
+            )
+            onComplete?.invoke(res)
+        }
+    }
+
+    suspend fun verifyAndConnectPickedSharedFolderSuspend(
+        pickedDriveId: String,
+        pickedName: String = GOOGLE_DRIVE_ROOT_FOLDER_NAME,
+        targetFamilyId: String = _activeFamilyId.value
+    ): Result<FamilyDriveConfig> {
+        val famId = targetFamilyId.ifBlank { _activeFamilyId.value }
+        val currentCfg = _familyDriveConfig.value
+        val pendingReq = _pendingDrivePickerRequest.value
+        val expectedRootId = pendingReq?.expectedDriveRootFolderId
+            ?.takeIf { it.isNotBlank() }
+            ?: currentCfg.rootFolderId.trim()
+                .ifBlank { GoogleDriveFamilyService.getRegisteredRootFolderIdForFamily(famId).orEmpty() }
+        val expectedItemId = pendingReq?.expectedItemDriveId
+            ?.takeIf { it.isNotBlank() }
+            ?: expectedRootId
+
+        val verifyRes = GoogleDriveFamilyService.verifyAndAuthorizePickedDriveItem(
+            familyId = famId,
+            expectedDriveRootFolderId = expectedRootId,
+            pickedDriveId = pickedDriveId,
+            pickedName = pickedName,
+            expectedDriveItemId = expectedItemId,
+            callerUid = currentUid(),
+            callerName = _currentMember.value.name
+        )
+        return verifyRes.fold(
+            onSuccess = {
+                _pendingDrivePickerRequest.value = null
+                _drivePickerVerificationError.value = null
+                _fileOperationError.value = null
+                setupOrReconnectFamilyGoogleDriveSuspend(famId)
+            },
+            onFailure = { err ->
+                val msgHe = err.localizedMessage
+                    ?: "התיקייה שנבחרה אינה תואמת לתיקיית המשפחה המשותפת (FamilyTasks). יש לבחור את התיקייה המשותפת של ההורה בלבד."
+                _drivePickerVerificationError.value = msgHe
+                _fileOperationError.value = msgHe
+                Result.failure(err)
+            }
+        )
+    }
+
     init {
+        restorePersistedFileNavigationState(_activeFamilyId.value)
         seedLocalRoomIfNeeded()
         observeAuthAndAttachFirestore()
     }
@@ -695,6 +915,24 @@ class FamilyRepository(
      */
     private fun isCanonicalV16RoleString(rawRole: String?): Boolean {
         return rawRole == "PARENT" || rawRole == "CHILD"
+    }
+
+    /**
+     * Automatically obtains the signed-in user's verified Google email from the active
+     * authentication session (`FirebaseAuth.currentUser.email` / `GoogleAuthHelper` / `_googleUserEmail`)
+     * so parents never have to type family members' email addresses manually when they are already available.
+     */
+    fun resolveVerifiedGoogleEmail(explicitEmail: String? = null): String {
+        val candidates = listOfNotNull(
+            explicitEmail?.trim()?.lowercase(),
+            authProvider()?.currentUser?.email?.trim()?.lowercase(),
+            _googleUserEmail.value.trim().lowercase(),
+            runCatching { com.example.auth.GoogleAuthHelper.currentFirebaseUser?.email?.trim()?.lowercase() }.getOrNull(),
+            _currentMember.value.googleEmail?.trim()?.lowercase()
+        )
+        return candidates.firstOrNull { it.isNotBlank() && it.contains("@") && it != "user@gmail.com" }
+            ?: candidates.firstOrNull { it.isNotBlank() && it.contains("@") }
+            ?: ""
     }
 
     /**
@@ -976,9 +1214,13 @@ class FamilyRepository(
                     val resolvedPhotoUrl = memberSnap?.getString("photoUrl")?.takeIf { it.isNotBlank() }
                         ?: storedUserPhotoUrl
                         ?: photoUrl
-                    val resolvedEmail = memberSnap?.getString("googleEmail")?.takeIf { it.isNotBlank() }
-                        ?: userSnap.getString("email")?.takeIf { it.isNotBlank() }
-                        ?: email
+                    val verifiedAuthEmail = resolveVerifiedGoogleEmail(email)
+                    val resolvedEmail = verifiedAuthEmail.ifBlank {
+                        memberSnap?.getString("googleEmail")?.trim()?.lowercase()?.takeIf { it.isNotBlank() }
+                            ?: memberSnap?.getString("email")?.trim()?.lowercase()?.takeIf { it.isNotBlank() }
+                            ?: userSnap.getString("email")?.trim()?.lowercase()?.takeIf { it.isNotBlank() }
+                            ?: email.trim().lowercase()
+                    }
                     val preservedEarnedPoints = (memberSnap?.getLong("earnedPoints") ?: 0L).toInt()
                     val preservedSpentPoints = (memberSnap?.getLong("spentPoints") ?: 0L).toInt()
 
@@ -1033,7 +1275,7 @@ class FamilyRepository(
                         }
                     }
 
-                    // 2. Safe V1.5 -> V1.6 member document migration using non-destructive merge
+                    // 2. Safe V1.5 -> V1.6 member document migration + automatic verified Google email backfill
                     val memberMissingFields = mutableMapOf<String, Any>()
                     if (!memberExists) {
                         memberMissingFields["id"] = uid
@@ -1048,7 +1290,10 @@ class FamilyRepository(
                         memberMissingFields["spentPoints"] = preservedSpentPoints
                         memberMissingFields["invitationPending"] = false
                         memberMissingFields["invitationAccepted"] = true
-                        if (resolvedEmail.isNotBlank()) memberMissingFields["googleEmail"] = resolvedEmail
+                        if (resolvedEmail.isNotBlank()) {
+                            memberMissingFields["googleEmail"] = resolvedEmail
+                            memberMissingFields["email"] = resolvedEmail
+                        }
                         if (!resolvedPhotoUrl.isNullOrBlank()) memberMissingFields["photoUrl"] = resolvedPhotoUrl
                     } else {
                         if (!isCanonicalV16RoleString(memberRoleStr)) {
@@ -1057,8 +1302,13 @@ class FamilyRepository(
                         if (memberSnap?.getString("familyIdentity").isNullOrBlank()) {
                             memberMissingFields["familyIdentity"] = validatedIdentity.toFirestoreValue()
                         }
-                        if (memberSnap?.getString("googleEmail").isNullOrBlank() && resolvedEmail.isNotBlank()) {
+                        if (resolvedEmail.isNotBlank() && (
+                            memberSnap?.getString("googleEmail")?.trim()?.lowercase() != resolvedEmail ||
+                                memberSnap.getString("email")?.trim()?.lowercase() != resolvedEmail
+                            )
+                        ) {
                             memberMissingFields["googleEmail"] = resolvedEmail
+                            memberMissingFields["email"] = resolvedEmail
                         }
                         if (memberSnap?.getString("photoUrl").isNullOrBlank() && !resolvedPhotoUrl.isNullOrBlank()) {
                             memberMissingFields["photoUrl"] = resolvedPhotoUrl
@@ -1070,7 +1320,7 @@ class FamilyRepository(
                         }
                     }
 
-                    // 3. Safe V1.5 -> V1.6 user profile migration using non-destructive merge
+                    // 3. Safe V1.5 -> V1.6 user profile migration + automatic verified Google email backfill
                     val userMissingFields = mutableMapOf<String, Any>()
                     if (!userSnap.exists() || userSnap.getString("familyId").isNullOrBlank()) {
                         userMissingFields["uid"] = uid
@@ -1081,7 +1331,10 @@ class FamilyRepository(
                         userMissingFields["name"] = persistedName
                         userMissingFields["avatarEmoji"] = resolvedEmoji
                         userMissingFields["familyName"] = resolvedFamilyName
-                        if (resolvedEmail.isNotBlank()) userMissingFields["email"] = resolvedEmail
+                        if (resolvedEmail.isNotBlank()) {
+                            userMissingFields["email"] = resolvedEmail
+                            userMissingFields["googleEmail"] = resolvedEmail
+                        }
                         if (!resolvedPhotoUrl.isNullOrBlank()) userMissingFields["photoUrl"] = resolvedPhotoUrl
                     } else {
                         // Also normalize user profile role to match the authoritative family membership role
@@ -1093,6 +1346,14 @@ class FamilyRepository(
                         }
                         if (userSnap.getString("familyName").isNullOrBlank()) {
                             userMissingFields["familyName"] = resolvedFamilyName
+                        }
+                        if (resolvedEmail.isNotBlank() && (
+                            userSnap.getString("email")?.trim()?.lowercase() != resolvedEmail ||
+                                userSnap.getString("googleEmail")?.trim()?.lowercase() != resolvedEmail
+                            )
+                        ) {
+                            userMissingFields["email"] = resolvedEmail
+                            userMissingFields["googleEmail"] = resolvedEmail
                         }
                     }
                     if (userMissingFields.isNotEmpty()) {
@@ -1129,10 +1390,122 @@ class FamilyRepository(
                     if (!resolvedPhotoUrl.isNullOrBlank()) _googleUserPhotoUrl.value = resolvedPhotoUrl
                     _currentMember.value = restoredMember
 
-                    val currentList = _members.value.filter { it.id == uid }
-                        .map { restoredMember }
-                        .ifEmpty { listOf(restoredMember) }
-                    _members.value = currentList
+                    val loadedMembers = if (db != null && authProvider()?.currentUser != null) {
+                        val allDocs = runCatching {
+                            db.collection("families").document(existingFamilyId)
+                                .collection("members").get().await().documents
+                        }.getOrNull().orEmpty()
+                        val parsedMembers = allDocs.mapNotNull { doc ->
+                            if (doc.id == uid) {
+                                restoredMember
+                            } else {
+                                val mName = doc.getString("name") ?: doc.getString("displayName") ?: return@mapNotNull null
+                                val mRoleRaw = doc.getString("role") ?: doc.getString("userRole") ?: doc.getString("familyIdentity")
+                                val mRole = UserRole.fromFirestoreValue(mRoleRaw)
+                                val mPoints = (doc.getLong("earnedPoints") ?: 0L).toInt()
+                                val mIdentityRaw = doc.getString("familyIdentity")
+                                val mEmojiRaw = doc.getString("avatarEmoji")?.takeIf { it.isNotBlank() }
+                                val mIdentity = FamilyIdentity.fromFirestoreValue(
+                                    raw = mIdentityRaw,
+                                    role = mRole,
+                                    avatarEmoji = mEmojiRaw,
+                                    nameHint = mName,
+                                    memberId = doc.id
+                                )
+                                FamilyMember(
+                                    id = doc.id,
+                                    name = mName,
+                                    nameEn = doc.getString("nameEn") ?: mName,
+                                    avatarEmoji = mEmojiRaw ?: mIdentity.defaultEmoji,
+                                    role = mRole,
+                                    familyIdentity = mIdentity,
+                                    colorHex = doc.getLong("colorHex")
+                                        ?: if (mRole == UserRole.PARENT) 0xFF1A73E8L else 0xFF34A853L,
+                                    googleEmail = doc.getString("googleEmail") ?: doc.getString("email"),
+                                    photoUrl = doc.getString("photoUrl"),
+                                    schoolGrade = doc.getString("schoolGrade"),
+                                    earnedPoints = mPoints,
+                                    invitationPending = false,
+                                    invitationAccepted = true,
+                                    inviteToken = doc.getString("inviteCode") ?: doc.getString("inviteToken"),
+                                    invitedByMemberId = doc.getString("invitedByMemberId")
+                                )
+                            }
+                        }
+                        if (parsedMembers.any { it.id == uid }) {
+                            parsedMembers
+                        } else {
+                            listOf(restoredMember) + parsedMembers
+                        }
+                    } else {
+                        val localOtherMembers = _members.value.filter { it.id != uid && !it.id.startsWith("m_") }
+                        listOf(restoredMember) + localOtherMembers
+                    }
+                    _members.value = loadedMembers
+
+                    val confirmedPendingInvites = if (db != null && authProvider()?.currentUser != null && validatedRole == UserRole.PARENT) {
+                        val now = System.currentTimeMillis()
+                        val inviteDocs = runCatching {
+                            db.collection("family_invites")
+                                .whereEqualTo("familyId", existingFamilyId)
+                                .get()
+                                .await()
+                                .documents
+                        }.getOrNull().orEmpty()
+                        inviteDocs.mapNotNull { doc ->
+                            val data = doc.data ?: return@mapNotNull null
+                            parseInvitationDocument(doc.id, data).also { inv ->
+                                invitationsByCode[inv.code] = inv
+                            }
+                        }.filter { it.status == InvitationStatus.PENDING && !it.isExpired(now) }
+                            .sortedByDescending { it.createdAt }
+                    } else {
+                        _pendingInvitations.value.filter {
+                            it.familyId == existingFamilyId && it.status == InvitationStatus.PENDING && !it.isExpired()
+                        }
+                    }
+                    _pendingInvitations.value = confirmedPendingInvites
+
+                    _cloudFamilyGroup.value = _cloudFamilyGroup.value.copy(
+                        familyId = existingFamilyId,
+                        familyName = resolvedFamilyName,
+                        inviteCode = confirmedPendingInvites.firstOrNull()?.code.orEmpty(),
+                        ownerEmail = resolvedEmail.ifBlank { email },
+                        ownerName = persistedName,
+                        syncedMembersCount = loadedMembers.size,
+                        lastSyncedEpochMillis = System.currentTimeMillis()
+                    )
+
+                    if (db != null && authProvider()?.currentUser != null) {
+                        runCatching {
+                            val taskDocs = db.collection("families")
+                                .document(existingFamilyId)
+                                .collection("tasks")
+                                .get()
+                                .await()
+                                .documents
+                            val loadedTasks = taskDocs.mapNotNull { doc ->
+                                val data = doc.data ?: return@mapNotNull null
+                                parseTaskDocument(doc.id, data, existingFamilyId)
+                            }
+                            _tasks.value = loadedTasks
+                            val initialSyncMap = mutableMapOf<String, TaskCompletionSyncState>()
+                            for (t in loadedTasks) {
+                                if (t.isCompleted) {
+                                    notifiedTaskCompletionKeys.add("${t.id}:completed")
+                                    if (t.approvedByParent) {
+                                        notifiedTaskCompletionKeys.add("${t.id}:approved")
+                                        initialSyncMap[t.id] = TaskCompletionSyncState.SAVED_APPROVED
+                                    } else {
+                                        initialSyncMap[t.id] = TaskCompletionSyncState.PENDING_APPROVAL
+                                    }
+                                } else {
+                                    initialSyncMap[t.id] = TaskCompletionSyncState.IDLE
+                                }
+                            }
+                            _taskSyncStates.value = initialSyncMap
+                        }
+                    }
 
                     attachFirestoreRealtimeListeners(existingFamilyId)
                     flushOfflineSyncQueue(existingFamilyId)
@@ -1231,9 +1604,7 @@ class FamilyRepository(
         val uid = creatorUidOverride?.takeIf { it.isNotBlank() }
             ?: authProvider()?.currentUser?.uid
             ?: "usr_${UUID.randomUUID().toString().take(8)}"
-        val email = creatorEmailOverride?.takeIf { it.isNotBlank() }
-            ?: authProvider()?.currentUser?.email
-            ?: _googleUserEmail.value
+        val email = resolveVerifiedGoogleEmail(creatorEmailOverride)
         val photoUrl = authProvider()?.currentUser?.photoUrl?.toString() ?: _googleUserPhotoUrl.value
 
         val currentActive = _membershipState.value
@@ -1323,13 +1694,16 @@ class FamilyRepository(
                 batch.set(
                     familyRef,
                     mapOf(
+                        "id" to newFamilyId,
                         "familyId" to newFamilyId,
                         "name" to cleanFamilyName,
                         "familyName" to cleanFamilyName,
                         "createdBy" to uid,
+                        "createdById" to uid,
                         "ownerUid" to uid,
                         "ownerEmail" to email,
                         "adminUids" to listOf(uid),
+                        "memberIds" to listOf(uid),
                         "memberUids" to listOf(uid),
                         "updatedAt" to now
                     ),
@@ -1347,6 +1721,7 @@ class FamilyRepository(
                     "familyIdentity" to resolvedParentIdentity.toFirestoreValue(), // "FATHER" or "MOTHER"
                     "colorHex" to creatorMember.colorHex,
                     "googleEmail" to email,
+                    "email" to email,
                     "earnedPoints" to 0,
                     "spentPoints" to 0,
                     "invitationPending" to false,
@@ -1357,10 +1732,12 @@ class FamilyRepository(
                     memberData["photoUrl"] = photoUrl
                 }
                 batch.set(memberRef, memberData, SetOptions.merge())
+                batch.commit().await()
 
                 val userData = mutableMapOf<String, Any>(
                     "uid" to uid,
                     "email" to email,
+                    "googleEmail" to email,
                     "displayName" to cleanParentName,
                     "name" to cleanParentName,
                     "familyId" to newFamilyId,
@@ -1373,9 +1750,7 @@ class FamilyRepository(
                 if (!photoUrl.isNullOrBlank()) {
                     userData["photoUrl"] = photoUrl
                 }
-                batch.set(userRef, userData, SetOptions.merge())
-
-                batch.commit().await()
+                userRef.set(userData, SetOptions.merge()).await()
             } catch (e: Exception) {
                 FirestoreErrorHandler.classifyStartupFailure(
                     error = e,
@@ -1434,30 +1809,359 @@ class FamilyRepository(
      * - The invited role (`PARENT` or `CHILD`) is stored in Firestore and is immutable after creation.
      * - Pending invitations are stored in `_pendingInvitations` and NEVER mixed into active `_members`.
      */
+    /**
+     * Ensures that an authenticated PARENT has a valid, persisted `/families/{familyId}` and
+     * `/families/{familyId}/members/{parentUid}` (`role = "PARENT"`) in the named Firestore database
+     * before creating an invitation in `/family_invites/{code}`.
+     *
+     * SECURITY INVARIANT:
+     * - If `/families/{familyId}/members/{parentUid}` exists in Firestore and has a CHILD role,
+     *   immediately throws [SecurityException] so a CHILD can NEVER create invitations.
+     */
+    private suspend fun ensureParentAuthorizedInFirestoreForInvite(
+        db: FirebaseFirestore,
+        parentUid: String,
+        parentEmail: String,
+        parentMember: FamilyMember
+    ): Pair<String, String> {
+        var resolvedFamilyId = _activeFamilyId.value.trim()
+        var resolvedFamilyName = _familyName.value.trim().ifBlank { "המשפחה שלי" }
+
+        // If activeFamilyId is blank or still on the offline demo placeholder, check /users/{parentUid} first
+        if (resolvedFamilyId.isBlank() || resolvedFamilyId == "fam_israeli_8492") {
+            val userSnap = runCatching {
+                db.collection("users").document(parentUid).get().await()
+            }.getOrNull()
+            val userFamId = (
+                userSnap?.getString("familyId")
+                    ?: userSnap?.getString("activeFamilyId")
+                    ?: userSnap?.getString("groupId")
+                )?.trim()?.takeIf { it.isNotBlank() && it != "fam_israeli_8492" }
+            val userFamName = userSnap?.getString("familyName")?.trim()?.takeIf { it.isNotBlank() }
+
+            if (userFamId != null) {
+                resolvedFamilyId = userFamId
+                if (userFamName != null) {
+                    resolvedFamilyName = userFamName
+                }
+                _activeFamilyId.value = resolvedFamilyId
+                _familyName.value = resolvedFamilyName
+            } else if (resolvedFamilyId.isBlank() || resolvedFamilyId == "fam_israeli_8492") {
+                resolvedFamilyId = "fam_${parentUid.take(8)}_${System.currentTimeMillis() % 10000}"
+                _activeFamilyId.value = resolvedFamilyId
+            }
+        }
+
+        val familyRef = db.collection("families").document(resolvedFamilyId)
+        val memberRef = familyRef.collection("members").document(parentUid)
+
+        // Check existing member document in Firestore
+        val memberSnap: DocumentSnapshot? = try {
+            memberRef.get().await()
+        } catch (memberErr: FirebaseFirestoreException) {
+            if (memberErr.code == FirebaseFirestoreException.Code.UNAVAILABLE ||
+                memberErr.code == FirebaseFirestoreException.Code.DEADLINE_EXCEEDED
+            ) {
+                throw memberErr
+            }
+            null
+        }
+
+        if (memberSnap != null && memberSnap.exists()) {
+            val rawRole = (memberSnap.getString("role") ?: memberSnap.getString("userRole"))?.trim()
+            if (!rawRole.isNullOrBlank() && !UserRole.fromFirestoreValue(rawRole).isParentRole) {
+                throw SecurityException("רק הורה (מנהל משפחה) רשאי ליצור קודי הזמנה למשפחה.")
+            }
+            // If legacy parent role (e.g. PRIMARY_ADMIN / ADMIN / FATHER / MOTHER), normalize to canonical "PARENT"
+            if (rawRole != "PARENT") {
+                val parentIdentity = if (parentMember.familyIdentity.isParentIdentity) {
+                    parentMember.familyIdentity
+                } else {
+                    FamilyIdentity.FATHER
+                }
+                memberRef.set(
+                    mapOf(
+                        "role" to UserRole.PARENT.toFirestoreValue(),
+                        "familyIdentity" to parentIdentity.toFirestoreValue()
+                    ),
+                    SetOptions.merge()
+                ).await()
+            }
+            return resolvedFamilyId to resolvedFamilyName
+        }
+
+        // Member doc does not exist yet in Firestore; inspect /families/{familyId}
+        val familySnap = familyRef.get().await()
+        if (familySnap.exists()) {
+            val remoteName = (familySnap.getString("familyName") ?: familySnap.getString("name"))
+                ?.trim()?.takeIf { it.isNotBlank() }
+            if (remoteName != null) {
+                resolvedFamilyName = remoteName
+                _familyName.value = remoteName
+            }
+            val isCreatorOrAdmin = familySnap.getString("createdBy") == parentUid ||
+                familySnap.getString("createdById") == parentUid ||
+                familySnap.getString("ownerUid") == parentUid ||
+                (familySnap.get("adminUids") as? List<*>)?.contains(parentUid) == true
+
+            if (!isCreatorOrAdmin) {
+                throw SecurityException("החשבון המחובר אינו רשום כהורה במשפחה זו בענן.")
+            }
+
+            // Self-heal missing /families/{familyId}/members/{parentUid} document for verified family creator/admin
+            val parentIdentity = if (parentMember.familyIdentity.isParentIdentity) {
+                parentMember.familyIdentity
+            } else {
+                FamilyIdentity.FATHER
+            }
+            memberRef.set(
+                mapOf(
+                    "id" to parentUid,
+                    "uid" to parentUid,
+                    "familyId" to resolvedFamilyId,
+                    "name" to parentMember.name.ifBlank { parentIdentity.labelHe },
+                    "nameEn" to parentMember.nameEn.ifBlank { parentMember.name.ifBlank { parentIdentity.labelEn } },
+                    "avatarEmoji" to parentMember.avatarEmoji.ifBlank { parentIdentity.defaultEmoji },
+                    "role" to UserRole.PARENT.toFirestoreValue(),
+                    "familyIdentity" to parentIdentity.toFirestoreValue(),
+                    "googleEmail" to parentEmail,
+                    "earnedPoints" to parentMember.earnedPoints,
+                    "spentPoints" to 0,
+                    "invitationPending" to false,
+                    "invitationAccepted" to true
+                ),
+                SetOptions.merge()
+            ).await()
+        } else {
+            // Family document was not yet persisted to Firestore (e.g. created in local/clean session); bootstrap atomically
+            val now = System.currentTimeMillis()
+            val parentIdentity = if (parentMember.familyIdentity.isParentIdentity) {
+                parentMember.familyIdentity
+            } else {
+                FamilyIdentity.FATHER
+            }
+            val batch = db.batch()
+            batch.set(
+                familyRef,
+                mapOf(
+                    "id" to resolvedFamilyId,
+                    "familyId" to resolvedFamilyId,
+                    "name" to resolvedFamilyName,
+                    "familyName" to resolvedFamilyName,
+                    "createdBy" to parentUid,
+                    "createdById" to parentUid,
+                    "ownerUid" to parentUid,
+                    "ownerEmail" to parentEmail,
+                    "adminUids" to listOf(parentUid),
+                    "memberIds" to listOf(parentUid),
+                    "memberUids" to listOf(parentUid),
+                    "updatedAt" to now
+                ),
+                SetOptions.merge()
+            )
+            batch.set(
+                memberRef,
+                mapOf(
+                    "id" to parentUid,
+                    "uid" to parentUid,
+                    "familyId" to resolvedFamilyId,
+                    "name" to parentMember.name.ifBlank { parentIdentity.labelHe },
+                    "nameEn" to parentMember.nameEn.ifBlank { parentMember.name.ifBlank { parentIdentity.labelEn } },
+                    "avatarEmoji" to parentMember.avatarEmoji.ifBlank { parentIdentity.defaultEmoji },
+                    "role" to UserRole.PARENT.toFirestoreValue(),
+                    "familyIdentity" to parentIdentity.toFirestoreValue(),
+                    "googleEmail" to parentEmail,
+                    "earnedPoints" to parentMember.earnedPoints,
+                    "spentPoints" to 0,
+                    "invitationPending" to false,
+                    "invitationAccepted" to true,
+                    "joinedAt" to now
+                ),
+                SetOptions.merge()
+            )
+            batch.commit().await()
+
+            db.collection("users").document(parentUid).set(
+                mapOf(
+                    "uid" to parentUid,
+                    "email" to parentEmail,
+                    "displayName" to parentMember.name.ifBlank { parentIdentity.labelHe },
+                    "name" to parentMember.name.ifBlank { parentIdentity.labelHe },
+                    "familyId" to resolvedFamilyId,
+                    "familyName" to resolvedFamilyName,
+                    "role" to UserRole.PARENT.toFirestoreValue(),
+                    "familyIdentity" to parentIdentity.toFirestoreValue(),
+                    "avatarEmoji" to parentMember.avatarEmoji.ifBlank { parentIdentity.defaultEmoji },
+                    "updatedAt" to now
+                ),
+                SetOptions.merge()
+            ).await()
+        }
+
+        return resolvedFamilyId to resolvedFamilyName
+    }
+
+    /**
+     * V1.6 Requirement 4:
+     * Generates and persists a unique, role-specific invitation in `/family_invites/{code}`
+     * in the named Firestore database (`ai-studio-android-familyta-a054dbd1-9c2d-4a83-ad6d-dcfe6fb0d2ca`).
+     * - Strictly enforces that ONLY a PARENT can create invitations (both locally and in Firestore).
+     * - Writes document ID = `code` (6-character uppercase alphanumeric) with all required V1.6 fields.
+     * - Confirms the Firestore document commit before adding the invitation to `_pendingInvitations`
+     *   or returning success to the UI, so a failed write NEVER produces a shareable code.
+     */
     suspend fun createRoleSpecificInvitation(
         invitedRole: UserRole,
         invitedNickname: String = "",
-        customExpirationMs: Long = FamilyInvitation.DEFAULT_EXPIRATION_MS
+        customExpirationMs: Long = FamilyInvitation.DEFAULT_EXPIRATION_MS,
+        invitedEmail: String? = null,
+        intendedEmail: String? = null,
+        schoolGrade: String? = null,
+        customCodeOverride: String? = null
     ): Result<FamilyInvitation> {
         val current = _currentMember.value
+        val code = customCodeOverride?.trim()?.uppercase()?.takeIf { it.length >= 4 }
+            ?: generateSecureInviteCode()
+        val invitePath = "family_invites/$code"
+
         if (!current.isParent) {
-            return Result.failure(SecurityException("רק הורה (מנהל משפחה) רשאי ליצור הזמנות למשפחה."))
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = SecurityException("רק הורה (מנהל משפחה) רשאי ליצור קודי הזמנה למשפחה."),
+                stage = FirestoreErrorHandler.InvitationStage.VERIFY_PARENT_AUTHORIZATION,
+                path = invitePath,
+                rawInviteCode = code,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.UNAUTHORIZED_ROLE
+            )
+            lastClassifiedInvitationFailure = classified
+            return Result.failure(FirestoreErrorHandler.InvitationFirestoreException(classified))
+        }
+
+        if (simulateOfflineNetworkFailure) {
+            val offlineErr = FirebaseFirestoreException(
+                "Simulated offline network failure during invitation creation",
+                FirebaseFirestoreException.Code.UNAVAILABLE
+            )
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = offlineErr,
+                stage = FirestoreErrorHandler.InvitationStage.CREATE_INVITATION_WRITE,
+                path = invitePath,
+                rawInviteCode = code,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedInvitationFailure = classified
+            return Result.failure(FirestoreErrorHandler.InvitationFirestoreException(classified, offlineErr))
         }
 
         val canonicalRole = if (invitedRole.isParentRole) UserRole.PARENT else UserRole.CHILD
-        val code = generateSecureInviteCode()
         val now = System.currentTimeMillis()
         val expiresAt = now + customExpirationMs
-        val familyId = _activeFamilyId.value
-        val familyName = _familyName.value
+        var familyId = _activeFamilyId.value
+        var familyName = _familyName.value
         val parentUid = currentUid()
+        val parentEmail = authProvider()?.currentUser?.email ?: _googleUserEmail.value
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        var currentInviteStage = FirestoreErrorHandler.InvitationStage.VERIFY_PARENT_AUTHORIZATION
+
+        if (db != null && authUser != null) {
+            try {
+                FirestoreErrorHandler.logInvitationMilestone(
+                    stage = FirestoreErrorHandler.InvitationStage.VERIFY_PARENT_AUTHORIZATION,
+                    path = "families/$familyId/members/$parentUid",
+                    databaseId = configuredDatabaseId,
+                    rawInviteCode = code,
+                    note = "Verifying parent authorization before creating invitation"
+                )
+                val (verifiedFamilyId, verifiedFamilyName) = ensureParentAuthorizedInFirestoreForInvite(
+                    db = db,
+                    parentUid = authUser.uid,
+                    parentEmail = parentEmail,
+                    parentMember = current
+                )
+                familyId = verifiedFamilyId
+                familyName = verifiedFamilyName
+
+                currentInviteStage = FirestoreErrorHandler.InvitationStage.CREATE_INVITATION_WRITE
+                FirestoreErrorHandler.logInvitationMilestone(
+                    stage = FirestoreErrorHandler.InvitationStage.CREATE_INVITATION_WRITE,
+                    path = invitePath,
+                    databaseId = configuredDatabaseId,
+                    rawInviteCode = code,
+                    note = "Writing role=${canonicalRole.toFirestoreValue()} invitation to family_invites"
+                )
+
+                val inviteMap = mutableMapOf<String, Any>(
+                    "code" to code,
+                    "inviteCode" to code,
+                    "familyId" to familyId,
+                    "familyName" to familyName,
+                    "role" to canonicalRole.toFirestoreValue(),
+                    "invitedRole" to canonicalRole.toFirestoreValue(), // "PARENT" or "CHILD"
+                    "invitingParentUid" to authUser.uid,
+                    "createdById" to authUser.uid,
+                    "createdByUid" to authUser.uid,
+                    "invitingParentName" to current.name,
+                    "createdByName" to current.name,
+                    "invitedNickname" to invitedNickname.trim(),
+                    "invitedName" to invitedNickname.trim(),
+                    "createdAt" to now,
+                    "expiresAt" to expiresAt,
+                    "expiresAtMillis" to expiresAt,
+                    "status" to InvitationStatus.PENDING.name,
+                    "isUsed" to false,
+                    "isRevoked" to false,
+                    "revoked" to false
+                )
+                val effectiveEmail = intendedEmail?.takeIf { it.isNotBlank() } ?: invitedEmail?.takeIf { it.isNotBlank() }
+                if (!effectiveEmail.isNullOrBlank()) {
+                    inviteMap["intendedEmail"] = effectiveEmail.trim()
+                }
+                if (!schoolGrade.isNullOrBlank()) {
+                    inviteMap["schoolGrade"] = schoolGrade.trim()
+                }
+
+                val inviteDocRef = db.collection("family_invites").document(code)
+                inviteDocRef.set(inviteMap).await()
+
+                currentInviteStage = FirestoreErrorHandler.InvitationStage.CONFIRM_INVITATION_COMMIT
+                val verifySnap = inviteDocRef.get().await()
+                if (!verifySnap.exists()) {
+                    throw FirebaseFirestoreException(
+                        "Invitation document was not found in family_invites after write",
+                        FirebaseFirestoreException.Code.NOT_FOUND
+                    )
+                }
+
+                FirestoreErrorHandler.logInvitationMilestone(
+                    stage = FirestoreErrorHandler.InvitationStage.CONFIRM_INVITATION_COMMIT,
+                    path = invitePath,
+                    databaseId = configuredDatabaseId,
+                    rawInviteCode = code,
+                    note = "Confirmed invitation document committed in family_invites"
+                )
+            } catch (e: Exception) {
+                val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                    error = e,
+                    stage = currentInviteStage,
+                    path = invitePath,
+                    rawInviteCode = code,
+                    databaseId = configuredDatabaseId
+                )
+                lastClassifiedInvitationFailure = classified
+                invitationsByCode.remove(code)
+                _pendingInvitations.value = _pendingInvitations.value.filterNot { it.code == code }
+                return Result.failure(FirestoreErrorHandler.InvitationFirestoreException(classified, e))
+            }
+        }
 
         val invitation = FamilyInvitation(
             code = code,
             familyId = familyId,
             familyName = familyName,
             invitedRole = canonicalRole,
-            invitingParentUid = parentUid,
+            invitingParentUid = authUser?.uid ?: parentUid,
             invitingParentName = current.name,
             invitedNickname = invitedNickname.trim(),
             createdAt = now,
@@ -1465,36 +2169,17 @@ class FamilyRepository(
             status = InvitationStatus.PENDING
         )
 
-        val db = firestoreProvider()
-        if (db != null && authProvider()?.currentUser != null) {
-            try {
-                val inviteMap = mapOf(
-                    "code" to invitation.code,
-                    "inviteCode" to invitation.code,
-                    "familyId" to invitation.familyId,
-                    "familyName" to invitation.familyName,
-                    "invitedRole" to invitation.invitedRole.toFirestoreValue(), // "PARENT" or "CHILD"
-                    "invitingParentUid" to invitation.invitingParentUid,
-                    "createdById" to invitation.invitingParentUid,
-                    "invitingParentName" to invitation.invitingParentName,
-                    "invitedNickname" to invitation.invitedNickname,
-                    "createdAt" to invitation.createdAt,
-                    "expiresAt" to invitation.expiresAt,
-                    "expiresAtMillis" to invitation.expiresAt,
-                    "status" to InvitationStatus.PENDING.name,
-                    "isUsed" to false
-                )
-                db.collection("family_invites").document(code).set(inviteMap).await()
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to persist invitation to Firestore: ${e.message}", e)
-                return Result.failure(e)
-            }
-        }
-
+        lastClassifiedInvitationFailure = null
         invitationsByCode[code] = invitation
         _pendingInvitations.value = (_pendingInvitations.value.filterNot { it.code == code } + invitation)
             .filter { it.status == InvitationStatus.PENDING && !it.isExpired(now) }
             .sortedByDescending { it.createdAt }
+        _cloudFamilyGroup.value = _cloudFamilyGroup.value.copy(
+            familyId = familyId,
+            familyName = familyName,
+            inviteCode = code,
+            lastSyncedEpochMillis = now
+        )
 
         val roleLabelHe = if (canonicalRole == UserRole.PARENT) "הורה" else "ילד/ה"
         pushAlert(
@@ -1511,7 +2196,8 @@ class FamilyRepository(
     /**
      * V1.6 Requirement 5:
      * Validates an invitation code entered by a user before joining.
-     * Checks existence, status (PENDING vs REDEEMED / REVOKED), expiration, and duplicate membership.
+     * Checks existence in `/family_invites/{code}` on the named Firestore database,
+     * status (PENDING vs REDEEMED / REVOKED), expiration, and duplicate membership.
      */
     suspend fun validateInvitationCode(
         rawCode: String,
@@ -1519,25 +2205,132 @@ class FamilyRepository(
         nowMillis: Long = System.currentTimeMillis()
     ): InvitationValidationResult {
         val normalized = rawCode.trim().uppercase()
+        val invitePath = "family_invites/$normalized"
+
         if (normalized.length < 4) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = IllegalArgumentException("Invalid invitation code format"),
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                rawInviteCode = normalized,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.INVALID_FORMAT
+            )
+            lastClassifiedInvitationFailure = classified
             return InvitationValidationResult.Invalid(
                 errorCode = "INVALID_FORMAT",
-                messageHe = "נא להזין קוד הזמנה חוקי (6 תווים).",
-                messageEn = "Please enter a valid 6-character invitation code."
+                messageHe = classified.messageHe,
+                messageEn = classified.messageEn
+            )
+        }
+
+        if (simulateOfflineNetworkFailure) {
+            val offlineErr = FirebaseFirestoreException(
+                "Simulated offline network failure during invitation validation",
+                FirebaseFirestoreException.Code.UNAVAILABLE
+            )
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = offlineErr,
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                rawInviteCode = normalized,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedInvitationFailure = classified
+            return InvitationValidationResult.Invalid(
+                errorCode = "UNAVAILABLE",
+                messageHe = classified.messageHe,
+                messageEn = classified.messageEn
             )
         }
 
         var invitation: FamilyInvitation? = null
         val db = firestoreProvider()
         if (db != null && authProvider()?.currentUser != null) {
+            FirestoreErrorHandler.logInvitationMilestone(
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                databaseId = configuredDatabaseId,
+                rawInviteCode = normalized,
+                note = "Validating invitation document in family_invites"
+            )
             try {
                 val snap = db.collection("family_invites").document(normalized).get().await()
                 if (snap.exists()) {
-                    invitation = parseInvitationDocument(normalized, snap.data ?: emptyMap())
-                    invitationsByCode[normalized] = invitation
+                    var parsed = parseInvitationDocument(normalized, snap.data ?: emptyMap())
+                    if (parsed.familyName.isBlank() && parsed.familyId.isNotBlank()) {
+                        val famSnap = runCatching {
+                            db.collection("families").document(parsed.familyId).get().await()
+                        }.getOrNull()
+                        val resolvedFamName = (famSnap?.getString("familyName") ?: famSnap?.getString("name"))
+                            ?.takeIf { it.isNotBlank() }
+                        if (resolvedFamName != null) {
+                            parsed = parsed.copy(familyName = resolvedFamName)
+                        }
+                    }
+                    invitation = parsed
+                    invitationsByCode[normalized] = parsed
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Firestore lookup for invite code failed: ${e.javaClass.simpleName}")
+                val (rawCat, _) = com.example.util.classifyFirestoreException(e)
+                if (rawCat == com.example.util.FirestoreFailureCategory.UNAVAILABLE) {
+                    val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                        error = e,
+                        stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                        path = invitePath,
+                        rawInviteCode = normalized,
+                        databaseId = configuredDatabaseId,
+                        overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.UNAVAILABLE
+                    )
+                    lastClassifiedInvitationFailure = classified
+                    return InvitationValidationResult.Invalid(
+                        errorCode = "UNAVAILABLE",
+                        messageHe = classified.messageHe,
+                        messageEn = classified.messageEn
+                    )
+                }
+                if (rawCat == com.example.util.FirestoreFailureCategory.PERMISSION_DENIED) {
+                    // In V1.6 security rules, resource == null is allowed for all signed-in users,
+                    // whereas an already-used or revoked invitation denies get() to non-parents.
+                    val cached = invitationsByCode[normalized]
+                    if (cached?.status == InvitationStatus.REVOKED) {
+                        val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                            error = e,
+                            stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                            path = invitePath,
+                            rawInviteCode = normalized,
+                            databaseId = configuredDatabaseId,
+                            overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.REVOKED
+                        )
+                        lastClassifiedInvitationFailure = classified
+                        return InvitationValidationResult.Invalid(
+                            errorCode = "REVOKED",
+                            messageHe = classified.messageHe,
+                            messageEn = classified.messageEn
+                        )
+                    }
+                    val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                        error = e,
+                        stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                        path = invitePath,
+                        rawInviteCode = normalized,
+                        databaseId = configuredDatabaseId,
+                        overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.ALREADY_REDEEMED
+                    )
+                    lastClassifiedInvitationFailure = classified
+                    return InvitationValidationResult.Invalid(
+                        errorCode = "ALREADY_REDEEMED",
+                        messageHe = "קוד הזמנה זה כבר נוצל או בוטל ולא ניתן להשתמש בו שוב.",
+                        messageEn = "This invitation code has already been redeemed or revoked."
+                    )
+                }
+                FirestoreErrorHandler.classifyInvitationFailure(
+                    error = e,
+                    stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                    path = invitePath,
+                    rawInviteCode = normalized,
+                    databaseId = configuredDatabaseId
+                )
             }
         }
 
@@ -1546,6 +2339,15 @@ class FamilyRepository(
         }
 
         if (invitation == null) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = NoSuchElementException("Invitation code not found in family_invites"),
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                rawInviteCode = normalized,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.NOT_FOUND
+            )
+            lastClassifiedInvitationFailure = classified
             return InvitationValidationResult.Invalid(
                 errorCode = "NOT_FOUND",
                 messageHe = "קוד ההזמנה \"$normalized\" אינו קיים במערכת. ודאו שהקלדתם נכון.",
@@ -1554,6 +2356,15 @@ class FamilyRepository(
         }
 
         if (invitation.status == InvitationStatus.REDEEMED) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = IllegalStateException("Invitation already redeemed"),
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                rawInviteCode = normalized,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.ALREADY_REDEEMED
+            )
+            lastClassifiedInvitationFailure = classified
             return InvitationValidationResult.Invalid(
                 errorCode = "ALREADY_REDEEMED",
                 messageHe = "קוד הזמנה זה כבר נוצל ולא ניתן להשתמש בו שוב.",
@@ -1562,6 +2373,15 @@ class FamilyRepository(
         }
 
         if (invitation.status == InvitationStatus.REVOKED) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = IllegalStateException("Invitation revoked"),
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                rawInviteCode = normalized,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.REVOKED
+            )
+            lastClassifiedInvitationFailure = classified
             return InvitationValidationResult.Invalid(
                 errorCode = "REVOKED",
                 messageHe = "קוד הזמנה זה בוטל על ידי הורה במשפחה.",
@@ -1570,6 +2390,15 @@ class FamilyRepository(
         }
 
         if (invitation.isExpired(nowMillis)) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = IllegalStateException("Invitation expired"),
+                stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                path = invitePath,
+                rawInviteCode = normalized,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.EXPIRED
+            )
+            lastClassifiedInvitationFailure = classified
             return InvitationValidationResult.Invalid(
                 errorCode = "EXPIRED",
                 messageHe = "פג תוקפו של קוד ההזמנה. בקשו מההורה ליצור קוד הזמנה חדש.",
@@ -1588,6 +2417,15 @@ class FamilyRepository(
                     .await()
             }.getOrNull()
             if (existingMemberSnap?.exists() == true) {
+                val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                    error = IllegalStateException("User is already a member of target family"),
+                    stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+                    path = "families/${invitation.familyId}/members/$joiningUid",
+                    rawInviteCode = normalized,
+                    databaseId = configuredDatabaseId,
+                    overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.ALREADY_MEMBER
+                )
+                lastClassifiedInvitationFailure = classified
                 return InvitationValidationResult.Invalid(
                     errorCode = "ALREADY_MEMBER",
                     messageHe = "אתם כבר רשומים כחברים במשפחת \"${invitation.familyName}\"!",
@@ -1604,6 +2442,14 @@ class FamilyRepository(
             )
         }
 
+        lastClassifiedInvitationFailure = null
+        FirestoreErrorHandler.logInvitationMilestone(
+            stage = FirestoreErrorHandler.InvitationStage.VALIDATE_INVITATION_READ,
+            path = invitePath,
+            databaseId = configuredDatabaseId,
+            rawInviteCode = normalized,
+            note = "Invitation code validated successfully for role=${invitation.invitedRole.toFirestoreValue()}"
+        )
         return InvitationValidationResult.Valid(invitation)
     }
 
@@ -1626,7 +2472,7 @@ class FamilyRepository(
         nowMillis: Long = System.currentTimeMillis()
     ): Result<FamilyMembershipState.ActiveMember> {
         val uid = joiningUidOverride ?: authProvider()?.currentUser?.uid ?: "usr_${UUID.randomUUID().toString().take(8)}"
-        val email = joiningEmailOverride ?: authProvider()?.currentUser?.email ?: _googleUserEmail.value
+        val email = resolveVerifiedGoogleEmail(joiningEmailOverride)
         val photoUrl = joiningPhotoUrlOverride ?: authProvider()?.currentUser?.photoUrl?.toString() ?: _googleUserPhotoUrl.value
 
         val validation = validateInvitationCode(rawCode, joiningUid = uid, nowMillis = nowMillis)
@@ -1635,6 +2481,7 @@ class FamilyRepository(
         }
 
         val invite = (validation as InvitationValidationResult.Valid).invitation
+        val invitePath = "family_invites/${invite.code}"
         // CRITICAL: The role is strictly determined by the invitation, NEVER by client input
         val assignedRole: UserRole = if (invite.invitedRole.isParentRole) UserRole.PARENT else UserRole.CHILD
         val cleanName = memberDisplayName.trim().ifBlank {
@@ -1687,33 +2534,44 @@ class FamilyRepository(
 
         val db = firestoreProvider()
         if (db != null && authProvider()?.currentUser != null) {
+            FirestoreErrorHandler.logInvitationMilestone(
+                stage = FirestoreErrorHandler.InvitationStage.REDEEM_INVITATION_TRANSACTION,
+                path = invitePath,
+                databaseId = configuredDatabaseId,
+                rawInviteCode = invite.code,
+                note = "Starting atomic invitation redemption transaction"
+            )
             try {
                 val inviteRef = db.collection("family_invites").document(invite.code)
                 val familyRef = db.collection("families").document(invite.familyId)
                 val memberRef = familyRef.collection("members").document(uid)
                 val userRef = db.collection("users").document(uid)
 
-                var lockedRoleForFamilyUpdate = assignedRole
-
                 db.runTransaction { transaction ->
+                    // All reads MUST precede writes in a Firestore transaction
                     val freshInviteSnap = transaction.get(inviteRef)
+                    val familySnap = transaction.get(familyRef)
+
                     if (!freshInviteSnap.exists()) {
                         throw IllegalStateException("קוד ההזמנה אינו קיים.")
                     }
                     val freshStatus = InvitationStatus.fromFirestoreValue(freshInviteSnap.getString("status"))
                     val isAlreadyUsed = freshInviteSnap.getBoolean("isUsed") ?: false
+                    val isRevoked = (freshInviteSnap.getBoolean("isRevoked") ?: false) ||
+                        (freshInviteSnap.getBoolean("revoked") ?: false)
                     val freshExpiresAt = freshInviteSnap.getLong("expiresAt")
                         ?: freshInviteSnap.getLong("expiresAtMillis")
                         ?: 0L
-                    if (freshStatus != InvitationStatus.PENDING || isAlreadyUsed) {
+                    if (freshStatus != InvitationStatus.PENDING || isAlreadyUsed || isRevoked) {
                         throw IllegalStateException("קוד הזמנה זה כבר נוצל או בוטל.")
                     }
-                    if (nowMillis > freshExpiresAt) {
+                    if (freshExpiresAt > 0L && nowMillis > freshExpiresAt) {
                         throw IllegalStateException("פג תוקפו של קוד ההזמנה.")
                     }
 
-                    val lockedRole = UserRole.fromFirestoreValue(freshInviteSnap.getString("invitedRole"))
-                    lockedRoleForFamilyUpdate = lockedRole
+                    val lockedRoleRaw = freshInviteSnap.getString("invitedRole")
+                        ?: freshInviteSnap.getString("role")
+                    val lockedRole = UserRole.fromFirestoreValue(lockedRoleRaw)
                     val roleValue = lockedRole.toFirestoreValue() // "PARENT" or "CHILD"
                     val txIdentity = if (lockedRole == UserRole.PARENT) {
                         if (resolvedIdentity.isParentIdentity) resolvedIdentity else FamilyIdentity.MOTHER
@@ -1730,11 +2588,12 @@ class FamilyRepository(
                             "redeemedByUid" to uid,
                             "usedByUid" to uid,
                             "redeemedByName" to cleanName,
+                            "redeemedByEmail" to email,
                             "redeemedAt" to nowMillis
                         )
                     )
 
-                    // 2. Create validated member document with exact invitedRole & familyIdentity
+                    // 2. Create validated member document with exact invitedRole, familyIdentity, and verified Google email
                     val memberDocData = mutableMapOf<String, Any>(
                         "id" to uid,
                         "uid" to uid,
@@ -1746,6 +2605,7 @@ class FamilyRepository(
                         "familyIdentity" to txIdentity.toFirestoreValue(),
                         "colorHex" to if (lockedRole == UserRole.PARENT) 0xFF9334E6L else 0xFF34A853L,
                         "googleEmail" to email,
+                        "email" to email,
                         "earnedPoints" to 0,
                         "spentPoints" to 0,
                         "invitationPending" to false,
@@ -1759,38 +2619,56 @@ class FamilyRepository(
                     }
                     transaction.set(memberRef, memberDocData, SetOptions.merge())
 
-                    // 3. Save user's active familyId, validated role, and familyIdentity
+                    // 3. Atomically append joining user's UID to /families/{familyId} memberIds & memberUids
+                    if (familySnap.exists()) {
+                        val familyUpdates = mutableMapOf<String, Any>(
+                            "memberIds" to FieldValue.arrayUnion(uid),
+                            "memberUids" to FieldValue.arrayUnion(uid),
+                            "updatedAt" to nowMillis
+                        )
+                        if (lockedRole == UserRole.PARENT) {
+                            familyUpdates["adminUids"] = FieldValue.arrayUnion(uid)
+                        }
+                        transaction.update(familyRef, familyUpdates)
+                    }
+                    Pair(roleValue, txIdentity)
+                }.await().let { (committedRoleValue, committedIdentity) ->
+                    // 4. Save user's active familyId, validated role, familyIdentity, and verified Google email
                     val userDocData = mutableMapOf<String, Any>(
                         "uid" to uid,
                         "email" to email,
+                        "googleEmail" to email,
                         "displayName" to cleanName,
                         "name" to cleanName,
                         "familyId" to invite.familyId,
                         "familyName" to invite.familyName,
-                        "role" to roleValue,
-                        "familyIdentity" to txIdentity.toFirestoreValue(),
-                        "avatarEmoji" to txIdentity.defaultEmoji,
+                        "role" to committedRoleValue,
+                        "familyIdentity" to committedIdentity.toFirestoreValue(),
+                        "avatarEmoji" to committedIdentity.defaultEmoji,
                         "updatedAt" to nowMillis
                     )
                     if (!photoUrl.isNullOrBlank()) {
                         userDocData["photoUrl"] = photoUrl
                     }
-                    transaction.set(userRef, userDocData, SetOptions.merge())
-                }.await()
+                    userRef.set(userDocData, SetOptions.merge()).await()
+                }
 
-                // 4. Best-effort update to root family document memberUids (and adminUids ONLY if PARENT)
-                val familyUpdates = mutableMapOf<String, Any>(
-                    "memberUids" to FieldValue.arrayUnion(uid),
-                    "updatedAt" to nowMillis
+                FirestoreErrorHandler.logInvitationMilestone(
+                    stage = FirestoreErrorHandler.InvitationStage.REDEEM_INVITATION_TRANSACTION,
+                    path = "families/${invite.familyId}/members/$uid",
+                    databaseId = configuredDatabaseId,
+                    rawInviteCode = invite.code,
+                    note = "Completed atomic invitation redemption and joined family as ${assignedRole.toFirestoreValue()}"
                 )
-                if (lockedRoleForFamilyUpdate == UserRole.PARENT) {
-                    familyUpdates["adminUids"] = FieldValue.arrayUnion(uid)
-                }
-                runCatching {
-                    familyRef.update(familyUpdates).await()
-                }
             } catch (e: Exception) {
-                Log.e(TAG, "redeemInvitationAndJoinFamily transaction failed: ${e.message}", e)
+                val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                    error = e,
+                    stage = FirestoreErrorHandler.InvitationStage.REDEEM_INVITATION_TRANSACTION,
+                    path = invitePath,
+                    rawInviteCode = invite.code,
+                    databaseId = configuredDatabaseId
+                )
+                lastClassifiedInvitationFailure = classified
                 return Result.failure(e)
             }
         }
@@ -1853,34 +2731,82 @@ class FamilyRepository(
         val db = firestoreProvider()
         if (db != null && authProvider()?.currentUser != null) {
             repoScope.launch {
-                runCatching {
+                try {
                     db.collection("family_invites")
                         .document(normalized)
-                        .update("status", InvitationStatus.REVOKED.name)
+                        .update(
+                            mapOf(
+                                "status" to InvitationStatus.REVOKED.name,
+                                "isRevoked" to true,
+                                "revoked" to true
+                            )
+                        )
                         .await()
+                    FirestoreErrorHandler.logInvitationMilestone(
+                        stage = FirestoreErrorHandler.InvitationStage.REVOKE_INVITATION_WRITE,
+                        path = "family_invites/$normalized",
+                        databaseId = configuredDatabaseId,
+                        rawInviteCode = normalized,
+                        note = "Invitation revoked in family_invites"
+                    )
+                } catch (e: Exception) {
+                    FirestoreErrorHandler.classifyInvitationFailure(
+                        error = e,
+                        stage = FirestoreErrorHandler.InvitationStage.REVOKE_INVITATION_WRITE,
+                        path = "family_invites/$normalized",
+                        rawInviteCode = normalized,
+                        databaseId = configuredDatabaseId
+                    )
                 }
             }
         }
         return true
     }
 
-    private fun parseInvitationDocument(docId: String, data: Map<String, Any>): FamilyInvitation {
-        val code = (data["code"] as? String)?.trim()?.uppercase()?.ifBlank { docId } ?: docId
-        val familyId = (data["familyId"] as? String) ?: _activeFamilyId.value
-        val familyName = (data["familyName"] as? String) ?: _familyName.value
-        val invitedRole = UserRole.fromFirestoreValue(data["invitedRole"] as? String)
-        val invitingParentUid = (data["invitingParentUid"] as? String) ?: ""
-        val invitingParentName = (data["invitingParentName"] as? String) ?: ""
-        val invitedNickname = (data["invitedNickname"] as? String) ?: ""
-        val createdAt = (data["createdAt"] as? Number)?.toLong() ?: System.currentTimeMillis()
-        val expiresAt = (data["expiresAt"] as? Number)?.toLong() ?: (createdAt + FamilyInvitation.DEFAULT_EXPIRATION_MS)
-        val status = InvitationStatus.fromFirestoreValue(data["status"] as? String)
-        val redeemedByUid = data["redeemedByUid"] as? String
+    private fun extractTimestampMillis(rawValue: Any?): Long? {
+        return when (rawValue) {
+            is Number -> rawValue.toLong()
+            is com.google.firebase.Timestamp -> rawValue.toDate().time
+            is Date -> rawValue.time
+            else -> null
+        }
+    }
+
+    private fun parseInvitationDocument(docId: String, data: Map<String, Any?>): FamilyInvitation {
+        val rawCode = (data["code"] as? String)?.trim()?.uppercase()?.takeIf { it.isNotBlank() }
+            ?: (data["inviteCode"] as? String)?.trim()?.uppercase()?.takeIf { it.isNotBlank() }
+            ?: docId.trim().uppercase()
+        val familyId = (data["familyId"] as? String)?.takeIf { it.isNotBlank() } ?: _activeFamilyId.value
+        val familyName = (data["familyName"] as? String) ?: ""
+        val roleRaw = (data["invitedRole"] as? String) ?: (data["role"] as? String)
+        val invitedRole = UserRole.fromFirestoreValue(roleRaw)
+        val invitingParentUid = (data["invitingParentUid"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["createdById"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["createdByUid"] as? String)?.takeIf { it.isNotBlank() }
+            ?: ""
+        val invitingParentName = (data["invitingParentName"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["createdByName"] as? String)
+            ?: ""
+        val invitedNickname = (data["invitedNickname"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["invitedName"] as? String)
+            ?: ""
+        val createdAt = extractTimestampMillis(data["createdAt"]) ?: System.currentTimeMillis()
+        val expiresAt = extractTimestampMillis(data["expiresAt"])
+            ?: extractTimestampMillis(data["expiresAtMillis"])
+            ?: (createdAt + FamilyInvitation.DEFAULT_EXPIRATION_MS)
+        val isUsed = (data["isUsed"] as? Boolean) ?: false
+        val isRevoked = (data["isRevoked"] as? Boolean) ?: (data["revoked"] as? Boolean) ?: false
+        val status = when {
+            isRevoked -> InvitationStatus.REVOKED
+            isUsed -> InvitationStatus.REDEEMED
+            else -> InvitationStatus.fromFirestoreValue(data["status"] as? String)
+        }
+        val redeemedByUid = (data["redeemedByUid"] as? String) ?: (data["usedByUid"] as? String)
         val redeemedByName = data["redeemedByName"] as? String
-        val redeemedAt = (data["redeemedAt"] as? Number)?.toLong()
+        val redeemedAt = extractTimestampMillis(data["redeemedAt"])
 
         return FamilyInvitation(
-            code = code,
+            code = rawCode,
             familyId = familyId,
             familyName = familyName,
             invitedRole = invitedRole,
@@ -1897,6 +2823,82 @@ class FamilyRepository(
     }
 
     /**
+     * Parses a Firestore task document from `/families/{familyId}/tasks/{taskId}` (or legacy `/tasks/{taskId}`)
+     * into a canonical [FamilyTask], supporting both V1.6 and legacy V1.5 field names and preserving
+     * `isCompleted`, `approvedByParent`, `completedAtMillis`, and `completedByMemberId`.
+     */
+    private fun parseTaskDocument(
+        docId: String,
+        data: Map<String, Any?>,
+        fallbackFamilyId: String
+    ): FamilyTask? {
+        val title = (data["title"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["task_name"] as? String)?.takeIf { it.isNotBlank() }
+            ?: return null
+        val description = (data["description"] as? String) ?: ""
+        val rawAssigned = (data["assignedUid"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["assignedToMemberId"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["assignedMemberId"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["assigned_member_id"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["assigned_family_member"] as? String)?.takeIf { it.isNotBlank() }
+            ?: "m_kid1"
+
+        val resolvedAssignedId = _members.value.find { m ->
+            m.id == rawAssigned ||
+                m.name.equals(rawAssigned, ignoreCase = true) ||
+                (!m.googleEmail.isNullOrBlank() && m.googleEmail.equals(rawAssigned, ignoreCase = true))
+        }?.id ?: rawAssigned
+
+        val points = ((data["points"] as? Number)?.toInt())
+            ?: ((data["pointsValue"] as? Number)?.toInt())
+            ?: 10
+        val completed = (data["isCompleted"] as? Boolean)
+            ?: (data["is_completed"] as? Boolean)
+            ?: false
+        val approvedByParent = (data["approvedByParent"] as? Boolean)
+            ?: (data["approved_by_parent"] as? Boolean)
+            ?: false
+        val completedAtMillis = extractTimestampMillis(data["completedAtMillis"])
+            ?: extractTimestampMillis(data["completed_at_millis"])
+        val completedByMemberId = (data["completedByMemberId"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["completed_by_member_id"] as? String)?.takeIf { it.isNotBlank() }
+        val epochDay = ((data["dateEpochDay"] as? Number)?.toLong())
+            ?: ((data["due_date_epoch_day"] as? Number)?.toLong()?.takeIf { it != 0L })
+            ?: (((data["dueDate"] as? Number)?.toLong() ?: (todayEpoch * 86_400_000L)) / 86_400_000L)
+        val categoryStr = (data["category"] as? String) ?: TaskCategory.OTHER.name
+        val priorityStr = (data["priority"] as? String) ?: TaskPriority.MEDIUM.name
+        val recurrenceStr = (data["recurrence"] as? String) ?: TaskRecurrence.ONCE.name
+        val dueTime = (data["dueTimeFormatted"] as? String)
+            ?: (data["due_time"] as? String)
+            ?: "17:00"
+        val resolvedFamilyId = (data["familyId"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["family_id"] as? String)?.takeIf { it.isNotBlank() }
+            ?: fallbackFamilyId
+        val updatedAtMillis = extractTimestampMillis(data["updatedAt"])
+            ?: extractTimestampMillis(data["updated_at"])
+            ?: System.currentTimeMillis()
+
+        return FamilyTask(
+            id = docId,
+            familyId = resolvedFamilyId,
+            title = title,
+            description = description,
+            category = runCatching { TaskCategory.valueOf(categoryStr) }.getOrDefault(TaskCategory.OTHER),
+            assignedToMemberId = resolvedAssignedId,
+            dateEpochDay = epochDay,
+            dueTimeFormatted = dueTime,
+            isCompleted = completed,
+            priority = runCatching { TaskPriority.valueOf(priorityStr) }.getOrDefault(TaskPriority.MEDIUM),
+            recurrence = runCatching { TaskRecurrence.valueOf(recurrenceStr) }.getOrDefault(TaskRecurrence.ONCE),
+            points = points,
+            approvedByParent = approvedByParent,
+            completedAtMillis = completedAtMillis,
+            completedByMemberId = completedByMemberId,
+            updatedAtMillis = updatedAtMillis
+        )
+    }
+
+    /**
      * V1.6 Requirement 6:
      * Real-time Firestore snapshot listeners for:
      * 1) `/families/{familyId}` (family name & metadata)
@@ -1909,9 +2911,18 @@ class FamilyRepository(
         val db = firestoreProvider() ?: return
         detachFirestoreListeners()
 
+        // Synchronize the authenticated user's FCM token for this device in the named database
+        FcmTokenManager.syncCurrentDeviceTokenAsync(
+            context = appContext,
+            dbOverride = db,
+            uidOverride = authProvider()?.currentUser?.uid,
+            familyId = familyId,
+            role = _currentMember.value.role
+        )
+
         val familyRef = db.collection("families").document(familyId)
 
-        // 0. Real-time Family Document Listener
+        // 0. Real-time Family Document Listener (including Google Drive FamilyTasks folder mapping)
         runCatching {
             familyDocListenerRegistration = familyRef.addSnapshotListener { snapshot, error ->
                 if (error != null || snapshot == null || !snapshot.exists()) return@addSnapshotListener
@@ -1932,42 +2943,224 @@ class FamilyRepository(
                         _startupState.value = curStartup.copy(familyName = remoteFamilyName)
                     }
                 }
+                val parsedDriveConfig = GoogleDriveFamilyService.parseDriveConfigFromFamilySnapshot(
+                    familyId = familyId,
+                    data = snapshot.data
+                )
+                if (parsedDriveConfig.isConfigured) {
+                    _familyDriveConfig.value = parsedDriveConfig
+                    persistedDriveConfigByFamily[familyId] = parsedDriveConfig
+                }
             }
         }
 
         // 1. Real-time Tasks Listener
         runCatching {
+            var hasProcessedInitialTasksSnapshot = false
             tasksListenerRegistration = familyRef.collection("tasks")
-                .addSnapshotListener { snapshot, error ->
+                .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
                     if (error != null || snapshot == null) return@addSnapshotListener
-                    val remoteTasks = snapshot.documents.mapNotNull { doc ->
-                        val title = doc.getString("title") ?: return@mapNotNull null
-                        val description = doc.getString("description") ?: ""
-                        val assignedUid = doc.getString("assignedUid") ?: "m_kid1"
-                        val points = (doc.getLong("pointsValue") ?: 10L).toInt()
-                        val completed = doc.getBoolean("isCompleted") ?: false
-                        val dueMillis = doc.getLong("dueDate") ?: (todayEpoch * 86_400_000L)
-                        val epochDay = dueMillis / 86_400_000L
-                        val categoryStr = doc.getString("category") ?: TaskCategory.OTHER.name
-                        val priorityStr = doc.getString("priority") ?: TaskPriority.MEDIUM.name
-                        val recurrenceStr = doc.getString("recurrence") ?: TaskRecurrence.ONCE.name
-                        val dueTime = doc.getString("dueTimeFormatted") ?: "17:00"
+                    val currentSyncStates = _taskSyncStates.value
+                    val previousTasksById = _tasks.value.associateBy { it.id }
+                    val pendingWriteTaskIds = mutableSetOf<String>()
 
-                        FamilyTask(
-                            id = doc.id,
-                            title = title,
-                            description = description,
-                            category = runCatching { TaskCategory.valueOf(categoryStr) }.getOrDefault(TaskCategory.OTHER),
-                            assignedToMemberId = assignedUid,
-                            dateEpochDay = epochDay,
-                            dueTimeFormatted = dueTime,
-                            isCompleted = completed,
-                            priority = runCatching { TaskPriority.valueOf(priorityStr) }.getOrDefault(TaskPriority.MEDIUM),
-                            recurrence = runCatching { TaskRecurrence.valueOf(recurrenceStr) }.getOrDefault(TaskRecurrence.ONCE),
-                            points = points
-                        )
+                    val remoteTasks = snapshot.documents.mapNotNull { doc ->
+                        val data = doc.data ?: return@mapNotNull null
+                        if (doc.metadata.hasPendingWrites()) {
+                            pendingWriteTaskIds.add(doc.id)
+                        }
+                        val parsed = parseTaskDocument(doc.id, data, familyId) ?: return@mapNotNull null
+                        // If a local completion/approval write is currently in flight (SAVING),
+                        // or if a local write has not yet been committed by the server,
+                        // preserve the in-flight state until the server confirms or rejects the write.
+                        if (currentSyncStates[doc.id] == TaskCompletionSyncState.SAVING || doc.metadata.hasPendingWrites()) {
+                            previousTasksById[doc.id] ?: parsed
+                        } else {
+                            parsed
+                        }
                     }
+
                     if (remoteTasks.isNotEmpty() || _isGoogleSignedIn.value) {
+                        val updatedSyncStates = currentSyncStates.toMutableMap()
+                        val selfUid = currentUid()
+                        for (remoteTask in remoteTasks) {
+                            val prev = previousTasksById[remoteTask.id]
+                            val isPendingServerCommit = remoteTask.id in pendingWriteTaskIds
+                            if (currentSyncStates[remoteTask.id] != TaskCompletionSyncState.SAVING && !isPendingServerCommit) {
+                                updatedSyncStates[remoteTask.id] = when {
+                                    remoteTask.isCompleted && remoteTask.approvedByParent ->
+                                        TaskCompletionSyncState.SAVED_APPROVED
+                                    remoteTask.isCompleted && !remoteTask.approvedByParent ->
+                                        TaskCompletionSyncState.PENDING_APPROVAL
+                                    currentSyncStates[remoteTask.id] == TaskCompletionSyncState.FAILED ->
+                                        TaskCompletionSyncState.FAILED
+                                    else ->
+                                        TaskCompletionSyncState.IDLE
+                                }
+                            }
+
+                            if (!hasProcessedInitialTasksSnapshot) {
+                                if (!isPendingServerCommit) {
+                                    if (remoteTask.assignedToMemberId.isNotBlank()) {
+                                        notifiedTaskCompletionKeys.add("assign:${remoteTask.id}:${remoteTask.assignedToMemberId}")
+                                    }
+                                    if (remoteTask.isCompleted) {
+                                        notifiedTaskCompletionKeys.add("${remoteTask.id}:completed")
+                                        if (remoteTask.approvedByParent) {
+                                            notifiedTaskCompletionKeys.add("${remoteTask.id}:approved")
+                                        }
+                                    }
+                                }
+                            } else if (!isPendingServerCommit) {
+                                val assignee = _members.value.find { it.id == remoteTask.assignedToMemberId }
+                                val assigneeName = assignee?.name ?: "חבר משפחה"
+                                val assigneeEmoji = assignee?.avatarEmoji ?: "🎉"
+
+                                // Event A: Parent assigned a new task to this user
+                                if (prev == null && remoteTask.assignedToMemberId.isNotBlank() && remoteTask.assignedToMemberId == selfUid) {
+                                    val assignKey = "assign:${remoteTask.id}:$selfUid"
+                                    if (notifiedTaskCompletionKeys.add(assignKey) && FcmTokenManager.markEventDispatchedIfNew(assignKey)) {
+                                        val title = "משימה חדשה שובצה עבורך 📋"
+                                        val body = "שובצה לך משימה חדשה: \"${remoteTask.title}\" (שעה ${remoteTask.dueTimeFormatted} • +${remoteTask.points} נק')"
+                                        pushAlert(
+                                            title = title,
+                                            message = body,
+                                            targetName = assigneeName,
+                                            targetEmoji = assigneeEmoji,
+                                            reason = AlertReason.TASK_REMINDER,
+                                            showBanner = true
+                                        )
+                                        appContext?.let { ctx ->
+                                            NotificationHelper.showIncomingFcmNotification(
+                                                context = ctx,
+                                                title = title,
+                                                message = body,
+                                                eventKey = assignKey,
+                                                taskId = remoteTask.id
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Event D: Task was reassigned to this user
+                                if (prev != null && prev.assignedToMemberId != remoteTask.assignedToMemberId && remoteTask.assignedToMemberId == selfUid) {
+                                    val reassignKey = "reassign:${remoteTask.id}:$selfUid:${remoteTask.updatedAtMillis}"
+                                    if (notifiedTaskCompletionKeys.add(reassignKey) && FcmTokenManager.markEventDispatchedIfNew(reassignKey)) {
+                                        val title = "משימה הועברה אליך 🔄"
+                                        val body = "המשימה \"${remoteTask.title}\" שובצה אליך (שעה ${remoteTask.dueTimeFormatted} • +${remoteTask.points} נק')"
+                                        pushAlert(
+                                            title = title,
+                                            message = body,
+                                            targetName = assigneeName,
+                                            targetEmoji = assigneeEmoji,
+                                            reason = AlertReason.TASK_REMINDER,
+                                            showBanner = true
+                                        )
+                                        appContext?.let { ctx ->
+                                            NotificationHelper.showIncomingFcmNotification(
+                                                context = ctx,
+                                                title = title,
+                                                message = body,
+                                                eventKey = reassignKey,
+                                                taskId = remoteTask.id
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Event B & C: Real-time cross-device completion / parent approval notification ONLY for server-committed writes
+                                if (remoteTask.isCompleted && (prev == null || !prev.isCompleted)) {
+                                    val completedByOther = !remoteTask.completedByMemberId.isNullOrBlank() &&
+                                        remoteTask.completedByMemberId != selfUid
+                                    if (completedByOther && notifiedTaskCompletionKeys.add("${remoteTask.id}:completed")) {
+                                        if (remoteTask.approvedByParent) {
+                                            val approveKey = "approve:${remoteTask.id}"
+                                            if (FcmTokenManager.markEventDispatchedIfNew(approveKey)) {
+                                                val title = "משימה הושלמה ואושרה! +${remoteTask.points} נק' 🎉"
+                                                val body = "$assigneeName השלים/ה את המשימה: ${remoteTask.title}"
+                                                pushAlert(
+                                                    title = title,
+                                                    message = body,
+                                                    targetName = assigneeName,
+                                                    targetEmoji = assigneeEmoji,
+                                                    reason = AlertReason.TASK_COMPLETED,
+                                                    showBanner = true
+                                                )
+                                                if (remoteTask.assignedToMemberId == selfUid) {
+                                                    appContext?.let { ctx ->
+                                                        NotificationHelper.showIncomingFcmNotification(
+                                                            context = ctx,
+                                                            title = title,
+                                                            message = body,
+                                                            eventKey = approveKey,
+                                                            taskId = remoteTask.id
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            val submitKey = "submit:${remoteTask.id}:${remoteTask.completedAtMillis ?: remoteTask.updatedAtMillis}"
+                                            if (FcmTokenManager.markEventDispatchedIfNew(submitKey)) {
+                                                val title = "משימה הושלמה וממתינה לאישור הורה ⏳"
+                                                val body = "$assigneeName סימן/ה כבוצע: ${remoteTask.title} (+${remoteTask.points} נק')"
+                                                pushAlert(
+                                                    title = title,
+                                                    message = body,
+                                                    targetName = assigneeName,
+                                                    targetEmoji = assigneeEmoji,
+                                                    reason = AlertReason.TASK_COMPLETED,
+                                                    showBanner = _currentMember.value.isParent
+                                                )
+                                                if (_currentMember.value.isParent) {
+                                                    appContext?.let { ctx ->
+                                                        NotificationHelper.showIncomingFcmNotification(
+                                                            context = ctx,
+                                                            title = title,
+                                                            message = body,
+                                                            eventKey = submitKey,
+                                                            taskId = remoteTask.id
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if (remoteTask.isCompleted && remoteTask.approvedByParent && prev != null && !prev.approvedByParent) {
+                                    // Event C: Parent approved a previously submitted task -> notify the assigned child
+                                    val approveKey = "approve:${remoteTask.id}"
+                                    if (notifiedTaskCompletionKeys.add("${remoteTask.id}:approved") && FcmTokenManager.markEventDispatchedIfNew(approveKey)) {
+                                        val title = "המשימה שלך אושרה! +${remoteTask.points} נק' 🎉"
+                                        val body = "כל הכבוד $assigneeName! ביצוע המשימה \"${remoteTask.title}\" אושר וקיבלת +${remoteTask.points} נקודות!"
+                                        pushAlert(
+                                            title = title,
+                                            message = body,
+                                            targetName = assigneeName,
+                                            targetEmoji = assigneeEmoji,
+                                            reason = AlertReason.TASK_COMPLETED,
+                                            showBanner = remoteTask.assignedToMemberId == selfUid
+                                        )
+                                        if (remoteTask.assignedToMemberId == selfUid) {
+                                            appContext?.let { ctx ->
+                                                NotificationHelper.showIncomingFcmNotification(
+                                                    context = ctx,
+                                                    title = title,
+                                                    message = body,
+                                                    eventKey = approveKey,
+                                                    taskId = remoteTask.id
+                                                )
+                                            }
+                                        }
+                                    }
+                                } else if (!remoteTask.isCompleted) {
+                                    notifiedTaskCompletionKeys.remove("${remoteTask.id}:completed")
+                                    notifiedTaskCompletionKeys.remove("${remoteTask.id}:approved")
+                                }
+                            }
+                        }
+                        if (!snapshot.metadata.hasPendingWrites()) {
+                            hasProcessedInitialTasksSnapshot = true
+                        }
+                        _taskSyncStates.value = updatedSyncStates
                         _tasks.value = remoteTasks
                         repoScope.launch {
                             runCatching {
@@ -2011,7 +3204,29 @@ class FamilyRepository(
                             fallbackParentIdentity = fallbackParent
                         )
                         val emoji = rawEmoji ?: parsedIdentity.defaultEmoji
-                        val email = doc.getString("googleEmail") ?: doc.getString("email")
+                        val signedInUidForMember = authProvider()?.currentUser?.uid
+                        val rawStoredEmail = (doc.getString("googleEmail") ?: doc.getString("email"))
+                            ?.trim()?.lowercase()?.takeIf { it.isNotBlank() && it.contains("@") }
+                        val email = rawStoredEmail
+                            ?: if (doc.id == signedInUidForMember) {
+                                resolveVerifiedGoogleEmail().takeIf { it.isNotBlank() }?.also { verifiedSelfEmail ->
+                                    // Automatically backfill the signed-in member's verified Google email
+                                    // so parents never have to type it manually.
+                                    repoScope.launch {
+                                        runCatching {
+                                            doc.reference.set(
+                                                mapOf(
+                                                    "googleEmail" to verifiedSelfEmail,
+                                                    "email" to verifiedSelfEmail
+                                                ),
+                                                SetOptions.merge()
+                                            ).await()
+                                        }
+                                    }
+                                }
+                            } else {
+                                null
+                            }
                         val photoUrl = doc.getString("photoUrl")
                         val colorHex = doc.getLong("colorHex")
                             ?: if (parsedRole == UserRole.PARENT) 0xFF1A73E8L else 0xFF34A853L
@@ -2072,23 +3287,32 @@ class FamilyRepository(
                 }
         }
 
-        // 3. Real-time Pending Invitations Listener (/family_invites where familyId == familyId)
-        runCatching {
-            invitesListenerRegistration = db.collection("family_invites")
-                .whereEqualTo("familyId", familyId)
-                .addSnapshotListener { snapshot, error ->
-                    if (error != null || snapshot == null) return@addSnapshotListener
-                    val now = System.currentTimeMillis()
-                    val allInvites = snapshot.documents.mapNotNull { doc ->
-                        val data = doc.data ?: return@mapNotNull null
-                        parseInvitationDocument(doc.id, data).also { inv ->
-                            invitationsByCode[inv.code] = inv
+        // 3. Real-time Pending Invitations Listener (/family_invites where familyId == familyId, PARENT only)
+        if (_currentMember.value.isParent) {
+            runCatching {
+                invitesListenerRegistration = db.collection("family_invites")
+                    .whereEqualTo("familyId", familyId)
+                    .addSnapshotListener { snapshot, error ->
+                        if (error != null || snapshot == null) return@addSnapshotListener
+                        val now = System.currentTimeMillis()
+                        val allInvites = snapshot.documents.mapNotNull { doc ->
+                            val data = doc.data ?: return@mapNotNull null
+                            parseInvitationDocument(doc.id, data).also { inv ->
+                                invitationsByCode[inv.code] = inv
+                            }
                         }
+                        val usablePending = allInvites
+                            .filter { it.status == InvitationStatus.PENDING && !it.isExpired(now) }
+                            .sortedByDescending { it.createdAt }
+                        _pendingInvitations.value = usablePending
+                        _cloudFamilyGroup.value = _cloudFamilyGroup.value.copy(
+                            inviteCode = usablePending.firstOrNull()?.code.orEmpty()
+                        )
                     }
-                    _pendingInvitations.value = allInvites
-                        .filter { it.status == InvitationStatus.PENDING && !it.isExpired(now) }
-                        .sortedByDescending { it.createdAt }
-                }
+            }
+        } else {
+            _pendingInvitations.value = emptyList()
+            _cloudFamilyGroup.value = _cloudFamilyGroup.value.copy(inviteCode = "")
         }
 
         // 4. Real-time Rewards Listener
@@ -2115,6 +3339,61 @@ class FamilyRepository(
                     }
                 }
         }
+
+        // 5. Real-time Shared Family Folders Listener (/families/{familyId}/folders)
+        restorePersistedFileNavigationState(familyId)
+        runCatching {
+            foldersListenerRegistration = familyRef.collection("folders")
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null || snapshot == null) return@addSnapshotListener
+                    val remoteFolders = snapshot.documents.mapNotNull { doc ->
+                        val data = doc.data ?: return@mapNotNull null
+                        FamilyCloudFileTransferEngine.parseFolderDocument(doc.id, data, familyId)
+                    }
+                    val starterMap = defaultStarterFolders(familyId).associateBy { it.id }.toMutableMap()
+                    for (rf in remoteFolders) {
+                        starterMap[rf.id] = rf
+                    }
+                    val merged = starterMap.values.sortedBy { it.createdAtMillis }
+                    _folders.value = merged
+                    persistedFoldersByFamily[familyId] = merged
+                }
+        }
+
+        // 6. Real-time Shared Family Files Listener (/families/{familyId}/files)
+        runCatching {
+            var hasProcessedInitialFilesSnapshot = false
+            filesListenerRegistration = familyRef.collection("files")
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null || snapshot == null) return@addSnapshotListener
+                    val previousIds = _documents.value.map { it.id }.toSet()
+                    val remoteFiles = snapshot.documents.mapNotNull { doc ->
+                        val data = doc.data ?: return@mapNotNull null
+                        FamilyCloudFileTransferEngine.parseFileDocument(doc.id, data, familyId)
+                    }.sortedByDescending { it.uploadedAtMillis }
+
+                    if (remoteFiles.isNotEmpty() || _isGoogleSignedIn.value || familyId != "fam_israeli_8492") {
+                        if (hasProcessedInitialFilesSnapshot) {
+                            val selfUid = currentUid()
+                            for (rf in remoteFiles) {
+                                if (rf.id !in previousIds && rf.uploadedByUid.isNotBlank() && rf.uploadedByUid != selfUid) {
+                                    pushAlert(
+                                        title = "קובץ משפחתי חדש הועלה 📁",
+                                        message = "${rf.name} הועלה ע\"י ${rf.uploadedByName.ifBlank { "חבר משפחה" }}",
+                                        targetName = rf.uploadedByName.ifBlank { "משפחה" },
+                                        targetEmoji = "📄",
+                                        reason = AlertReason.DRIVE_SYNC,
+                                        showBanner = true
+                                    )
+                                }
+                            }
+                        }
+                        hasProcessedInitialFilesSnapshot = true
+                        _documents.value = remoteFiles
+                        persistedDocumentsByFamily[familyId] = remoteFiles
+                    }
+                }
+        }
     }
 
     fun detachFirestoreListeners() {
@@ -2123,11 +3402,15 @@ class FamilyRepository(
         rewardsListenerRegistration?.remove()
         invitesListenerRegistration?.remove()
         familyDocListenerRegistration?.remove()
+        foldersListenerRegistration?.remove()
+        filesListenerRegistration?.remove()
         tasksListenerRegistration = null
         membersListenerRegistration = null
         rewardsListenerRegistration = null
         invitesListenerRegistration = null
         familyDocListenerRegistration = null
+        foldersListenerRegistration = null
+        filesListenerRegistration = null
     }
 
     private suspend fun flushOfflineSyncQueue(familyId: String) {
@@ -2145,8 +3428,37 @@ class FamilyRepository(
         }
     }
 
+    private fun buildFullTaskFirestoreMap(
+        task: FamilyTask,
+        familyId: String,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Map<String, Any?> {
+        return mapOf(
+            "id" to task.id,
+            "familyId" to familyId,
+            "title" to task.title,
+            "description" to task.description,
+            "assignedUid" to task.assignedToMemberId,
+            "assignedToMemberId" to task.assignedToMemberId,
+            "assignedMemberId" to task.assignedToMemberId,
+            "points" to task.points,
+            "pointsValue" to task.points,
+            "isCompleted" to task.isCompleted,
+            "approvedByParent" to task.approvedByParent,
+            "completedAtMillis" to task.completedAtMillis,
+            "completedByMemberId" to task.completedByMemberId,
+            "dateEpochDay" to task.dateEpochDay,
+            "dueDate" to (task.dateEpochDay * 86_400_000L),
+            "category" to task.category.name,
+            "priority" to task.priority.name,
+            "recurrence" to task.recurrence.name,
+            "dueTimeFormatted" to task.dueTimeFormatted,
+            "updatedAt" to nowMillis
+        )
+    }
+
     private fun pushTaskToFirestoreOrQueue(task: FamilyTask, isDelete: Boolean = false) {
-        val familyId = _activeFamilyId.value
+        val familyId = task.familyId.ifBlank { _activeFamilyId.value }
         val coreTask = task.toCoreTask(familyId)
 
         repoScope.launch {
@@ -2161,31 +3473,59 @@ class FamilyRepository(
             val db = firestoreProvider()
             val user = authProvider()?.currentUser
             if (db != null && user != null) {
+                val path = "families/$familyId/tasks/${task.id}"
+                val stage = when {
+                    isDelete -> FirestoreErrorHandler.TaskStage.DELETE_TASK_WRITE
+                    else -> FirestoreErrorHandler.TaskStage.UPDATE_TASK_WRITE
+                }
                 try {
                     val docRef = db.collection("families").document(familyId)
                         .collection("tasks").document(task.id)
                     if (isDelete) {
-                        docRef.delete().await()
-                    } else {
-                        val payload = mapOf(
-                            "id" to task.id,
-                            "title" to task.title,
-                            "description" to task.description,
-                            "assignedUid" to task.assignedToMemberId,
-                            "pointsValue" to task.points,
-                            "isCompleted" to task.isCompleted,
-                            "dueDate" to (task.dateEpochDay * 86_400_000L),
-                            "familyId" to familyId,
-                            "approvedByParent" to task.isCompleted,
-                            "category" to task.category.name,
-                            "priority" to task.priority.name,
-                            "recurrence" to task.recurrence.name,
-                            "dueTimeFormatted" to task.dueTimeFormatted
+                        FirestoreErrorHandler.logTaskMilestone(
+                            stage = FirestoreErrorHandler.TaskStage.DELETE_TASK_WRITE,
+                            path = path,
+                            databaseId = configuredDatabaseId,
+                            note = "Deleting task document from named database"
                         )
+                        docRef.delete().await()
+                    } else if (!_currentMember.value.isParent) {
+                        // Safety guard: CHILD must NEVER send full-document set() with protected fields
+                        val nowMillis = System.currentTimeMillis()
+                        FirestoreErrorHandler.logTaskMilestone(
+                            stage = FirestoreErrorHandler.TaskStage.CHILD_COMPLETE_TASK_WRITE,
+                            path = path,
+                            databaseId = configuredDatabaseId,
+                            note = "Updating child completion-only fields in named database"
+                        )
+                        docRef.update(
+                            mapOf(
+                                "isCompleted" to task.isCompleted,
+                                "completedAtMillis" to (if (task.isCompleted) (task.completedAtMillis ?: nowMillis) else null),
+                                "completedByMemberId" to (if (task.isCompleted) (task.completedByMemberId ?: user.uid) else null),
+                                "updatedAt" to nowMillis
+                            )
+                        ).await()
+                    } else {
+                        val nowMillis = System.currentTimeMillis()
+                        FirestoreErrorHandler.logTaskMilestone(
+                            stage = FirestoreErrorHandler.TaskStage.CREATE_TASK_WRITE,
+                            path = path,
+                            databaseId = configuredDatabaseId,
+                            note = "Writing parent task definition to named database"
+                        )
+                        val payload = buildFullTaskFirestoreMap(task, familyId, nowMillis)
                         docRef.set(payload, SetOptions.merge()).await()
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Cloud write deferred to offline queue: ${e.message}")
+                    val classified = FirestoreErrorHandler.classifyTaskFailure(
+                        error = e,
+                        stage = stage,
+                        path = path,
+                        databaseId = configuredDatabaseId
+                    )
+                    lastClassifiedTaskFailure = classified
+                    _taskOperationError.value = classified.messageHe
                     offlineSyncDao?.enqueueAction(
                         OfflineSyncQueueEntity(
                             taskId = task.id,
@@ -2394,16 +3734,8 @@ class FamilyRepository(
         _googleUserEmail.value = cleanEmail
         _googleUserDisplayName.value = cleanAdminName
 
-        repoScope.launch {
-            createFamilyAsParent(
-                familyNameInput = cleanFamilyName,
-                parentDisplayName = cleanAdminName,
-                familyIdentity = resolvedParentIdentity
-            )
-        }
-
-        // Also update synchronous state immediately for UI/test responsiveness
         val uid = authProvider()?.currentUser?.uid ?: "m_parent_${System.currentTimeMillis()}"
+        val newFamilyId = "fam_${uid.take(8)}_${System.currentTimeMillis() % 10000}"
         val primaryAdmin = FamilyMember(
             id = uid,
             name = cleanAdminName,
@@ -2419,6 +3751,7 @@ class FamilyRepository(
             invitationAccepted = true
         )
 
+        _activeFamilyId.value = newFamilyId
         _familyName.value = cleanFamilyName
         _members.value = listOf(primaryAdmin)
         _currentMember.value = primaryAdmin
@@ -2426,7 +3759,7 @@ class FamilyRepository(
         _schedulePeriods.value = emptyList()
         _pendingInvitations.value = emptyList()
         val activeState = FamilyMembershipState.ActiveMember(
-            familyId = _activeFamilyId.value,
+            familyId = newFamilyId,
             familyName = cleanFamilyName,
             role = UserRole.PARENT,
             familyIdentity = resolvedParentIdentity,
@@ -2435,11 +3768,20 @@ class FamilyRepository(
         _membershipState.value = activeState
         _startupState.value = StartupState.ReadyToEnterDashboard(
             uid = uid,
-            familyId = _activeFamilyId.value,
+            familyId = newFamilyId,
             familyName = cleanFamilyName,
             role = UserRole.PARENT,
             familyIdentity = resolvedParentIdentity
         )
+
+        repoScope.launch {
+            createFamilyAsParent(
+                familyNameInput = cleanFamilyName,
+                parentDisplayName = cleanAdminName,
+                familyIdentity = resolvedParentIdentity,
+                allowCreateIfAlreadyInFamily = true
+            )
+        }
     }
 
     /**
@@ -2531,6 +3873,12 @@ class FamilyRepository(
     }
 
     fun signOutGoogle() {
+        val currentUidBeforeLogout = runCatching { authProvider()?.currentUser?.uid }.getOrNull()
+        FcmTokenManager.unregisterCurrentDeviceTokenAsync(
+            context = appContext,
+            dbOverride = firestoreProvider(),
+            uidOverride = currentUidBeforeLogout
+        )
         runCatching { authProvider()?.signOut() }
         detachFirestoreListeners()
         _isGoogleSignedIn.value = false
@@ -2555,7 +3903,32 @@ class FamilyRepository(
         googleEmail: String?,
         schoolGrade: String?
     ): FamilyInvitation? {
-        if (!_currentMember.value.isParent) return null
+        if (!_currentMember.value.isParent) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = SecurityException("רק הורה (מנהל משפחה) רשאי ליצור קודי הזמנה למשפחה."),
+                stage = FirestoreErrorHandler.InvitationStage.VERIFY_PARENT_AUTHORIZATION,
+                path = "family_invites/{inviteCode}",
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.InvitationFailureCategory.UNAUTHORIZED_ROLE
+            )
+            lastClassifiedInvitationFailure = classified
+            return null
+        }
+        if (simulateOfflineNetworkFailure) {
+            val offlineErr = FirebaseFirestoreException(
+                "Simulated offline network failure during invitation creation",
+                FirebaseFirestoreException.Code.UNAVAILABLE
+            )
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = offlineErr,
+                stage = FirestoreErrorHandler.InvitationStage.CREATE_INVITATION_WRITE,
+                path = "family_invites/{inviteCode}",
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedInvitationFailure = classified
+            return null
+        }
+
         val canonicalRole = if (role.isParentRole) UserRole.PARENT else UserRole.CHILD
         val code = generateSecureInviteCode()
         val now = System.currentTimeMillis()
@@ -2572,31 +3945,31 @@ class FamilyRepository(
             status = InvitationStatus.PENDING
         )
 
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            // When connected to Firebase Auth/Firestore, persist via createRoleSpecificInvitation
+            // so all required V1.6 security rule fields (including createdById and isUsed=false) are written
+            // and verified before exposing the invitation in _pendingInvitations.
+            repoScope.launch {
+                createRoleSpecificInvitation(
+                    invitedRole = canonicalRole,
+                    invitedNickname = name.trim(),
+                    invitedEmail = googleEmail,
+                    schoolGrade = schoolGrade,
+                    customCodeOverride = code
+                )
+            }
+            return invitation
+        }
+
         invitationsByCode[code] = invitation
         _pendingInvitations.value = (_pendingInvitations.value.filterNot { it.code == code } + invitation)
             .sortedByDescending { it.createdAt }
-
-        val db = firestoreProvider()
-        if (db != null && authProvider()?.currentUser != null) {
-            repoScope.launch {
-                runCatching {
-                    db.collection("family_invites").document(code).set(
-                        mapOf(
-                            "code" to invitation.code,
-                            "familyId" to invitation.familyId,
-                            "familyName" to invitation.familyName,
-                            "invitedRole" to invitation.invitedRole.toFirestoreValue(),
-                            "invitingParentUid" to invitation.invitingParentUid,
-                            "invitingParentName" to invitation.invitingParentName,
-                            "invitedNickname" to invitation.invitedNickname,
-                            "createdAt" to invitation.createdAt,
-                            "expiresAt" to invitation.expiresAt,
-                            "status" to InvitationStatus.PENDING.name
-                        )
-                    ).await()
-                }
-            }
-        }
+        _cloudFamilyGroup.value = _cloudFamilyGroup.value.copy(
+            inviteCode = code,
+            lastSyncedEpochMillis = now
+        )
 
         val roleLabelHe = if (canonicalRole == UserRole.PARENT) "הורה" else "ילד/ה"
         pushAlert(
@@ -2804,39 +4177,123 @@ class FamilyRepository(
      * - PARENT can toggle any task.
      * - CHILD can only mark tasks assigned to them as completed.
      */
-    fun toggleTaskCompletion(taskId: String): Boolean {
+    /**
+     * Emits a deduplicated task completion notification ONLY after the completion/approval write
+     * has been confirmed in Firestore (or immediately in pure in-memory unit-test mode).
+     */
+    private fun emitTaskCompletionNotificationIfNeeded(
+        task: FamilyTask,
+        isParentApprovalEvent: Boolean = false
+    ) {
+        if (!task.isCompleted) {
+            notifiedTaskCompletionKeys.remove("${task.id}:completed")
+            notifiedTaskCompletionKeys.remove("${task.id}:approved")
+            return
+        }
+        val assignee = _members.value.find { it.id == task.assignedToMemberId }
+        val assigneeName = assignee?.name ?: _currentMember.value.name.ifBlank { "חבר משפחה" }
+        val assigneeEmoji = assignee?.avatarEmoji ?: _currentMember.value.avatarEmoji.ifBlank { "🎉" }
+
+        if (isParentApprovalEvent) {
+            if (notifiedTaskCompletionKeys.add("${task.id}:approved")) {
+                pushAlert(
+                    title = "ביצוע המשימה אושר! +${task.points} נק' 🎉",
+                    message = "אושרה המשימה של $assigneeName: ${task.title}",
+                    targetName = assigneeName,
+                    targetEmoji = assigneeEmoji,
+                    reason = AlertReason.TASK_COMPLETED
+                )
+            }
+        } else {
+            if (notifiedTaskCompletionKeys.add("${task.id}:completed")) {
+                if (task.approvedByParent) {
+                    notifiedTaskCompletionKeys.add("${task.id}:approved")
+                    pushAlert(
+                        title = "משימה הושלמה! +${task.points} נק' 🎉",
+                        message = "$assigneeName השלים/ה את המשימה: ${task.title}",
+                        targetName = assigneeName,
+                        targetEmoji = assigneeEmoji,
+                        reason = AlertReason.TASK_COMPLETED
+                    )
+                } else {
+                    pushAlert(
+                        title = "משימה הושלמה! ממתינה לאישור הורה ⏳",
+                        message = "$assigneeName השלים/ה את המשימה: ${task.title} (+${task.points} נק')",
+                        targetName = assigneeName,
+                        targetEmoji = assigneeEmoji,
+                        reason = AlertReason.TASK_COMPLETED
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * V1.6 Requirement 1, 4, 6, 7, 8:
+     * - PARENT can toggle any task (and marks `approvedByParent = newStatus`).
+     * - CHILD can only mark tasks assigned to their authenticated UID as completed,
+     *   updating ONLY completion-related fields (`isCompleted`, `completedAtMillis`, `completedByMemberId`, `updatedAt`)
+     *   and setting `approvedByParent = false` (pending parent approval).
+     * - Tracks `TaskCompletionSyncState` (`SAVING`, `PENDING_APPROVAL`, `SAVED_APPROVED`, `FAILED`).
+     * - Sends push notifications ONLY after Firestore confirms the write.
+     * - On failure, restores the previous state and sets a clear Hebrew error message in `taskOperationError`.
+     */
+    suspend fun toggleTaskCompletionAsync(taskId: String): Result<FamilyTask> {
         val current = _currentMember.value
-        val targetTask = _tasks.value.find { it.id == taskId } ?: return false
+        val uid = currentUid()
+        val targetTask = _tasks.value.find { it.id == taskId }
+            ?: return Result.failure(IllegalArgumentException("המשימה לא נמצאה"))
+        val resolvedFamilyId = targetTask.familyId.ifBlank { _activeFamilyId.value }
+        val taskPath = "families/$resolvedFamilyId/tasks/$taskId"
 
         if (!current.isParent) {
             val isAssignedToCurrentChild = targetTask.assignedToMemberId == current.id ||
-                targetTask.assignedToMemberId == currentUid()
+                (uid.isNotBlank() && targetTask.assignedToMemberId == uid)
             if (!isAssignedToCurrentChild) {
-                Log.w(TAG, "Blocked CHILD ${current.id} from toggling task assigned to ${targetTask.assignedToMemberId}")
-                return false
+                val classified = FirestoreErrorHandler.classifyTaskFailure(
+                    error = SecurityException("Blocked CHILD ${current.id} from toggling task assigned to ${targetTask.assignedToMemberId}"),
+                    stage = FirestoreErrorHandler.TaskStage.VERIFY_TASK_AUTHORIZATION,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId,
+                    overrideCategory = FirestoreErrorHandler.TaskFailureCategory.ASSIGNEE_MISMATCH
+                )
+                lastClassifiedTaskFailure = classified
+                _taskOperationError.value = classified.messageHe
+                return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified))
             }
         }
 
-        var completedTask: FamilyTask? = null
-        var becameCompleted = false
+        val previousTask = targetTask
+        val previousMembers = _members.value
+        val previousCurrentMember = _currentMember.value
 
-        _tasks.value = _tasks.value.map { task ->
-            if (task.id == taskId) {
-                val newStatus = !task.isCompleted
-                becameCompleted = newStatus
-                val updated = task.copy(isCompleted = newStatus)
-                completedTask = updated
-                updated
-            } else {
-                task
-            }
-        }
+        val newStatus = !targetTask.isCompleted
+        val nowMillis = System.currentTimeMillis()
+        val actorId = uid.ifBlank { current.id }
+        val newApprovedByParent = if (current.isParent) newStatus else false
 
-        completedTask?.let { task ->
-            val delta = if (becameCompleted) task.points else -task.points
+        val updatedTask = targetTask.copy(
+            familyId = resolvedFamilyId,
+            isCompleted = newStatus,
+            approvedByParent = newApprovedByParent,
+            completedAtMillis = if (newStatus) nowMillis else null,
+            completedByMemberId = if (newStatus) actorId else null,
+            updatedAtMillis = nowMillis
+        )
+
+        _taskOperationError.value = null
+        _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVING)
+
+        // Optimistically update local task & points state while write is in flight
+        _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
+
+        var updatedAssigneePoints: Int? = null
+        if (current.isParent) {
+            val delta = if (newStatus) updatedTask.points else -updatedTask.points
             _members.value = _members.value.map { member ->
-                if (member.id == task.assignedToMemberId) {
+                if (member.id == updatedTask.assignedToMemberId) {
                     val newPts = (member.earnedPoints + delta).coerceAtLeast(0)
+                    updatedAssigneePoints = newPts
                     val updatedMember = member.copy(earnedPoints = newPts)
                     if (_currentMember.value.id == member.id) {
                         _currentMember.value = updatedMember
@@ -2846,21 +4303,465 @@ class FamilyRepository(
                     member
                 }
             }
+        }
 
-            if (becameCompleted) {
-                val assignee = _members.value.find { it.id == task.assignedToMemberId }
-                if (assignee != null) {
-                    pushAlert(
-                        title = "משימה הושלמה! +${task.points} נק' 🎉",
-                        message = "${assignee.name} השלים/ה את המשימה: ${task.title}",
-                        targetName = assignee.name,
-                        targetEmoji = assignee.avatarEmoji,
-                        reason = AlertReason.TASK_COMPLETED
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        val writeStage = if (current.isParent) {
+            FirestoreErrorHandler.TaskStage.PARENT_COMPLETE_TASK_WRITE
+        } else {
+            FirestoreErrorHandler.TaskStage.CHILD_COMPLETE_TASK_WRITE
+        }
+
+        if (simulateOfflineNetworkFailure) {
+            val offlineErr = FirebaseFirestoreException(
+                "Simulated offline network failure during task completion",
+                FirebaseFirestoreException.Code.UNAVAILABLE
+            )
+            // Revert optimistic UI state on failure
+            _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
+            _members.value = previousMembers
+            _currentMember.value = previousCurrentMember
+            _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
+            val classified = FirestoreErrorHandler.classifyTaskFailure(
+                error = offlineErr,
+                stage = writeStage,
+                path = taskPath,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedTaskFailure = classified
+            _taskOperationError.value = classified.messageHe
+            return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified, offlineErr))
+        }
+
+        if (db != null && authUser != null) {
+            try {
+                FirestoreErrorHandler.logTaskMilestone(
+                    stage = writeStage,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId,
+                    note = "Persisting task completion (isCompleted=$newStatus, isParent=${current.isParent})"
+                )
+                val docRef = db.collection("families").document(resolvedFamilyId)
+                    .collection("tasks").document(updatedTask.id)
+
+                if (!current.isParent) {
+                    // CHILD completion-only update: strictly modifies ONLY fields allowed by isChildTaskCompletionOnly()
+                    val childUpdateMap = mapOf<String, Any?>(
+                        "isCompleted" to updatedTask.isCompleted,
+                        "completedAtMillis" to updatedTask.completedAtMillis,
+                        "completedByMemberId" to if (updatedTask.isCompleted) (updatedTask.completedByMemberId ?: authUser.uid) else null,
+                        "updatedAt" to nowMillis
                     )
+                    docRef.update(childUpdateMap).await()
+                } else {
+                    // PARENT update: updates completion & approval status and persists assignee earnedPoints
+                    val parentUpdateMap = mapOf<String, Any?>(
+                        "isCompleted" to updatedTask.isCompleted,
+                        "approvedByParent" to updatedTask.approvedByParent,
+                        "completedAtMillis" to updatedTask.completedAtMillis,
+                        "completedByMemberId" to (updatedTask.completedByMemberId ?: authUser.uid),
+                        "updatedAt" to nowMillis
+                    )
+                    try {
+                        docRef.update(parentUpdateMap).await()
+                    } catch (_: Exception) {
+                        docRef.set(buildFullTaskFirestoreMap(updatedTask, resolvedFamilyId, nowMillis), SetOptions.merge()).await()
+                    }
+
+                    if (updatedAssigneePoints != null && updatedTask.assignedToMemberId.isNotBlank()) {
+                        runCatching {
+                            db.collection("families").document(resolvedFamilyId)
+                                .collection("members").document(updatedTask.assignedToMemberId)
+                                .update(
+                                    mapOf(
+                                        "earnedPoints" to updatedAssigneePoints,
+                                        "updatedAt" to nowMillis
+                                    )
+                                ).await()
+                        }
+                    }
+                }
+
+                FirestoreErrorHandler.logTaskMilestone(
+                    stage = writeStage,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId,
+                    note = "Confirmed task completion commit in Firestore"
+                )
+            } catch (e: Exception) {
+                // Restore previous state so UI never silently diverges from Firestore
+                _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
+                _members.value = previousMembers
+                _currentMember.value = previousCurrentMember
+                _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
+
+                val classified = FirestoreErrorHandler.classifyTaskFailure(
+                    error = e,
+                    stage = writeStage,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId
+                )
+                lastClassifiedTaskFailure = classified
+                _taskOperationError.value = classified.messageHe
+                return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified, e))
+            }
+        }
+
+        // Write succeeded (or pure local unit-test mode): update sync state, Room cache, and emit notification
+        val finalSyncState = when {
+            !updatedTask.isCompleted -> TaskCompletionSyncState.IDLE
+            updatedTask.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
+            else -> TaskCompletionSyncState.PENDING_APPROVAL
+        }
+        _taskSyncStates.value = _taskSyncStates.value + (taskId to finalSyncState)
+        _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
+
+        repoScope.launch {
+            runCatching {
+                taskDao?.upsertTask(updatedTask.toCoreTask(resolvedFamilyId))
+            }
+        }
+
+        emitTaskCompletionNotificationIfNeeded(updatedTask, isParentApprovalEvent = false)
+        return Result.success(updatedTask)
+    }
+
+    fun toggleTaskCompletion(taskId: String): Boolean {
+        val current = _currentMember.value
+        val uid = currentUid()
+        val targetTask = _tasks.value.find { it.id == taskId } ?: return false
+        val resolvedFamilyId = targetTask.familyId.ifBlank { _activeFamilyId.value }
+        val taskPath = "families/$resolvedFamilyId/tasks/$taskId"
+
+        if (!current.isParent) {
+            val isAssignedToCurrentChild = targetTask.assignedToMemberId == current.id ||
+                (uid.isNotBlank() && targetTask.assignedToMemberId == uid)
+            if (!isAssignedToCurrentChild) {
+                val classified = FirestoreErrorHandler.classifyTaskFailure(
+                    error = SecurityException("Blocked CHILD ${current.id} from toggling task assigned to ${targetTask.assignedToMemberId}"),
+                    stage = FirestoreErrorHandler.TaskStage.VERIFY_TASK_AUTHORIZATION,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId,
+                    overrideCategory = FirestoreErrorHandler.TaskFailureCategory.ASSIGNEE_MISMATCH
+                )
+                lastClassifiedTaskFailure = classified
+                _taskOperationError.value = classified.messageHe
+                return false
+            }
+        }
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            // Synchronous in-memory execution for local unit tests
+            return kotlinx.coroutines.runBlocking {
+                toggleTaskCompletionAsync(taskId).isSuccess
+            }
+        }
+
+        if (simulateOfflineNetworkFailure) {
+            kotlinx.coroutines.runBlocking {
+                toggleTaskCompletionAsync(taskId)
+            }
+            return false
+        }
+
+        // Apply immediate optimistic state and launch cloud commit on repoScope
+        val previousTask = targetTask
+        val previousMembers = _members.value
+        val previousCurrentMember = _currentMember.value
+        val newStatus = !targetTask.isCompleted
+        val nowMillis = System.currentTimeMillis()
+        val actorId = uid.ifBlank { current.id }
+        val newApprovedByParent = if (current.isParent) newStatus else false
+
+        val updatedTask = targetTask.copy(
+            familyId = resolvedFamilyId,
+            isCompleted = newStatus,
+            approvedByParent = newApprovedByParent,
+            completedAtMillis = if (newStatus) nowMillis else null,
+            completedByMemberId = if (newStatus) actorId else null,
+            updatedAtMillis = nowMillis
+        )
+
+        _taskOperationError.value = null
+        _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVING)
+        _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
+
+        var updatedAssigneePoints: Int? = null
+        if (current.isParent) {
+            val delta = if (newStatus) updatedTask.points else -updatedTask.points
+            _members.value = _members.value.map { member ->
+                if (member.id == updatedTask.assignedToMemberId) {
+                    val newPts = (member.earnedPoints + delta).coerceAtLeast(0)
+                    updatedAssigneePoints = newPts
+                    val updatedMember = member.copy(earnedPoints = newPts)
+                    if (_currentMember.value.id == member.id) {
+                        _currentMember.value = updatedMember
+                    }
+                    updatedMember
+                } else {
+                    member
                 }
             }
+        }
 
-            pushTaskToFirestoreOrQueue(task, isDelete = false)
+        val isParentCaller = current.isParent
+        val writeStage = if (isParentCaller) {
+            FirestoreErrorHandler.TaskStage.PARENT_COMPLETE_TASK_WRITE
+        } else {
+            FirestoreErrorHandler.TaskStage.CHILD_COMPLETE_TASK_WRITE
+        }
+
+        repoScope.launch {
+            try {
+                if (db != null && authUser != null) {
+                    FirestoreErrorHandler.logTaskMilestone(
+                        stage = writeStage,
+                        path = taskPath,
+                        databaseId = configuredDatabaseId,
+                        note = "Persisting task completion (isCompleted=$newStatus, isParent=$isParentCaller)"
+                    )
+                    val docRef = db.collection("families").document(resolvedFamilyId)
+                        .collection("tasks").document(updatedTask.id)
+
+                    if (!isParentCaller) {
+                        val childUpdateMap = mapOf<String, Any?>(
+                            "isCompleted" to updatedTask.isCompleted,
+                            "completedAtMillis" to updatedTask.completedAtMillis,
+                            "completedByMemberId" to if (updatedTask.isCompleted) (updatedTask.completedByMemberId ?: authUser.uid) else null,
+                            "updatedAt" to nowMillis
+                        )
+                        docRef.update(childUpdateMap).await()
+                    } else {
+                        val parentUpdateMap = mapOf<String, Any?>(
+                            "isCompleted" to updatedTask.isCompleted,
+                            "approvedByParent" to updatedTask.approvedByParent,
+                            "completedAtMillis" to updatedTask.completedAtMillis,
+                            "completedByMemberId" to if (updatedTask.isCompleted) (updatedTask.completedByMemberId ?: authUser.uid) else null,
+                            "updatedAt" to nowMillis
+                        )
+                        try {
+                            docRef.update(parentUpdateMap).await()
+                        } catch (_: Exception) {
+                            docRef.set(buildFullTaskFirestoreMap(updatedTask, resolvedFamilyId, nowMillis), SetOptions.merge()).await()
+                        }
+
+                        if (updatedAssigneePoints != null && updatedTask.assignedToMemberId.isNotBlank()) {
+                            runCatching {
+                                db.collection("families").document(resolvedFamilyId)
+                                    .collection("members").document(updatedTask.assignedToMemberId)
+                                    .update(
+                                        mapOf(
+                                            "earnedPoints" to updatedAssigneePoints,
+                                            "updatedAt" to nowMillis
+                                        )
+                                    ).await()
+                            }
+                        }
+                    }
+                }
+
+                val finalSyncState = when {
+                    !updatedTask.isCompleted -> TaskCompletionSyncState.IDLE
+                    updatedTask.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
+                    else -> TaskCompletionSyncState.PENDING_APPROVAL
+                }
+                _taskSyncStates.value = _taskSyncStates.value + (taskId to finalSyncState)
+                _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
+                runCatching {
+                    taskDao?.upsertTask(updatedTask.toCoreTask(resolvedFamilyId))
+                }
+                emitTaskCompletionNotificationIfNeeded(updatedTask, isParentApprovalEvent = false)
+            } catch (e: Exception) {
+                // Revert optimistic state on Firestore write failure
+                _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
+                _members.value = previousMembers
+                _currentMember.value = previousCurrentMember
+                _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
+
+                val classified = FirestoreErrorHandler.classifyTaskFailure(
+                    error = e,
+                    stage = writeStage,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId
+                )
+                lastClassifiedTaskFailure = classified
+                _taskOperationError.value = classified.messageHe
+            }
+        }
+        return true
+    }
+
+    /**
+     * V1.6 Requirement 6 & 9:
+     * Allows an authenticated PARENT to approve a child's completed task (`approvedByParent = true`),
+     * persisting the approval to `/families/{familyId}/tasks/{taskId}` and awarding points to the
+     * child's member document in Firestore.
+     */
+    suspend fun approveTaskCompletionAsync(taskId: String): Result<FamilyTask> {
+        val current = _currentMember.value
+        val targetTask = _tasks.value.find { it.id == taskId }
+            ?: return Result.failure(IllegalArgumentException("המשימה לא נמצאה"))
+        val resolvedFamilyId = targetTask.familyId.ifBlank { _activeFamilyId.value }
+        val taskPath = "families/$resolvedFamilyId/tasks/$taskId"
+
+        if (!current.isParent) {
+            val classified = FirestoreErrorHandler.classifyTaskFailure(
+                error = SecurityException("Only a PARENT can approve task completion"),
+                stage = FirestoreErrorHandler.TaskStage.VERIFY_TASK_AUTHORIZATION,
+                path = taskPath,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.TaskFailureCategory.UNAUTHORIZED_ROLE
+            )
+            lastClassifiedTaskFailure = classified
+            _taskOperationError.value = classified.messageHe
+            return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified))
+        }
+
+        val previousTask = targetTask
+        val previousMembers = _members.value
+        val previousCurrentMember = _currentMember.value
+        val nowMillis = System.currentTimeMillis()
+        val wasAlreadyApproved = targetTask.isCompleted && targetTask.approvedByParent
+
+        val approvedTask = targetTask.copy(
+            familyId = resolvedFamilyId,
+            isCompleted = true,
+            approvedByParent = true,
+            completedAtMillis = targetTask.completedAtMillis ?: nowMillis,
+            completedByMemberId = targetTask.completedByMemberId ?: targetTask.assignedToMemberId,
+            updatedAtMillis = nowMillis
+        )
+
+        _taskOperationError.value = null
+        _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVING)
+        _tasks.value = _tasks.value.map { if (it.id == taskId) approvedTask else it }
+
+        var updatedAssigneePoints: Int? = null
+        _members.value = _members.value.map { member ->
+            if (member.id == approvedTask.assignedToMemberId) {
+                val pointsToAward = if (!wasAlreadyApproved) approvedTask.points else 0
+                val newPts = (member.earnedPoints + pointsToAward).coerceAtLeast(0)
+                updatedAssigneePoints = newPts
+                val updatedMember = member.copy(earnedPoints = newPts)
+                if (_currentMember.value.id == member.id) {
+                    _currentMember.value = updatedMember
+                }
+                updatedMember
+            } else {
+                member
+            }
+        }
+
+        if (simulateOfflineNetworkFailure) {
+            val offlineErr = FirebaseFirestoreException(
+                "Simulated offline network failure during parent task approval",
+                FirebaseFirestoreException.Code.UNAVAILABLE
+            )
+            _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
+            _members.value = previousMembers
+            _currentMember.value = previousCurrentMember
+            _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
+            val classified = FirestoreErrorHandler.classifyTaskFailure(
+                error = offlineErr,
+                stage = FirestoreErrorHandler.TaskStage.PARENT_APPROVE_TASK_WRITE,
+                path = taskPath,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedTaskFailure = classified
+            _taskOperationError.value = classified.messageHe
+            return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified, offlineErr))
+        }
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                FirestoreErrorHandler.logTaskMilestone(
+                    stage = FirestoreErrorHandler.TaskStage.PARENT_APPROVE_TASK_WRITE,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId,
+                    note = "Parent approving task completion in named database"
+                )
+                val docRef = db.collection("families").document(resolvedFamilyId)
+                    .collection("tasks").document(approvedTask.id)
+                docRef.update(
+                    mapOf(
+                        "isCompleted" to true,
+                        "approvedByParent" to true,
+                        "completedAtMillis" to approvedTask.completedAtMillis,
+                        "completedByMemberId" to approvedTask.completedByMemberId,
+                        "updatedAt" to nowMillis
+                    )
+                ).await()
+
+                if (approvedTask.assignedToMemberId.isNotBlank()) {
+                    val memberRef = db.collection("families").document(resolvedFamilyId)
+                        .collection("members").document(approvedTask.assignedToMemberId)
+                    runCatching {
+                        val memberSnap = memberRef.get().await()
+                        if (memberSnap.exists()) {
+                            val currentCloudPts = (memberSnap.getLong("earnedPoints") ?: 0L).toInt()
+                            val newCloudPts = (currentCloudPts + approvedTask.points).coerceAtLeast(updatedAssigneePoints ?: 0)
+                            memberRef.update(
+                                mapOf(
+                                    "earnedPoints" to newCloudPts,
+                                    "updatedAt" to nowMillis
+                                )
+                            ).await()
+                            _members.value = _members.value.map { m ->
+                                if (m.id == approvedTask.assignedToMemberId) m.copy(earnedPoints = newCloudPts) else m
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
+                _members.value = previousMembers
+                _currentMember.value = previousCurrentMember
+                _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
+                val classified = FirestoreErrorHandler.classifyTaskFailure(
+                    error = e,
+                    stage = FirestoreErrorHandler.TaskStage.PARENT_APPROVE_TASK_WRITE,
+                    path = taskPath,
+                    databaseId = configuredDatabaseId
+                )
+                lastClassifiedTaskFailure = classified
+                _taskOperationError.value = classified.messageHe
+                return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified, e))
+            }
+        }
+
+        _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVED_APPROVED)
+        _tasks.value = _tasks.value.map { if (it.id == taskId) approvedTask else it }
+        emitTaskCompletionNotificationIfNeeded(approvedTask, isParentApprovalEvent = true)
+        return Result.success(approvedTask)
+    }
+
+    fun approveTaskCompletion(taskId: String): Boolean {
+        if (!_currentMember.value.isParent) {
+            val classified = FirestoreErrorHandler.classifyTaskFailure(
+                error = SecurityException("Only a PARENT can approve task completion"),
+                stage = FirestoreErrorHandler.TaskStage.VERIFY_TASK_AUTHORIZATION,
+                path = "families/${_activeFamilyId.value}/tasks/$taskId",
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.TaskFailureCategory.UNAUTHORIZED_ROLE
+            )
+            lastClassifiedTaskFailure = classified
+            _taskOperationError.value = classified.messageHe
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                approveTaskCompletionAsync(taskId).isSuccess
+            }
+        }
+        repoScope.launch {
+            approveTaskCompletionAsync(taskId)
         }
         return true
     }
@@ -2983,34 +4884,1582 @@ class FamilyRepository(
         )
     }
 
-    // --- Google Drive Folders & Files ---
+    // --- Shared Family Folders & Files Manager (V1.0.0) ---
 
-    fun addFolder(folder: DocumentFolder) {
-        _folders.value = _folders.value + folder
-    }
-
-    fun addDocument(doc: FamilyDocument) {
-        _documents.value = listOf(doc) + _documents.value
-        val uploader = _members.value.find { it.id == doc.uploadedByMemberId }
-        pushAlert(
-            title = "קובץ חדש סונכרן ל-Google Drive ☁️",
-            message = "${doc.name} הועלה ע\"י ${uploader?.name ?: "חבר משפחה"}",
-            targetName = uploader?.name ?: "משפחה",
-            targetEmoji = uploader?.avatarEmoji ?: "📁",
-            reason = AlertReason.DRIVE_SYNC
-        )
-    }
-
-    fun renameDocument(documentId: String, newName: String) {
-        val clean = newName.trim()
-        if (clean.isEmpty()) return
-        _documents.value = _documents.value.map { doc ->
-            if (doc.id == documentId) doc.copy(name = clean) else doc
+    fun selectFolder(folderId: String?) {
+        _selectedFolderId.value = folderId
+        val famId = _activeFamilyId.value.ifBlank { "default" }
+        if (folderId == null) {
+            persistedSelectedFolderByFamily.remove("$famId:selected")
+            persistedSelectedFolderByFamily["$famId:hasExplicitRoot"] = "true"
+        } else {
+            persistedSelectedFolderByFamily["$famId:selected"] = folderId
+            persistedSelectedFolderByFamily.remove("$famId:hasExplicitRoot")
+        }
+        runCatching {
+            appContext?.getSharedPreferences(FILE_MANAGER_PREFS, Context.MODE_PRIVATE)
+                ?.edit()
+                ?.putString("selected_folder_$famId", folderId ?: "__ROOT__")
+                ?.apply()
         }
     }
 
-    fun deleteDocument(documentId: String) {
+    fun navigateUpFolder(): Boolean {
+        val currentId = _selectedFolderId.value ?: return false
+        val currentFolder = _folders.value.find { it.id == currentId }
+        val parentId = currentFolder?.parentFolderId?.takeIf { it.isNotBlank() }
+        selectFolder(parentId)
+        return true
+    }
+
+    fun setFileSortOption(option: FileSortOption) {
+        if (_fileSortOption.value == option) {
+            _fileSortAscending.value = !_fileSortAscending.value
+        } else {
+            _fileSortOption.value = option
+            _fileSortAscending.value = (option == FileSortOption.NAME || option == FileSortOption.TYPE)
+        }
+    }
+
+    fun setFileSearchQuery(query: String) {
+        _fileSearchQuery.value = query
+    }
+
+    private fun restorePersistedFileNavigationState(familyId: String) {
+        val famId = familyId.ifBlank { "default" }
+        persistedFoldersByFamily[famId]?.let { cachedFolders ->
+            if (cachedFolders.isNotEmpty()) {
+                _folders.value = cachedFolders
+            }
+        }
+        persistedDocumentsByFamily[famId]?.let { cachedDocs ->
+            if (cachedDocs.isNotEmpty()) {
+                _documents.value = cachedDocs
+            }
+        }
+        persistedDriveConfigByFamily[famId]?.let { cachedDrive ->
+            _familyDriveConfig.value = cachedDrive
+        }
+        val fromPrefs = runCatching {
+            appContext?.getSharedPreferences(FILE_MANAGER_PREFS, Context.MODE_PRIVATE)
+                ?.getString("selected_folder_$famId", null)
+        }.getOrNull()
+
+        when {
+            fromPrefs == "__ROOT__" -> _selectedFolderId.value = null
+            !fromPrefs.isNullOrBlank() -> _selectedFolderId.value = fromPrefs
+            persistedSelectedFolderByFamily["$famId:hasExplicitRoot"] == "true" -> _selectedFolderId.value = null
+            persistedSelectedFolderByFamily.containsKey("$famId:selected") -> {
+                _selectedFolderId.value = persistedSelectedFolderByFamily["$famId:selected"]
+            }
+        }
+    }
+
+    /**
+     * Inside the shared `FamilyTasks` Google Drive folder, every active family member
+     * (both PARENT and CHILD) has equal file-management permissions.
+     */
+    fun canCurrentMemberDeleteOrModifyFile(file: FamilyDocument): Boolean {
+        return FamilyFileManagerHelper.canMemberModifyOrDeleteFile(
+            file = file,
+            member = _currentMember.value,
+            authenticatedUid = authProvider()?.currentUser?.uid ?: _currentMember.value.id
+        )
+    }
+
+    /**
+     * Inside the shared `FamilyTasks` Google Drive folder, every active family member
+     * (both PARENT and CHILD) has equal folder-management permissions.
+     */
+    fun canCurrentMemberDeleteFolder(): Boolean {
+        return FamilyFileManagerHelper.canMemberDeleteFolder(_currentMember.value)
+    }
+
+    // --- Google Drive FamilyTasks Root Folder Setup & Sharing ---
+
+    fun setupOrReconnectFamilyGoogleDrive(
+        onComplete: ((Result<FamilyDriveConfig>) -> Unit)? = null
+    ) {
+        repoScope.launch {
+            val res = setupOrReconnectFamilyGoogleDriveSuspend(_activeFamilyId.value)
+            onComplete?.invoke(res)
+        }
+    }
+
+    suspend fun connectOrSetupFamilyDriveFolder(
+        targetFamilyId: String = _activeFamilyId.value
+    ): Result<FamilyDriveConfig> = setupOrReconnectFamilyGoogleDriveSuspend(targetFamilyId)
+
+    suspend fun setupOrReconnectFamilyGoogleDriveSuspend(
+        targetFamilyId: String = _activeFamilyId.value
+    ): Result<FamilyDriveConfig> {
+        val famId = targetFamilyId.ifBlank { "fam_israeli_8492" }
+        val currentMember = _currentMember.value
+        val callerUid = currentUid()
+        val callerEmail = resolveVerifiedGoogleEmail().ifBlank { "parent@gmail.com" }
+        val isParent = currentMember.isParent
+
+        _familyDriveConfig.value = _familyDriveConfig.value.copy(
+            familyId = famId,
+            connectionStatus = DriveConnectionStatus.CONNECTING,
+            errorMessageHe = null,
+            errorMessageEn = null
+        )
+
+        val db = if (authProvider()?.currentUser != null) firestoreProvider() else null
+        var existingRemoteConfig: FamilyDriveConfig? = _familyDriveConfig.value
+            .takeIf { it.familyId == famId && it.isConfigured }
+            ?: persistedDriveConfigByFamily[famId]?.takeIf { it.isConfigured }
+        var existingRootFolderId = existingRemoteConfig?.rootFolderId.orEmpty()
+
+        // First check Firestore `/families/{familyId}` for an authoritative registered `driveRootFolderId`
+        // so we NEVER create duplicate `FamilyTasks` root folders across restarts or devices.
+        if (existingRootFolderId.isBlank() && db != null) {
+            runCatching {
+                val snap = db.collection("families").document(famId).get().await()
+                if (snap.exists()) {
+                    val remoteConfig = GoogleDriveFamilyService.parseDriveConfigFromFamilySnapshot(famId, snap.data)
+                    if (remoteConfig.isConfigured) {
+                        existingRemoteConfig = remoteConfig
+                        existingRootFolderId = remoteConfig.rootFolderId
+                        _familyDriveConfig.value = remoteConfig
+                        persistedDriveConfigByFamily[famId] = remoteConfig
+                    }
+                }
+            }
+        }
+
+        // Also ensure the current signed-in member's verified Google email is synced on their member doc
+        if (db != null && callerEmail.contains("@") && callerEmail != "parent@gmail.com") {
+            runCatching {
+                db.collection("families").document(famId)
+                    .collection("members").document(callerUid)
+                    .set(
+                        mapOf(
+                            "googleEmail" to callerEmail,
+                            "email" to callerEmail
+                        ),
+                        SetOptions.merge()
+                    )
+                    .await()
+            }
+        }
+
+        val setupRes = GoogleDriveFamilyService.setupOrReconnectFamilyDriveRootFolder(
+            context = appContext,
+            accountEmail = callerEmail,
+            familyId = famId,
+            callerUid = callerUid,
+            isParent = isParent,
+            existingRootFolderId = existingRootFolderId.takeIf { it.isNotBlank() },
+            callerName = currentMember.name
+        )
+
+        return setupRes.fold(
+            onSuccess = { config ->
+                if (!isParent) {
+                    // Invited CHILD member reconnecting to the existing FamilyTasks root folder:
+                    // preserve the parent's ownership & shared member list while marking this session CONNECTED.
+                    val baseConfig = existingRemoteConfig ?: config
+                    val childStatuses = baseConfig.memberShareStatuses.toMutableMap().apply {
+                        put(callerUid, DriveMemberSharingStatus.SHARED_EDITOR)
+                    }
+                    val childEmails = (baseConfig.sharedWithEmails + callerEmail.trim().lowercase())
+                        .filter { it.isNotBlank() && it.contains("@") }
+                        .distinct()
+                    val childConnectedConfig = baseConfig.copy(
+                        isConnected = true,
+                        connectionStatus = DriveConnectionStatus.CONNECTED,
+                        sharedEmails = childEmails,
+                        sharedWithEmails = childEmails,
+                        memberShareStatuses = childStatuses,
+                        lastSyncedAtMillis = System.currentTimeMillis()
+                    )
+                    _familyDriveConfig.value = childConnectedConfig
+                    persistedDriveConfigByFamily[famId] = childConnectedConfig
+                    _driveOperationMessage.value = "תיקיית Google Drive המשפחתית ($GOOGLE_DRIVE_ROOT_FOLDER_NAME) מחוברת ומסונכרנת!"
+                    return@fold Result.success(childConnectedConfig)
+                }
+
+                // PARENT setup / reconnect: gather all verified member emails from both local state and Firestore
+                val memberEmailMap = mutableMapOf<String, String>()
+                for (m in _members.value) {
+                    val em = m.googleEmail?.trim()?.lowercase().orEmpty()
+                    if (em.isNotBlank() && em.contains("@")) {
+                        memberEmailMap[m.id] = em
+                    }
+                }
+                if (db != null) {
+                    runCatching {
+                        val memberDocs = db.collection("families").document(famId)
+                            .collection("members").get().await().documents
+                        for (doc in memberDocs) {
+                            val em = (doc.getString("googleEmail") ?: doc.getString("email"))
+                                ?.trim()?.lowercase().orEmpty()
+                            if (em.isNotBlank() && em.contains("@")) {
+                                memberEmailMap[doc.id] = em
+                            }
+                        }
+                    }
+                }
+
+                val mergedSharedEmails = (
+                    existingRemoteConfig?.sharedWithEmails.orEmpty() +
+                        config.sharedWithEmails +
+                        memberEmailMap.values +
+                        callerEmail.trim().lowercase()
+                    )
+                    .filter { it.isNotBlank() && it.contains("@") }
+                    .distinct()
+
+                val updatedStatuses = (existingRemoteConfig?.memberShareStatuses ?: config.memberShareStatuses).toMutableMap()
+                val resolvedOwnerUid = existingRemoteConfig?.ownerUid?.takeIf { it.isNotBlank() } ?: callerUid
+                val resolvedOwnerEmail = existingRemoteConfig?.ownerEmail?.takeIf { it.isNotBlank() } ?: callerEmail
+                val resolvedOwnerName = existingRemoteConfig?.ownerName?.takeIf { it.isNotBlank() } ?: currentMember.name
+                updatedStatuses[callerUid] = if (callerUid == resolvedOwnerUid) {
+                    DriveMemberSharingStatus.OWNER
+                } else {
+                    DriveMemberSharingStatus.SHARED_EDITOR
+                }
+
+                for ((mId, email) in memberEmailMap) {
+                    if (mId != callerUid && !email.equals(resolvedOwnerEmail, ignoreCase = true) && config.isConfigured) {
+                        runCatching {
+                            GoogleDriveFamilyService.shareRootFolderWithFamilyMember(
+                                context = appContext,
+                                ownerEmail = callerEmail,
+                                rootFolderId = config.rootFolderId,
+                                targetMemberEmail = email,
+                                familyId = famId
+                            )
+                        }
+                        updatedStatuses[mId] = DriveMemberSharingStatus.SHARED_EDITOR
+                    } else if (email.equals(resolvedOwnerEmail, ignoreCase = true)) {
+                        updatedStatuses[mId] = DriveMemberSharingStatus.OWNER
+                    }
+                }
+
+                val enrichedConfig = config.copy(
+                    ownerUid = resolvedOwnerUid,
+                    ownerEmail = resolvedOwnerEmail,
+                    ownerName = resolvedOwnerName,
+                    sharedEmails = mergedSharedEmails,
+                    sharedWithEmails = mergedSharedEmails,
+                    memberShareStatuses = updatedStatuses
+                )
+                _familyDriveConfig.value = enrichedConfig
+                persistedDriveConfigByFamily[famId] = enrichedConfig
+
+                if (enrichedConfig.isConfigured && db != null) {
+                    runCatching {
+                        val payload = GoogleDriveFamilyService.buildDriveConfigFirestoreMap(enrichedConfig)
+                        db.collection("families").document(famId)
+                            .set(payload, SetOptions.merge())
+                            .await()
+                    }
+                }
+
+                if (enrichedConfig.isConfigured) {
+                    _driveOperationMessage.value = "תיקיית Google Drive המשפחתית ($GOOGLE_DRIVE_ROOT_FOLDER_NAME) מחוברת ומסונכרנת!"
+                }
+                Result.success(enrichedConfig)
+            },
+            onFailure = { err ->
+                when (err) {
+                    is GoogleDriveFamilyService.DriveConsentRequiredException -> {
+                        _driveConsentPendingIntent.value = err.pendingIntent
+                        _driveConsentIntent.value = err.legacyConsentIntent
+                        val needsAuthConfig = _familyDriveConfig.value.copy(
+                            familyId = famId,
+                            driveRootFolderId = existingRootFolderId.ifBlank { _familyDriveConfig.value.driveRootFolderId },
+                            connectionStatus = DriveConnectionStatus.NEEDS_OAUTH_AUTHORIZATION,
+                            errorMessageHe = "נדרש אישור גישה ל-Google Drive עבור תיקיית FamilyTasks.",
+                            errorMessageEn = "Google Drive authorization is required for the FamilyTasks folder."
+                        )
+                        _familyDriveConfig.value = needsAuthConfig
+                        Result.failure(err)
+                    }
+                    is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException -> {
+                        handleSharedFolderPickerException(err)
+                        Result.failure(err)
+                    }
+                    else -> {
+                        val errConfig = _familyDriveConfig.value.copy(
+                            familyId = famId,
+                            driveRootFolderId = existingRootFolderId.ifBlank { _familyDriveConfig.value.driveRootFolderId },
+                            connectionStatus = DriveConnectionStatus.ERROR,
+                            errorMessageHe = err.localizedMessage ?: "חיבור ל-Google Drive נכשל. נסו שוב.",
+                            errorMessageEn = err.localizedMessage ?: "Failed to connect to Google Drive."
+                        )
+                        _familyDriveConfig.value = errConfig
+                        _fileOperationError.value = errConfig.errorMessageHe
+                        Result.failure(err)
+                    }
+                }
+            }
+        )
+    }
+
+    fun updateMemberGoogleEmail(memberId: String, newEmailInput: String): Boolean {
+        val cleanEmail = newEmailInput.trim().lowercase()
+        if (cleanEmail.isBlank() || !cleanEmail.contains("@")) {
+            _fileOperationError.value = "נא להזין כתובת אימייל של חשבון Google תקינה."
+            return false
+        }
+        val famId = _activeFamilyId.value
+        _members.value = _members.value.map { member ->
+            if (member.id == memberId) member.copy(googleEmail = cleanEmail) else member
+        }
+        if (_currentMember.value.id == memberId) {
+            _currentMember.value = _currentMember.value.copy(googleEmail = cleanEmail)
+        }
+        val db = firestoreProvider()
+        if (db != null && famId.isNotBlank() && authProvider()?.currentUser != null) {
+            repoScope.launch {
+                runCatching {
+                    db.collection("families").document(famId)
+                        .collection("members").document(memberId)
+                        .set(
+                            mapOf(
+                                "googleEmail" to cleanEmail,
+                                "email" to cleanEmail
+                            ),
+                            SetOptions.merge()
+                        )
+                        .await()
+                }
+            }
+        }
+        return true
+    }
+
+    fun shareFamilyDriveWithMember(
+        memberId: String,
+        memberEmailInput: String,
+        onComplete: ((Result<FamilyDriveConfig>) -> Unit)? = null
+    ) {
+        repoScope.launch {
+            val res = shareFamilyDriveWithMemberSuspend(memberId, memberEmailInput, _activeFamilyId.value)
+            onComplete?.invoke(res)
+        }
+    }
+
+    suspend fun shareFamilyDriveWithMemberSuspend(
+        memberId: String,
+        memberEmailInput: String,
+        targetFamilyId: String = _activeFamilyId.value
+    ): Result<FamilyDriveConfig> {
+        val memberFromState = _members.value.find { it.id == memberId }
+        val cleanEmail = memberEmailInput.trim().lowercase().ifBlank {
+            memberFromState?.googleEmail?.trim()?.lowercase().orEmpty()
+        }
+        if (cleanEmail.isBlank() || !cleanEmail.contains("@")) {
+            val msg = "נא להזין כתובת Google תקינה לשיתוף תיקיית FamilyTasks."
+            _fileOperationError.value = msg
+            return Result.failure(IllegalArgumentException(msg))
+        }
+        updateMemberGoogleEmail(memberId, cleanEmail)
+
+        var currentConfig = _familyDriveConfig.value
+        if (!currentConfig.isConfigured) {
+            val setupRes = setupOrReconnectFamilyGoogleDriveSuspend(targetFamilyId)
+            currentConfig = setupRes.getOrElse { return Result.failure(it) }
+        }
+        if (!currentConfig.isConfigured) {
+            val msg = "יש לחבר תחילה את תיקיית FamilyTasks ב-Google Drive של ההורה."
+            _fileOperationError.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
+
+        val ownerEmail = resolveVerifiedGoogleEmail(currentConfig.ownerEmail)
+        val shareRes = GoogleDriveFamilyService.shareRootFolderWithFamilyMember(
+            context = appContext,
+            ownerEmail = ownerEmail,
+            rootFolderId = currentConfig.rootFolderId,
+            targetMemberEmail = cleanEmail,
+            familyId = targetFamilyId
+        )
+        return shareRes.fold(
+            onSuccess = {
+                val updatedEmails = (currentConfig.sharedWithEmails + cleanEmail).distinct()
+                val updatedStatuses = currentConfig.memberShareStatuses.toMutableMap().apply {
+                    put(memberId, DriveMemberSharingStatus.SHARED_EDITOR)
+                }
+                val updatedConfig = currentConfig.copy(
+                    sharedEmails = updatedEmails,
+                    sharedWithEmails = updatedEmails,
+                    memberShareStatuses = updatedStatuses,
+                    lastSyncedAtMillis = System.currentTimeMillis()
+                )
+                _familyDriveConfig.value = updatedConfig
+                persistedDriveConfigByFamily[targetFamilyId] = updatedConfig
+
+                val db = if (authProvider()?.currentUser != null) firestoreProvider() else null
+                if (db != null && targetFamilyId.isNotBlank() && _currentMember.value.isParent) {
+                    runCatching {
+                        val payload = GoogleDriveFamilyService.buildDriveConfigFirestoreMap(updatedConfig)
+                        db.collection("families").document(targetFamilyId)
+                            .set(payload, SetOptions.merge())
+                            .await()
+                    }
+                }
+                val memberName = _members.value.find { it.id == memberId }?.name ?: cleanEmail
+                _driveOperationMessage.value = "תיקיית FamilyTasks שותפה בהצלחה עם $memberName ($cleanEmail)"
+                Result.success(updatedConfig)
+            },
+            onFailure = { err ->
+                _fileOperationError.value = err.localizedMessage ?: "שיתוף תיקיית FamilyTasks נכשל."
+                Result.failure(err)
+            }
+        )
+    }
+
+    fun shareFamilyDriveWithAllMembers(
+        onComplete: ((Result<FamilyDriveConfig>) -> Unit)? = null
+    ) {
+        repoScope.launch {
+            val res = shareFamilyDriveWithAllMembersSuspend(_activeFamilyId.value)
+            onComplete?.invoke(res)
+        }
+    }
+
+    suspend fun shareFamilyDriveWithAllMembersSuspend(
+        targetFamilyId: String = _activeFamilyId.value
+    ): Result<FamilyDriveConfig> {
+        val famId = targetFamilyId.ifBlank { _activeFamilyId.value }
+        var config = _familyDriveConfig.value
+        if (!config.isConfigured) {
+            val setupRes = setupOrReconnectFamilyGoogleDriveSuspend(famId)
+            config = setupRes.getOrElse { return Result.failure(it) }
+        }
+        val db = if (authProvider()?.currentUser != null) firestoreProvider() else null
+        val verifiedEmailsByMemberId = mutableMapOf<String, String>()
+        for (member in _members.value) {
+            val email = member.googleEmail?.trim()?.lowercase().orEmpty()
+            if (email.isNotBlank() && email.contains("@")) {
+                verifiedEmailsByMemberId[member.id] = email
+            }
+        }
+        if (db != null && famId.isNotBlank()) {
+            runCatching {
+                val docs = db.collection("families").document(famId)
+                    .collection("members").get().await().documents
+                for (doc in docs) {
+                    val email = (doc.getString("googleEmail") ?: doc.getString("email"))
+                        ?.trim()?.lowercase().orEmpty()
+                    if (email.isNotBlank() && email.contains("@")) {
+                        verifiedEmailsByMemberId[doc.id] = email
+                    }
+                }
+            }
+        }
+        var latestConfig = config
+        for ((memberId, email) in verifiedEmailsByMemberId) {
+            if (email.equals(config.ownerEmail, ignoreCase = true) && memberId == config.ownerUid) {
+                continue
+            }
+            val res = shareFamilyDriveWithMemberSuspend(memberId, email, famId)
+            if (res.isSuccess) {
+                latestConfig = res.getOrThrow()
+            }
+        }
+        _driveOperationMessage.value = "תיקיית FamilyTasks משותפת עם כל בני המשפחה!"
+        return Result.success(latestConfig)
+    }
+
+    fun addFolder(folder: DocumentFolder) {
+        val famId = _activeFamilyId.value.ifBlank { folder.familyId }
+        val callerUid = currentUid()
+        val callerName = _currentMember.value.name.ifBlank { "חבר משפחה" }
+        val rootDriveId = _familyDriveConfig.value.rootFolderId.trim()
+            .ifBlank { GoogleDriveFamilyService.getRegisteredRootFolderIdForFamily(famId).orEmpty() }
+            .ifBlank { "gdrive_root_$famId" }
+        val parentDriveId = folder.parentFolderId?.let { pid ->
+            _folders.value.find { it.id == pid }?.driveFolderId?.takeIf { it.isNotBlank() && !it.startsWith("f_") }
+        } ?: rootDriveId
+        val resolvedDriveFolderId = folder.driveFolderId.ifBlank { "drive_folder_${folder.id}" }
+        val enriched = folder.copy(
+            familyId = famId,
+            nameHe = FamilyFileManagerHelper.sanitizeFolderName(folder.nameHe).ifBlank { "תיקייה חדשה" },
+            nameEn = FamilyFileManagerHelper.sanitizeFolderName(folder.nameEn).ifBlank { folder.nameHe },
+            createdByUid = folder.createdByUid.ifBlank { callerUid },
+            createdByName = folder.createdByName.ifBlank { callerName },
+            driveFolderId = resolvedDriveFolderId,
+            driveParentFolderId = parentDriveId
+        )
+        _folders.value = (_folders.value.filterNot { it.id == enriched.id } + enriched)
+        persistedFoldersByFamily[famId] = _folders.value
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        val db = firestoreProvider()
+        repoScope.launch {
+            val driveRes = GoogleDriveFamilyService.createSubfolderInDrive(
+                context = appContext,
+                accountEmail = accountEmail,
+                parentDriveFolderId = parentDriveId,
+                folderName = enriched.nameHe,
+                localFolderId = enriched.id,
+                familyId = famId,
+                driveRootFolderId = rootDriveId
+            )
+            driveRes.fold(
+                onSuccess = { driveMeta ->
+                    val finalFolder = enriched.copy(
+                        driveFolderId = driveMeta.driveId,
+                        driveParentFolderId = parentDriveId
+                    )
+                    _folders.value = _folders.value.map { if (it.id == finalFolder.id) finalFolder else it }
+                    persistedFoldersByFamily[famId] = _folders.value
+                    if (db != null && famId.isNotBlank() && authProvider()?.currentUser != null) {
+                        runCatching {
+                            val payload = FamilyCloudFileTransferEngine.buildFolderFirestoreMap(
+                                folder = finalFolder,
+                                familyId = famId,
+                                callerUid = callerUid,
+                                callerName = callerName
+                            )
+                            db.collection("families").document(famId)
+                                .collection("folders").document(finalFolder.id)
+                                .set(payload)
+                                .await()
+                        }
+                    }
+                },
+                onFailure = { err ->
+                    // Never disguise a failed/unauthorized folder in Firestore or local state
+                    _folders.value = _folders.value.filterNot { it.id == enriched.id }
+                    persistedFoldersByFamily[famId] = _folders.value
+                    if (err is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                        handleSharedFolderPickerException(err)
+                    } else {
+                        _fileOperationError.value = err.localizedMessage ?: "יצירת התיקייה ב-Google Drive נכשלה."
+                    }
+                }
+            )
+        }
+    }
+
+    suspend fun createSharedFolderInCloud(
+        nameHe: String,
+        nameEn: String = nameHe,
+        iconEmoji: String = "📁",
+        colorHex: Long = 0xFF1F6E6CL,
+        parentFolderId: String? = null,
+        targetFamilyId: String = _activeFamilyId.value
+    ): Result<DocumentFolder> {
+        val cleanHe = FamilyFileManagerHelper.sanitizeFolderName(nameHe)
+        if (cleanHe.isBlank()) {
+            return Result.failure(IllegalArgumentException("נא להזין שם תיקייה תקין."))
+        }
+        val cleanEn = FamilyFileManagerHelper.sanitizeFolderName(nameEn).ifBlank { cleanHe }
+        val callerUid = currentUid()
+        val callerName = _currentMember.value.name.ifBlank { "חבר משפחה" }
+        val folderId = "folder_${UUID.randomUUID().toString().replace("-", "").take(10)}"
+        val rootDriveId = _familyDriveConfig.value.rootFolderId.trim()
+            .ifBlank { GoogleDriveFamilyService.getRegisteredRootFolderIdForFamily(targetFamilyId).orEmpty() }
+            .ifBlank { "gdrive_root_$targetFamilyId" }
+        val parentDriveId = parentFolderId?.let { pid ->
+            _folders.value.find { it.id == pid }?.driveFolderId?.takeIf { it.isNotBlank() && !it.startsWith("f_") }
+        } ?: rootDriveId
+
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        val driveRes = GoogleDriveFamilyService.createSubfolderInDrive(
+            context = appContext,
+            accountEmail = accountEmail,
+            parentDriveFolderId = parentDriveId,
+            folderName = cleanHe,
+            localFolderId = folderId,
+            familyId = targetFamilyId,
+            driveRootFolderId = rootDriveId
+        )
+        val driveMeta = driveRes.getOrElse { err ->
+            if (err is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                handleSharedFolderPickerException(err)
+            } else {
+                _fileOperationError.value = err.localizedMessage ?: "יצירת התיקייה ב-Google Drive נכשלה."
+            }
+            return Result.failure(err)
+        }
+
+        val folder = DocumentFolder(
+            id = folderId,
+            nameHe = cleanHe,
+            nameEn = cleanEn,
+            iconEmoji = iconEmoji.ifBlank { "📁" },
+            colorHex = colorHex,
+            familyId = targetFamilyId,
+            parentFolderId = parentFolderId?.takeIf { it.isNotBlank() },
+            createdByUid = callerUid,
+            createdByName = callerName,
+            createdAtMillis = System.currentTimeMillis(),
+            driveFolderId = driveMeta.driveId.ifBlank { "drive_folder_$folderId" },
+            driveParentFolderId = parentDriveId
+        )
+        val db = firestoreProvider()
+        if (db != null && authProvider()?.currentUser != null && targetFamilyId.isNotBlank()) {
+            try {
+                val payload = FamilyCloudFileTransferEngine.buildFolderFirestoreMap(
+                    folder = folder,
+                    familyId = targetFamilyId,
+                    callerUid = callerUid,
+                    callerName = callerName
+                )
+                db.collection("families").document(targetFamilyId)
+                    .collection("folders").document(folder.id)
+                    .set(payload)
+                    .await()
+            } catch (e: Exception) {
+                return Result.failure(e)
+            }
+        }
+        if (targetFamilyId == _activeFamilyId.value) {
+            _folders.value = (_folders.value.filterNot { it.id == folder.id } + folder)
+            persistedFoldersByFamily[targetFamilyId] = _folders.value
+        }
+        return Result.success(folder)
+    }
+
+    /**
+     * Renames a folder in the shared `FamilyTasks` Google Drive workspace.
+     * Available equally to both PARENT and CHILD members.
+     */
+    fun renameFolder(folderId: String, newNameHe: String, newNameEn: String = newNameHe): Boolean {
+        val cleanHe = FamilyFileManagerHelper.sanitizeFolderName(newNameHe)
+        if (cleanHe.isBlank()) {
+            _fileOperationError.value = "נא להזין שם תיקייה תקין."
+            return false
+        }
+        val cleanEn = FamilyFileManagerHelper.sanitizeFolderName(newNameEn).ifBlank { cleanHe }
+        val target = _folders.value.find { it.id == folderId } ?: return false
+        val famId = _activeFamilyId.value
+        val updated = target.copy(nameHe = cleanHe, nameEn = cleanEn)
+        _folders.value = _folders.value.map { if (it.id == folderId) updated else it }
+        persistedFoldersByFamily[famId] = _folders.value
+
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        val db = firestoreProvider()
+        repoScope.launch {
+            if (target.driveFolderId.isNotBlank()) {
+                val renameRes = GoogleDriveFamilyService.renameItemInDrive(
+                    context = appContext,
+                    accountEmail = accountEmail,
+                    driveItemId = target.driveFolderId,
+                    newName = cleanHe
+                )
+                renameRes.onFailure { err ->
+                    _folders.value = _folders.value.map { if (it.id == folderId) target else it }
+                    persistedFoldersByFamily[famId] = _folders.value
+                    if (err is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                        handleSharedFolderPickerException(err)
+                    } else {
+                        _fileOperationError.value = err.localizedMessage ?: "שינוי שם התיקייה ב-Google Drive נכשל."
+                    }
+                    return@launch
+                }
+            }
+            if (db != null && famId.isNotBlank() && authProvider()?.currentUser != null) {
+                runCatching {
+                    val payload = FamilyCloudFileTransferEngine.buildFolderFirestoreMap(
+                        folder = updated,
+                        familyId = famId,
+                        callerUid = currentUid(),
+                        callerName = _currentMember.value.name.ifBlank { "חבר משפחה" }
+                    )
+                    db.collection("families").document(famId)
+                        .collection("folders").document(folderId)
+                        .set(payload, SetOptions.merge())
+                        .await()
+                }
+            }
+        }
+        return true
+    }
+
+    suspend fun renameSharedFolderInCloud(
+        folderId: String,
+        newNameHe: String,
+        newNameEn: String = newNameHe,
+        targetFamilyId: String = _activeFamilyId.value
+    ): Result<DocumentFolder> {
+        val cleanHe = FamilyFileManagerHelper.sanitizeFolderName(newNameHe)
+        if (cleanHe.isBlank()) {
+            return Result.failure(IllegalArgumentException("נא להזין שם תיקייה תקין."))
+        }
+        val cleanEn = FamilyFileManagerHelper.sanitizeFolderName(newNameEn).ifBlank { cleanHe }
+        val existing = _folders.value.find { it.id == folderId }
+            ?: DocumentFolder(
+                id = folderId,
+                nameHe = cleanHe,
+                nameEn = cleanEn,
+                iconEmoji = "📁",
+                colorHex = 0xFF1F6E6CL,
+                familyId = targetFamilyId
+            )
+        val updated = existing.copy(nameHe = cleanHe, nameEn = cleanEn)
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        if (updated.driveFolderId.isNotBlank()) {
+            val renameRes = GoogleDriveFamilyService.renameItemInDrive(
+                context = appContext,
+                accountEmail = accountEmail,
+                driveItemId = updated.driveFolderId,
+                newName = cleanHe
+            )
+            renameRes.onFailure { err ->
+                if (err is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                    handleSharedFolderPickerException(err)
+                } else {
+                    _fileOperationError.value = err.localizedMessage ?: "שינוי שם התיקייה ב-Google Drive נכשל."
+                }
+                return Result.failure(err)
+            }
+        }
+        val db = firestoreProvider()
+        if (db != null && authProvider()?.currentUser != null && targetFamilyId.isNotBlank()) {
+            try {
+                db.collection("families").document(targetFamilyId)
+                    .collection("folders").document(folderId)
+                    .update(
+                        mapOf(
+                            "nameHe" to cleanHe,
+                            "nameEn" to cleanEn,
+                            "updatedAt" to System.currentTimeMillis()
+                        )
+                    )
+                    .await()
+            } catch (e: Exception) {
+                return Result.failure(e)
+            }
+        }
+        if (targetFamilyId == _activeFamilyId.value) {
+            _folders.value = _folders.value.map { if (it.id == folderId) updated else it }
+            persistedFoldersByFamily[targetFamilyId] = _folders.value
+        }
+        return Result.success(updated)
+    }
+
+    /**
+     * Deletes a folder in the shared `FamilyTasks` Google Drive workspace.
+     * Available equally to both PARENT and CHILD members.
+     */
+    fun deleteFolder(folderId: String): Boolean {
+        val targetFolder = _folders.value.find { it.id == folderId }
+        val famId = _activeFamilyId.value
+        val previousFolders = _folders.value
+        _folders.value = _folders.value.filterNot { it.id == folderId || it.parentFolderId == folderId }
+        persistedFoldersByFamily[famId] = _folders.value
+        if (_selectedFolderId.value == folderId) {
+            selectFolder(targetFolder?.parentFolderId)
+        }
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        val db = firestoreProvider()
+        repoScope.launch {
+            if (targetFolder != null && targetFolder.driveFolderId.isNotBlank()) {
+                val delRes = GoogleDriveFamilyService.deleteItemInDrive(
+                    context = appContext,
+                    accountEmail = accountEmail,
+                    driveItemId = targetFolder.driveFolderId
+                )
+                delRes.onFailure { err ->
+                    _folders.value = previousFolders
+                    persistedFoldersByFamily[famId] = previousFolders
+                    if (err is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                        handleSharedFolderPickerException(err)
+                    } else {
+                        _fileOperationError.value = err.localizedMessage ?: "מחיקת התיקייה ב-Google Drive נכשלה."
+                    }
+                    return@launch
+                }
+            }
+            if (db != null && famId.isNotBlank() && authProvider()?.currentUser != null) {
+                runCatching {
+                    db.collection("families").document(famId)
+                        .collection("folders").document(folderId)
+                        .delete()
+                        .await()
+                }
+            }
+        }
+        return true
+    }
+
+    suspend fun deleteSharedFolderInCloud(
+        folderId: String,
+        targetFamilyId: String = _activeFamilyId.value
+    ): Result<Unit> {
+        val targetFolder = _folders.value.find { it.id == folderId }
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        if (targetFolder != null && targetFolder.driveFolderId.isNotBlank()) {
+            val delRes = GoogleDriveFamilyService.deleteItemInDrive(
+                context = appContext,
+                accountEmail = accountEmail,
+                driveItemId = targetFolder.driveFolderId
+            )
+            delRes.onFailure { err ->
+                if (err is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                    handleSharedFolderPickerException(err)
+                } else {
+                    _fileOperationError.value = err.localizedMessage ?: "מחיקת התיקייה ב-Google Drive נכשלה."
+                }
+                return Result.failure(err)
+            }
+        }
+        val db = firestoreProvider()
+        if (db != null && authProvider()?.currentUser != null && targetFamilyId.isNotBlank()) {
+            try {
+                db.collection("families").document(targetFamilyId)
+                    .collection("folders").document(folderId)
+                    .delete()
+                    .await()
+            } catch (e: Exception) {
+                _fileOperationError.value = "מחיקת התיקייה נכשלה 🔒"
+                return Result.failure(e)
+            }
+        }
+        if (targetFamilyId == _activeFamilyId.value) {
+            _folders.value = _folders.value.filterNot { it.id == folderId || it.parentFolderId == folderId }
+            persistedFoldersByFamily[targetFamilyId] = _folders.value
+            if (_selectedFolderId.value == folderId) {
+                selectFolder(targetFolder?.parentFolderId)
+            }
+        }
+        return Result.success(Unit)
+    }
+
+    /**
+     * Starts a tracked, asynchronous, cancellable file upload into [folderId].
+     * Never marks a file as uploaded or adds it to [documents] until cloud upload
+     * and Firestore metadata persistence succeed.
+     */
+    fun startFileUpload(
+        folderId: String?,
+        rawFileName: String,
+        rawExtension: String,
+        rawBytes: ByteArray,
+        thumbnailBase64: String? = null,
+        onComplete: ((Result<FamilyDocument>) -> Unit)? = null
+    ): String {
+        val resolvedFolderId = folderId?.takeIf { it.isNotBlank() } ?: "f_school"
+        val sizeBytes = rawBytes.size.toLong().coerceAtLeast(1L)
+        val validation = FamilyFileManagerHelper.validateUploadCandidate(
+            rawFileName = rawFileName,
+            rawExtension = rawExtension,
+            sizeBytes = sizeBytes
+        )
+        val uploadId = "upload_${UUID.randomUUID().toString().replace("-", "").take(10)}"
+
+        if (validation is FamilyFileManagerHelper.FileValidationResult.Invalid) {
+            val failedTask = FileUploadTaskState(
+                uploadId = uploadId,
+                fileName = rawFileName.ifBlank { "קובץ" },
+                folderId = resolvedFolderId,
+                extension = rawExtension.ifBlank { "FILE" },
+                sizeBytes = sizeBytes,
+                sizeFormatted = FamilyFileManagerHelper.formatFileSize(sizeBytes),
+                progress = 0f,
+                status = FileUploadStatus.FAILED,
+                errorMessageHe = validation.messageHe,
+                errorMessageEn = validation.messageEn,
+                rawBytes = rawBytes
+            )
+            _activeUploads.value = listOf(failedTask) + _activeUploads.value
+            _fileOperationError.value = validation.messageHe
+            onComplete?.invoke(Result.failure(IllegalArgumentException(validation.messageHe)))
+            return uploadId
+        }
+
+        val valid = validation as FamilyFileManagerHelper.FileValidationResult.Valid
+        val existingNamesInFolder = _documents.value
+            .filter { it.folderId == resolvedFolderId }
+            .map { it.name }
+        val uniqueDisplayName = FamilyFileManagerHelper.resolveUniqueDisplayFileName(
+            desiredName = valid.sanitizedName,
+            existingNamesInFolder = existingNamesInFolder
+        )
+
+        val initialTask = FileUploadTaskState(
+            uploadId = uploadId,
+            fileName = uniqueDisplayName,
+            folderId = resolvedFolderId,
+            extension = valid.extension,
+            sizeBytes = valid.sizeBytes,
+            sizeFormatted = valid.sizeFormatted,
+            progress = 0.05f,
+            status = FileUploadStatus.UPLOADING,
+            mimeType = valid.mimeType,
+            rawBytes = rawBytes
+        )
+        _activeUploads.value = listOf(initialTask) + _activeUploads.value.filterNot { it.uploadId == uploadId }
+
+        val job = repoScope.launch {
+            val result = executeFileUploadTask(
+                uploadId = uploadId,
+                folderId = resolvedFolderId,
+                uniqueDisplayName = uniqueDisplayName,
+                extension = valid.extension,
+                mimeType = valid.mimeType,
+                sizeBytes = valid.sizeBytes,
+                sizeFormatted = valid.sizeFormatted,
+                rawBytes = rawBytes,
+                thumbnailBase64 = thumbnailBase64
+            )
+            onComplete?.invoke(result)
+        }
+        activeUploadJobs[uploadId] = job
+        return uploadId
+    }
+
+    private suspend fun executeFileUploadTask(
+        uploadId: String,
+        folderId: String,
+        uniqueDisplayName: String,
+        extension: String,
+        mimeType: String,
+        sizeBytes: Long,
+        sizeFormatted: String,
+        rawBytes: ByteArray,
+        thumbnailBase64: String? = null,
+        targetFamilyId: String = _activeFamilyId.value
+    ): Result<FamilyDocument> {
+        val callerUid = currentUid()
+        val callerMember = _currentMember.value
+        val callerName = callerMember.name.ifBlank { "חבר משפחה" }
+        val callerRole = callerMember.role.toFirestoreValue()
+        val nowMillis = System.currentTimeMillis()
+        val todayStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"))
+        val fileId = "doc_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+        val storagePath = FamilyFileManagerHelper.buildStoragePath(targetFamilyId, fileId, uniqueDisplayName)
+
+        val resolvedThumb = thumbnailBase64 ?: if (extension in setOf("JPG", "JPEG", "PNG", "WEBP")) {
+            FamilyFileManagerHelper.createCompactThumbnailBase64(rawBytes)
+        } else {
+            null
+        }
+
+        val candidateDoc = FamilyDocument(
+            id = fileId,
+            folderId = folderId,
+            name = uniqueDisplayName,
+            extension = extension,
+            sizeFormatted = sizeFormatted,
+            uploadedByMemberId = callerUid,
+            uploadedDateFormatted = todayStr,
+            isDriveSynced = true,
+            uploadedByName = callerName,
+            uploadDateFormatted = todayStr,
+            familyId = targetFamilyId,
+            uploadedByUid = callerUid,
+            sizeBytes = sizeBytes,
+            mimeType = mimeType,
+            storagePath = storagePath,
+            uploadedAtMillis = nowMillis,
+            thumbnailBase64 = resolvedThumb
+        )
+
+        return try {
+            if (simulateNextFileUploadFailure) {
+                simulateNextFileUploadFailure = false
+                if (simulatedFileUploadStepDelayMs > 0L) delay(simulatedFileUploadStepDelayMs)
+                throw IllegalStateException("העלאת הקובץ לענן נכשלה עקב שגיאת תקשורת. ניתן לנסות שוב.")
+            }
+
+            val db = if (authProvider()?.currentUser != null) firestoreProvider() else null
+            val memberUids = _members.value.map { it.id }
+            val parentUids = _members.value.filter { it.isParent }.map { it.id }
+            val callerEmail = _googleUserEmail.value ?: callerMember.googleEmail
+            val rootDriveFolderId = _familyDriveConfig.value.rootFolderId.trim()
+                .ifBlank { GoogleDriveFamilyService.getRegisteredRootFolderIdForFamily(targetFamilyId).orEmpty() }
+                .ifBlank { "gdrive_root_$targetFamilyId" }
+            val targetDriveFolderId = _folders.value.find { it.id == folderId }?.driveFolderId
+                ?.takeIf { it.isNotBlank() && !it.startsWith("f_") }
+                ?: rootDriveFolderId
+            val uploadRes = FamilyCloudFileTransferEngine.uploadBinaryAndPersistMetadata(
+                context = appContext,
+                db = db,
+                familyId = targetFamilyId,
+                callerUid = callerUid,
+                callerName = callerName,
+                callerRole = callerRole,
+                callerEmail = callerEmail,
+                doc = candidateDoc,
+                fileBytes = rawBytes,
+                rootDriveFolderId = rootDriveFolderId,
+                targetDriveFolderId = targetDriveFolderId,
+                authorizedMemberUids = memberUids,
+                parentUids = parentUids,
+                simulatedStepDelayMs = simulatedFileUploadStepDelayMs,
+                onProgress = { prog ->
+                    updateUploadTaskState(uploadId) {
+                        it.copy(progress = prog.coerceIn(0.05f, 1.0f), status = FileUploadStatus.UPLOADING)
+                    }
+                }
+            )
+
+            val confirmedDoc = uploadRes.getOrThrow()
+            // Confirmed in Google Drive + metadata persisted: now mark as uploaded and add to documents list
+            if (targetFamilyId == _activeFamilyId.value) {
+                _documents.value = listOf(confirmedDoc) + _documents.value.filterNot { it.id == confirmedDoc.id }
+                persistedDocumentsByFamily[targetFamilyId] = _documents.value
+            }
+            updateUploadTaskState(uploadId) {
+                it.copy(
+                    fileName = confirmedDoc.name,
+                    progress = 1.0f,
+                    status = FileUploadStatus.SUCCESS,
+                    errorMessageHe = null,
+                    errorMessageEn = null
+                )
+            }
+            pushAlert(
+                title = "קובץ חדש הועלה לתיקיית FamilyTasks ב-Google Drive ☁️",
+                message = "${confirmedDoc.name} הועלה ע\"י $callerName",
+                targetName = callerName,
+                targetEmoji = callerMember.avatarEmoji.ifBlank { "📁" },
+                reason = AlertReason.DRIVE_SYNC
+            )
+            activeUploadJobs.remove(uploadId)
+            Result.success(confirmedDoc)
+        } catch (ce: CancellationException) {
+            activeUploadJobs.remove(uploadId)
+            updateUploadTaskState(uploadId) {
+                it.copy(
+                    status = FileUploadStatus.CANCELLED,
+                    errorMessageHe = "העלאת הקובץ בוטלה.",
+                    errorMessageEn = "File upload was cancelled."
+                )
+            }
+            Result.failure(ce)
+        } catch (e: Exception) {
+            activeUploadJobs.remove(uploadId)
+            if (e is GoogleDriveFamilyService.DriveConsentRequiredException) {
+                _driveConsentPendingIntent.value = e.pendingIntent
+                _driveConsentIntent.value = e.legacyConsentIntent
+            }
+            if (e is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                handleSharedFolderPickerException(e)
+            }
+            val hebrewErr = when {
+                e is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException ->
+                    e.messageHe
+                e is GoogleDriveFamilyService.DriveConsentRequiredException ->
+                    "נדרש אישור גישה ל-Google Drive להעלאת הקובץ."
+                e.message?.contains("PERMISSION_DENIED", ignoreCase = true) == true ->
+                    "אין הרשאה להעלות קובץ למשפחה זו 🔒"
+                !e.localizedMessage.isNullOrBlank() && e.localizedMessage!!.any { it in '\u0590'..'\u05FF' } ->
+                    e.localizedMessage!!
+                else ->
+                    "העלאת הקובץ ל-Google Drive נכשלה. בדקו את החיבור לאינטרנט ונסו שוב."
+            }
+            updateUploadTaskState(uploadId) {
+                it.copy(
+                    status = FileUploadStatus.FAILED,
+                    errorMessageHe = hebrewErr,
+                    errorMessageEn = e.localizedMessage ?: "File upload failed."
+                )
+            }
+            _fileOperationError.value = hebrewErr
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Suspendable direct cloud upload API for coroutines and integration tests.
+     */
+    suspend fun uploadFamilyFileInCloud(
+        folderId: String,
+        rawFileName: String,
+        rawExtension: String,
+        rawBytes: ByteArray,
+        targetFamilyId: String = _activeFamilyId.value
+    ): Result<FamilyDocument> {
+        val sizeBytes = rawBytes.size.toLong()
+        val validation = FamilyFileManagerHelper.validateUploadCandidate(
+            rawFileName = rawFileName,
+            rawExtension = rawExtension,
+            sizeBytes = sizeBytes
+        )
+        if (validation is FamilyFileManagerHelper.FileValidationResult.Invalid) {
+            return Result.failure(IllegalArgumentException(validation.messageHe))
+        }
+        val valid = validation as FamilyFileManagerHelper.FileValidationResult.Valid
+        val existingNamesInFolder = _documents.value
+            .filter { it.folderId == folderId && (it.familyId.isBlank() || it.familyId == targetFamilyId) }
+            .map { it.name }
+        val uniqueDisplayName = FamilyFileManagerHelper.resolveUniqueDisplayFileName(
+            desiredName = valid.sanitizedName,
+            existingNamesInFolder = existingNamesInFolder
+        )
+        val uploadId = "upload_${UUID.randomUUID().toString().replace("-", "").take(10)}"
+        val initialTask = FileUploadTaskState(
+            uploadId = uploadId,
+            fileName = uniqueDisplayName,
+            folderId = folderId,
+            extension = valid.extension,
+            sizeBytes = valid.sizeBytes,
+            sizeFormatted = valid.sizeFormatted,
+            progress = 0.05f,
+            status = FileUploadStatus.UPLOADING,
+            mimeType = valid.mimeType,
+            rawBytes = rawBytes
+        )
+        _activeUploads.value = listOf(initialTask) + _activeUploads.value
+        return executeFileUploadTask(
+            uploadId = uploadId,
+            folderId = folderId,
+            uniqueDisplayName = uniqueDisplayName,
+            extension = valid.extension,
+            mimeType = valid.mimeType,
+            sizeBytes = valid.sizeBytes,
+            sizeFormatted = valid.sizeFormatted,
+            rawBytes = rawBytes,
+            targetFamilyId = targetFamilyId
+        )
+    }
+
+    fun cancelFileUpload(uploadId: String) {
+        val job = activeUploadJobs.remove(uploadId)
+        job?.cancel(CancellationException("בוטל על ידי המשתמש"))
+        updateUploadTaskState(uploadId) {
+            it.copy(
+                status = FileUploadStatus.CANCELLED,
+                errorMessageHe = "העלאת הקובץ בוטלה.",
+                errorMessageEn = "File upload was cancelled."
+            )
+        }
+    }
+
+    fun retryFileUpload(uploadId: String, onComplete: ((Result<FamilyDocument>) -> Unit)? = null) {
+        val task = _activeUploads.value.find { it.uploadId == uploadId } ?: return
+        val bytes = task.rawBytes ?: FamilyFileManagerHelper.generateDocumentPdfBytes(
+            title = task.fileName,
+            uploaderName = _currentMember.value.name,
+            dateFormatted = "היום",
+            bodyLines = listOf("מסמך משותף: ${task.fileName}")
+        )
+        updateUploadTaskState(uploadId) {
+            it.copy(
+                progress = 0.05f,
+                status = FileUploadStatus.UPLOADING,
+                errorMessageHe = null,
+                errorMessageEn = null
+            )
+        }
+        val job = repoScope.launch {
+            val res = executeFileUploadTask(
+                uploadId = uploadId,
+                folderId = task.folderId,
+                uniqueDisplayName = task.fileName,
+                extension = task.extension,
+                mimeType = task.mimeType,
+                sizeBytes = bytes.size.toLong().coerceAtLeast(1L),
+                sizeFormatted = FamilyFileManagerHelper.formatFileSize(bytes.size.toLong().coerceAtLeast(1L)),
+                rawBytes = bytes
+            )
+            onComplete?.invoke(res)
+        }
+        activeUploadJobs[uploadId] = job
+    }
+
+    fun dismissUploadTaskState(uploadId: String) {
+        activeUploadJobs.remove(uploadId)?.cancel()
+        _activeUploads.value = _activeUploads.value.filterNot { it.uploadId == uploadId }
+    }
+
+    private fun updateUploadTaskState(
+        uploadId: String,
+        transform: (FileUploadTaskState) -> FileUploadTaskState
+    ) {
+        _activeUploads.value = _activeUploads.value.map {
+            if (it.uploadId == uploadId) transform(it) else it
+        }
+    }
+
+    fun addDocument(doc: FamilyDocument) {
+        val famId = _activeFamilyId.value.ifBlank { doc.familyId }
+        val callerUid = currentUid()
+        val callerName = _currentMember.value.name.ifBlank { doc.uploadedByName.ifBlank { "חבר משפחה" } }
+        val existingNames = _documents.value
+            .filter { it.folderId == doc.folderId && it.id != doc.id }
+            .map { it.name }
+        val sanitized = FamilyFileManagerHelper.sanitizeFileName(doc.name, doc.extension.lowercase())
+        val deduplicatedName = FamilyFileManagerHelper.resolveUniqueDisplayFileName(sanitized, existingNames)
+        val storagePath = FamilyFileManagerHelper.buildStoragePath(famId, doc.id, deduplicatedName)
+        val rootDriveId = _familyDriveConfig.value.rootFolderId.ifBlank { "drive_root_$famId" }
+        val targetDriveFolderId = _folders.value.find { it.id == doc.folderId }?.driveFolderId
+            ?.takeIf { it.isNotBlank() } ?: rootDriveId
+        val resolvedDriveFileId = doc.driveFileId.ifBlank { "drive_file_${doc.id}" }
+        val enriched = doc.copy(
+            name = deduplicatedName,
+            familyId = famId,
+            uploadedByUid = doc.uploadedByUid.ifBlank { callerUid },
+            uploadedByMemberId = doc.uploadedByMemberId.ifBlank { callerUid },
+            uploadedByName = callerName,
+            storagePath = storagePath,
+            driveFileId = resolvedDriveFileId,
+            driveParentFolderId = targetDriveFolderId,
+            webViewLink = doc.webViewLink.ifBlank { "https://drive.google.com/file/d/$resolvedDriveFileId/view" }
+        )
+        _documents.value = listOf(enriched) + _documents.value.filterNot { it.id == enriched.id }
+        persistedDocumentsByFamily[famId] = _documents.value
+        val uploader = _members.value.find { it.id == enriched.uploadedByMemberId } ?: _currentMember.value
+        pushAlert(
+            title = "קובץ חדש סונכרן לתיקייה המשפחתית ☁️",
+            message = "${enriched.name} הועלה ע\"י ${uploader.name.ifBlank { "חבר משפחה" }}",
+            targetName = uploader.name.ifBlank { "משפחה" },
+            targetEmoji = uploader.avatarEmoji.ifBlank { "📁" },
+            reason = AlertReason.DRIVE_SYNC
+        )
+        val db = firestoreProvider()
+        if (db != null && famId.isNotBlank() && authProvider()?.currentUser != null) {
+            repoScope.launch {
+                runCatching {
+                    val payload = FamilyCloudFileTransferEngine.buildFileFirestoreMap(
+                        doc = enriched,
+                        familyId = famId,
+                        callerUid = callerUid,
+                        callerName = callerName,
+                        callerRole = _currentMember.value.role.toFirestoreValue()
+                    )
+                    db.collection("families").document(famId)
+                        .collection("files").document(enriched.id)
+                        .set(payload)
+                        .await()
+                }
+            }
+        }
+    }
+
+    /**
+     * Renames a file in the shared `FamilyTasks` Google Drive workspace.
+     * Available equally to both PARENT and CHILD members.
+     */
+    fun renameDocument(documentId: String, newName: String): Boolean {
+        val target = _documents.value.find { it.id == documentId } ?: return false
+        val clean = FamilyFileManagerHelper.sanitizeFileName(newName.trim(), target.extension.lowercase())
+        if (clean.isEmpty()) return false
+        val famId = _activeFamilyId.value
+        _documents.value = _documents.value.map { doc ->
+            if (doc.id == documentId) doc.copy(name = clean) else doc
+        }
+        persistedDocumentsByFamily[famId] = _documents.value
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        val db = firestoreProvider()
+        repoScope.launch {
+            if (target.driveFileId.isNotBlank()) {
+                val renameRes = GoogleDriveFamilyService.renameItemInDrive(
+                    context = appContext,
+                    accountEmail = accountEmail,
+                    driveItemId = target.driveFileId,
+                    newName = clean
+                )
+                renameRes.onFailure { err ->
+                    _documents.value = _documents.value.map { if (it.id == documentId) target else it }
+                    persistedDocumentsByFamily[famId] = _documents.value
+                    if (err is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                        handleSharedFolderPickerException(err)
+                    } else {
+                        _fileOperationError.value = err.localizedMessage ?: "שינוי שם הקובץ ב-Google Drive נכשל."
+                    }
+                    return@launch
+                }
+            }
+            if (db != null && famId.isNotBlank() && authProvider()?.currentUser != null) {
+                runCatching {
+                    db.collection("families").document(famId)
+                        .collection("files").document(documentId)
+                        .update(
+                            mapOf(
+                                "name" to clean,
+                                "updatedAt" to System.currentTimeMillis()
+                            )
+                        )
+                        .await()
+                }
+            }
+        }
+        return true
+    }
+
+    /**
+     * Moves a file to another folder inside the shared `FamilyTasks` Google Drive workspace.
+     * Available equally to both PARENT and CHILD members.
+     */
+    fun moveDocumentToFolder(documentId: String, targetFolderId: String): Boolean {
+        val targetDoc = _documents.value.find { it.id == documentId } ?: return false
+        if (targetDoc.folderId == targetFolderId) return true
+        val famId = _activeFamilyId.value
+        val rootDriveId = _familyDriveConfig.value.rootFolderId.trim()
+            .ifBlank { GoogleDriveFamilyService.getRegisteredRootFolderIdForFamily(famId).orEmpty() }
+            .ifBlank { "gdrive_root_$famId" }
+        val newParentDriveId = _folders.value.find { it.id == targetFolderId }?.driveFolderId
+            ?.takeIf { it.isNotBlank() && !it.startsWith("f_") } ?: rootDriveId
+        val oldParentDriveId = targetDoc.driveParentFolderId.takeIf { it.isNotBlank() }
+
+        val updatedDoc = targetDoc.copy(
+            folderId = targetFolderId,
+            driveParentFolderId = newParentDriveId
+        )
+        _documents.value = _documents.value.map { doc ->
+            if (doc.id == documentId) updatedDoc else doc
+        }
+        persistedDocumentsByFamily[famId] = _documents.value
+
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        val db = firestoreProvider()
+        repoScope.launch {
+            if (targetDoc.driveFileId.isNotBlank()) {
+                val moveRes = GoogleDriveFamilyService.moveItemInDrive(
+                    context = appContext,
+                    accountEmail = accountEmail,
+                    driveItemId = targetDoc.driveFileId,
+                    newParentDriveFolderId = newParentDriveId,
+                    oldParentDriveFolderId = oldParentDriveId
+                )
+                moveRes.onFailure { err ->
+                    _documents.value = _documents.value.map { if (it.id == documentId) targetDoc else it }
+                    persistedDocumentsByFamily[famId] = _documents.value
+                    if (err is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                        handleSharedFolderPickerException(err)
+                    } else {
+                        _fileOperationError.value = err.localizedMessage ?: "העברת הקובץ ב-Google Drive נכשלה."
+                    }
+                    return@launch
+                }
+            }
+            if (db != null && famId.isNotBlank() && authProvider()?.currentUser != null) {
+                runCatching {
+                    db.collection("families").document(famId)
+                        .collection("files").document(documentId)
+                        .update(
+                            mapOf(
+                                "folderId" to targetFolderId,
+                                "driveParentFolderId" to newParentDriveId,
+                                "updatedAt" to System.currentTimeMillis()
+                            )
+                        )
+                        .await()
+                }
+            }
+        }
+        return true
+    }
+
+    suspend fun moveFamilyFileInCloud(
+        documentId: String,
+        targetFolderId: String,
+        targetFamilyId: String = _activeFamilyId.value
+    ): Result<FamilyDocument> {
+        val existing = _documents.value.find { it.id == documentId }
+            ?: return Result.failure(IllegalArgumentException("קובץ לא נמצא"))
+        val rootDriveId = _familyDriveConfig.value.rootFolderId.trim()
+            .ifBlank { GoogleDriveFamilyService.getRegisteredRootFolderIdForFamily(targetFamilyId).orEmpty() }
+            .ifBlank { "gdrive_root_$targetFamilyId" }
+        val newParentDriveId = _folders.value.find { it.id == targetFolderId }?.driveFolderId
+            ?.takeIf { it.isNotBlank() && !it.startsWith("f_") } ?: rootDriveId
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        if (existing.driveFileId.isNotBlank()) {
+            val moveRes = GoogleDriveFamilyService.moveItemInDrive(
+                context = appContext,
+                accountEmail = accountEmail,
+                driveItemId = existing.driveFileId,
+                newParentDriveFolderId = newParentDriveId,
+                oldParentDriveFolderId = existing.driveParentFolderId.takeIf { it.isNotBlank() }
+            )
+            moveRes.onFailure { err ->
+                if (err is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                    handleSharedFolderPickerException(err)
+                } else {
+                    _fileOperationError.value = err.localizedMessage ?: "העברת הקובץ ב-Google Drive נכשלה."
+                }
+                return Result.failure(err)
+            }
+        }
+        val updated = existing.copy(
+            folderId = targetFolderId,
+            driveParentFolderId = newParentDriveId
+        )
+        val db = firestoreProvider()
+        if (db != null && authProvider()?.currentUser != null && targetFamilyId.isNotBlank()) {
+            try {
+                db.collection("families").document(targetFamilyId)
+                    .collection("files").document(documentId)
+                    .update(
+                        mapOf(
+                            "folderId" to targetFolderId,
+                            "driveParentFolderId" to newParentDriveId,
+                            "updatedAt" to System.currentTimeMillis()
+                        )
+                    )
+                    .await()
+            } catch (e: Exception) {
+                return Result.failure(e)
+            }
+        }
+        if (targetFamilyId == _activeFamilyId.value) {
+            _documents.value = _documents.value.map { if (it.id == documentId) updated else it }
+            persistedDocumentsByFamily[targetFamilyId] = _documents.value
+        }
+        return Result.success(updated)
+    }
+
+    /**
+     * Moves a folder to another parent folder inside the shared `FamilyTasks` Google Drive workspace.
+     * Available equally to both PARENT and CHILD members.
+     */
+    fun moveFolderToParent(folderId: String, newParentFolderId: String?): Boolean {
+        if (folderId == newParentFolderId) return false
+        val targetFolder = _folders.value.find { it.id == folderId } ?: return false
+        val famId = _activeFamilyId.value
+        val rootDriveId = _familyDriveConfig.value.rootFolderId.trim()
+            .ifBlank { GoogleDriveFamilyService.getRegisteredRootFolderIdForFamily(famId).orEmpty() }
+            .ifBlank { "gdrive_root_$famId" }
+        val newParentDriveId = newParentFolderId?.let { pid ->
+            _folders.value.find { it.id == pid }?.driveFolderId?.takeIf { it.isNotBlank() && !it.startsWith("f_") }
+        } ?: rootDriveId
+        val updatedFolder = targetFolder.copy(
+            parentFolderId = newParentFolderId,
+            driveParentFolderId = newParentDriveId
+        )
+        _folders.value = _folders.value.map { if (it.id == folderId) updatedFolder else it }
+        persistedFoldersByFamily[famId] = _folders.value
+
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        val db = firestoreProvider()
+        repoScope.launch {
+            if (targetFolder.driveFolderId.isNotBlank()) {
+                val moveRes = GoogleDriveFamilyService.moveItemInDrive(
+                    context = appContext,
+                    accountEmail = accountEmail,
+                    driveItemId = targetFolder.driveFolderId,
+                    newParentDriveFolderId = newParentDriveId,
+                    oldParentDriveFolderId = targetFolder.driveParentFolderId.takeIf { it.isNotBlank() }
+                )
+                moveRes.onFailure { err ->
+                    _folders.value = _folders.value.map { if (it.id == folderId) targetFolder else it }
+                    persistedFoldersByFamily[famId] = _folders.value
+                    if (err is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                        handleSharedFolderPickerException(err)
+                    } else {
+                        _fileOperationError.value = err.localizedMessage ?: "העברת התיקייה ב-Google Drive נכשלה."
+                    }
+                    return@launch
+                }
+            }
+            if (db != null && famId.isNotBlank() && authProvider()?.currentUser != null) {
+                runCatching {
+                    db.collection("families").document(famId)
+                        .collection("folders").document(folderId)
+                        .update(
+                            mapOf(
+                                "parentFolderId" to (newParentFolderId ?: ""),
+                                "driveParentFolderId" to newParentDriveId,
+                                "updatedAt" to System.currentTimeMillis()
+                            )
+                        )
+                        .await()
+                }
+            }
+        }
+        return true
+    }
+
+    /**
+     * Deletes a file in the shared `FamilyTasks` Google Drive workspace.
+     * Available equally to both PARENT and CHILD members.
+     */
+    fun deleteDocument(documentId: String): Boolean {
+        val target = _documents.value.find { it.id == documentId } ?: return false
+        val famId = _activeFamilyId.value
+        val previousDocs = _documents.value
         _documents.value = _documents.value.filterNot { it.id == documentId }
+        persistedDocumentsByFamily[famId] = _documents.value
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        val db = firestoreProvider()
+        repoScope.launch {
+            if (target.driveFileId.isNotBlank()) {
+                val delRes = GoogleDriveFamilyService.deleteItemInDrive(
+                    driveItemId = target.driveFileId,
+                    context = appContext,
+                    accountEmail = accountEmail
+                )
+                delRes.onFailure { err ->
+                    _documents.value = previousDocs
+                    persistedDocumentsByFamily[famId] = previousDocs
+                    if (err is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                        handleSharedFolderPickerException(err)
+                    } else {
+                        _fileOperationError.value = err.localizedMessage ?: "מחיקת הקובץ מ-Google Drive נכשלה."
+                    }
+                    return@launch
+                }
+            }
+            runCatching {
+                if (db != null && famId.isNotBlank() && authProvider()?.currentUser != null) {
+                    db.collection("families").document(famId)
+                        .collection("files").document(documentId)
+                        .delete()
+                        .await()
+                }
+            }
+        }
+        return true
+    }
+
+    suspend fun deleteFamilyFileInCloud(
+        fileId: String,
+        targetFamilyId: String = _activeFamilyId.value
+    ): Result<Unit> {
+        val localTarget = _documents.value.find { it.id == fileId }
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        if (localTarget != null && localTarget.driveFileId.isNotBlank()) {
+            val delRes = GoogleDriveFamilyService.deleteItemInDrive(
+                driveItemId = localTarget.driveFileId,
+                context = appContext,
+                accountEmail = accountEmail
+            )
+            delRes.onFailure { err ->
+                if (err is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                    handleSharedFolderPickerException(err)
+                } else {
+                    _fileOperationError.value = err.localizedMessage ?: "מחיקת הקובץ מ-Google Drive נכשלה."
+                }
+                return Result.failure(err)
+            }
+        }
+        val db = firestoreProvider()
+        if (db != null && authProvider()?.currentUser != null && targetFamilyId.isNotBlank()) {
+            try {
+                db.collection("families").document(targetFamilyId)
+                    .collection("files").document(fileId)
+                    .delete()
+                    .await()
+            } catch (e: Exception) {
+                _fileOperationError.value = "מחיקת הקובץ נכשלה 🔒"
+                return Result.failure(e)
+            }
+        }
+        if (targetFamilyId == _activeFamilyId.value) {
+            _documents.value = _documents.value.filterNot { it.id == fileId }
+            persistedDocumentsByFamily[targetFamilyId] = _documents.value
+        }
+        return Result.success(Unit)
+    }
+
+    suspend fun fetchDocumentBytes(doc: FamilyDocument): ByteArray? {
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        val driveFileId = doc.driveFileId.ifBlank { doc.id }
+        val driveDownloadRes = GoogleDriveFamilyService.downloadFileBytesFromDrive(driveFileId)
+        driveDownloadRes.exceptionOrNull()?.let { err ->
+            if (err is GoogleDriveFamilyService.SharedFolderPickerAuthorizationRequiredException) {
+                handleSharedFolderPickerException(err)
+                return null
+            }
+        }
+        return FamilyCloudFileTransferEngine.fetchDocumentBytes(
+            context = appContext,
+            db = firestoreProvider(),
+            familyId = doc.familyId.ifBlank { _activeFamilyId.value },
+            doc = doc,
+            callerEmail = accountEmail
+        )
     }
 
     // --- Notification Banner & History Management ---
@@ -3020,7 +6469,8 @@ class FamilyRepository(
         message: String,
         targetName: String,
         targetEmoji: String,
-        reason: AlertReason
+        reason: AlertReason,
+        showBanner: Boolean = false
     ) {
         val nowStr = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm"))
         val alert = FamilyNotificationAlert(
@@ -3032,7 +6482,9 @@ class FamilyRepository(
             timestampFormatted = nowStr
         )
         _notifications.value = listOf(alert) + _notifications.value
-        _activeBannerAlert.value = alert
+        if (showBanner) {
+            _activeBannerAlert.value = alert
+        }
     }
 
     fun dismissActiveBanner() {
@@ -3143,26 +6595,67 @@ class FamilyRepository(
         )
 
         return try {
+            FirestoreErrorHandler.logInvitationMilestone(
+                stage = FirestoreErrorHandler.InvitationStage.CREATE_INVITATION_WRITE,
+                path = "family_invites/$code",
+                databaseId = configuredDatabaseId,
+                rawInviteCode = code,
+                note = "Writing role=${canonicalRole.toFirestoreValue()} invitation in cloud"
+            )
             val inviteMap = mapOf(
                 "code" to invitation.code,
                 "inviteCode" to invitation.code,
                 "familyId" to invitation.familyId,
                 "familyName" to invitation.familyName,
+                "role" to invitation.invitedRole.toFirestoreValue(),
                 "invitedRole" to invitation.invitedRole.toFirestoreValue(),
                 "invitingParentUid" to invitation.invitingParentUid,
                 "createdById" to invitation.invitingParentUid,
+                "createdByUid" to invitation.invitingParentUid,
                 "invitingParentName" to invitation.invitingParentName,
+                "createdByName" to invitation.invitingParentName,
                 "invitedNickname" to invitation.invitedNickname,
+                "invitedName" to invitation.invitedNickname,
                 "createdAt" to invitation.createdAt,
                 "expiresAt" to invitation.expiresAt,
                 "expiresAtMillis" to invitation.expiresAt,
                 "status" to InvitationStatus.PENDING.name,
-                "isUsed" to false
+                "isUsed" to false,
+                "isRevoked" to false,
+                "revoked" to false
             )
-            db.collection("family_invites").document(code).set(inviteMap).await()
+            val docRef = db.collection("family_invites").document(code)
+            docRef.set(inviteMap).await()
+            val committed = docRef.get().await()
+            if (!committed.exists()) {
+                throw FirebaseFirestoreException(
+                    "Invitation document was not found after write",
+                    FirebaseFirestoreException.Code.NOT_FOUND
+                )
+            }
+            FirestoreErrorHandler.logInvitationMilestone(
+                stage = FirestoreErrorHandler.InvitationStage.CONFIRM_INVITATION_COMMIT,
+                path = "family_invites/$code",
+                databaseId = configuredDatabaseId,
+                rawInviteCode = code,
+                note = "Confirmed invitation document committed in family_invites"
+            )
             invitationsByCode[code] = invitation
+            _pendingInvitations.value = (_pendingInvitations.value.filterNot { it.code == code } + invitation)
+                .filter { it.status == InvitationStatus.PENDING && !it.isExpired(now) }
+                .sortedByDescending { it.createdAt }
             Result.success(invitation)
         } catch (e: Exception) {
+            val classified = FirestoreErrorHandler.classifyInvitationFailure(
+                error = e,
+                stage = FirestoreErrorHandler.InvitationStage.CREATE_INVITATION_WRITE,
+                path = "family_invites/$code",
+                rawInviteCode = code,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedInvitationFailure = classified
+            invitationsByCode.remove(code)
+            _pendingInvitations.value = _pendingInvitations.value.filterNot { it.code == code }
             Result.failure(e)
         }
     }
@@ -3270,6 +6763,7 @@ class FamilyRepository(
     suspend fun updateTaskInCloud(task: FamilyTask): Result<Unit> {
         val db = firestoreProvider() ?: return Result.failure(IllegalStateException("Firestore unavailable"))
         val uid = authProvider()?.currentUser?.uid ?: return Result.failure(SecurityException("Not authenticated"))
+        val path = if (task.familyId.isNotBlank()) "families/${task.familyId}/tasks/${task.id}" else "tasks/${task.id}"
         return try {
             if (task.familyId.isNotBlank()) {
                 val familyRef = db.collection("families").document(task.familyId)
@@ -3280,16 +6774,31 @@ class FamilyRepository(
                 val isParentInCloud = memberSnap?.exists() == true && memberRole == UserRole.PARENT
 
                 val taskRef = familyRef.collection("tasks").document(task.id)
-                if (!isParentInCloud && task.assignedToMemberId == uid) {
+                val nowMillis = System.currentTimeMillis()
+                if (!isParentInCloud) {
                     // Child completion-only update path: preserves parent's title/description/priority/points edits
+                    // and strictly sends ONLY fields permitted by isChildTaskCompletionOnly() in firestore.rules
+                    FirestoreErrorHandler.logTaskMilestone(
+                        stage = FirestoreErrorHandler.TaskStage.CHILD_COMPLETE_TASK_WRITE,
+                        path = path,
+                        databaseId = configuredDatabaseId,
+                        note = "Executing child completion-only update in updateTaskInCloud"
+                    )
                     taskRef.update(
                         mapOf(
                             "isCompleted" to task.isCompleted,
-                            "completedAtMillis" to (task.completedAtMillis ?: System.currentTimeMillis()),
-                            "completedByMemberId" to (task.completedByMemberId ?: uid)
+                            "completedAtMillis" to (if (task.isCompleted) (task.completedAtMillis ?: nowMillis) else null),
+                            "completedByMemberId" to (if (task.isCompleted) (task.completedByMemberId ?: uid) else null),
+                            "updatedAt" to nowMillis
                         )
                     ).await()
                 } else {
+                    FirestoreErrorHandler.logTaskMilestone(
+                        stage = FirestoreErrorHandler.TaskStage.UPDATE_TASK_WRITE,
+                        path = path,
+                        databaseId = configuredDatabaseId,
+                        note = "Executing parent task update in updateTaskInCloud"
+                    )
                     taskRef.update(
                         mapOf(
                             "title" to task.title,
@@ -3297,6 +6806,7 @@ class FamilyRepository(
                             "category" to task.category.name,
                             "assignedUid" to task.assignedToMemberId,
                             "assignedToMemberId" to task.assignedToMemberId,
+                            "assignedMemberId" to task.assignedToMemberId,
                             "dateEpochDay" to task.dateEpochDay,
                             "dueDate" to (task.dateEpochDay * 86_400_000L),
                             "isCompleted" to task.isCompleted,
@@ -3306,7 +6816,8 @@ class FamilyRepository(
                             "pointsValue" to task.points,
                             "approvedByParent" to task.approvedByParent,
                             "completedAtMillis" to task.completedAtMillis,
-                            "completedByMemberId" to task.completedByMemberId
+                            "completedByMemberId" to task.completedByMemberId,
+                            "updatedAt" to nowMillis
                         )
                     ).await()
                 }
@@ -3322,6 +6833,13 @@ class FamilyRepository(
             }
             Result.success(Unit)
         } catch (e: Exception) {
+            val classified = FirestoreErrorHandler.classifyTaskFailure(
+                error = e,
+                stage = FirestoreErrorHandler.TaskStage.UPDATE_TASK_WRITE,
+                path = path,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedTaskFailure = classified
             Result.failure(e)
         }
     }
@@ -3333,18 +6851,34 @@ class FamilyRepository(
         completedByMemberId: String
     ): Result<Unit> {
         val db = firestoreProvider() ?: return Result.failure(IllegalStateException("Firestore unavailable"))
+        val path = "families/$familyId/tasks/$taskId"
         return try {
+            val nowMillis = System.currentTimeMillis()
+            FirestoreErrorHandler.logTaskMilestone(
+                stage = FirestoreErrorHandler.TaskStage.CHILD_COMPLETE_TASK_WRITE,
+                path = path,
+                databaseId = configuredDatabaseId,
+                note = "Executing completeTaskInCloud (isCompleted=$isCompleted)"
+            )
             db.collection("families").document(familyId)
                 .collection("tasks").document(taskId)
                 .update(
                     mapOf(
                         "isCompleted" to isCompleted,
-                        "completedAtMillis" to System.currentTimeMillis(),
-                        "completedByMemberId" to completedByMemberId
+                        "completedAtMillis" to (if (isCompleted) nowMillis else null),
+                        "completedByMemberId" to (if (isCompleted) completedByMemberId else null),
+                        "updatedAt" to nowMillis
                     )
                 ).await()
             Result.success(Unit)
         } catch (e: Exception) {
+            val classified = FirestoreErrorHandler.classifyTaskFailure(
+                error = e,
+                stage = FirestoreErrorHandler.TaskStage.CHILD_COMPLETE_TASK_WRITE,
+                path = path,
+                databaseId = configuredDatabaseId
+            )
+            lastClassifiedTaskFailure = classified
             Result.failure(e)
         }
     }
@@ -3551,6 +7085,61 @@ class FamilyRepository(
                     earnedPoints = (snap.getLong("earnedPoints") ?: 0L).toInt()
                 )
             )
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Registers or refreshes an FCM device token in the named Firestore database under
+     * `/users/{uid}/fcm_tokens/{tokenId}` for the currently authenticated user.
+     */
+    suspend fun registerDeviceFcmTokenInCloud(
+        token: String,
+        familyId: String = _activeFamilyId.value,
+        role: UserRole = _currentMember.value.role
+    ): Result<String> {
+        val db = firestoreProvider() ?: return Result.failure(IllegalStateException("Firestore unavailable"))
+        val uid = authProvider()?.currentUser?.uid ?: return Result.failure(SecurityException("Not authenticated"))
+        return FcmTokenManager.registerTokenInFirestore(
+            db = db,
+            uid = uid,
+            token = token,
+            familyId = familyId,
+            role = role
+        )
+    }
+
+    /**
+     * Removes a specific device's FCM token from `/users/{uid}/fcm_tokens/{tokenId}` on logout
+     * or invalid-token cleanup.
+     */
+    suspend fun unregisterDeviceFcmTokenInCloud(token: String): Result<Unit> {
+        val db = firestoreProvider() ?: return Result.failure(IllegalStateException("Firestore unavailable"))
+        val uid = authProvider()?.currentUser?.uid ?: return Result.failure(SecurityException("Not authenticated"))
+        return FcmTokenManager.unregisterTokenFromFirestore(
+            db = db,
+            uid = uid,
+            token = token
+        )
+    }
+
+    suspend fun deleteDeviceFcmTokenInCloud(token: String): Result<Unit> =
+        unregisterDeviceFcmTokenInCloud(token)
+
+    /**
+     * Reads all registered device FCM tokens under `/users/{targetUid}/fcm_tokens`.
+     * Enforced by Firestore security rules so only the authenticated owner can read their own tokens.
+     */
+    suspend fun getDeviceFcmTokensFromCloud(targetUid: String): Result<List<String>> {
+        val db = firestoreProvider() ?: return Result.failure(IllegalStateException("Firestore unavailable"))
+        return try {
+            val snap = db.collection("users").document(targetUid)
+                .collection("fcm_tokens")
+                .get()
+                .await()
+            val tokens = snap.documents.mapNotNull { it.getString("token")?.takeIf { t -> t.isNotBlank() } }
+            Result.success(tokens)
         } catch (e: Exception) {
             Result.failure(e)
         }

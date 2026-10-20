@@ -1,14 +1,17 @@
 package com.example.ui.dialogs
 
-import android.content.Intent
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.provider.MediaStore
+import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -18,376 +21,506 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.ContextCompat
+import com.example.files.FamilyFileManagerHelper
 import com.example.model.DocumentFolder
-import com.example.ui.theme.*
+import java.io.ByteArrayOutputStream
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
+/**
+ * Camera & Document Capture Dialog (V1.0.0):
+ * - Supports both Photo Capture (`isDocumentMode = false` -> JPG) and Document Scanner (`isDocumentMode = true` -> PDF/JPG).
+ * - Handles runtime `CAMERA` permission safely without requesting broad storage permissions.
+ * - Uses temporary `FileProvider` URIs (`rememberSaveable`) to survive device rotation safely.
+ * - Also supports immediate quick capture in emulator/streaming environments without physical camera hardware.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CameraScannerDialog(
     folders: List<DocumentFolder>,
     selectedFolderId: String?,
     isHebrew: Boolean,
+    initialDocumentMode: Boolean = true,
     onDismiss: () -> Unit,
-    onUploadFile: (folderId: String, name: String, ext: String, size: String) -> Unit,
+    onUploadFile: (folderId: String, fileName: String, extension: String, sizeFormatted: String) -> Unit = { _, _, _, _ -> },
+    onUploadBinaryFile: ((folderId: String, fileName: String, extension: String, bytes: ByteArray) -> Unit)? = null,
     onShowToast: (String) -> Unit
 ) {
     val context = LocalContext.current
-    var docCategory by remember { mutableStateOf(if (isHebrew) "שיעורי בית" else "Homework") }
-    var fileName by remember {
-        mutableStateOf(if (isHebrew) "צילום_מסמך_${System.currentTimeMillis() % 1000}" else "Doc_Photo_${System.currentTimeMillis() % 1000}")
-    }
-    var targetFolderId by remember {
+    var isDocumentMode by rememberSaveable { mutableStateOf(initialDocumentMode) }
+    var docName by rememberSaveable { mutableStateOf("") }
+    var targetFolderId by rememberSaveable {
         mutableStateOf(selectedFolderId ?: folders.firstOrNull()?.id ?: "f_school")
     }
+    var selectedFormat by rememberSaveable {
+        mutableStateOf(if (initialDocumentMode) "PDF" else "JPG")
+    }
+    var capturedStage by rememberSaveable { mutableStateOf(false) }
+    var pendingCameraUriString by rememberSaveable { mutableStateOf<String?>(null) }
+    var capturedBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var capturedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var permissionDeniedMessage by rememberSaveable { mutableStateOf<String?>(null) }
 
-    val categories = if (isHebrew) {
-        listOf("שיעורי בית", "אישור רפואי", "טופס בית ספר", "חשבונית / קבלה", "ציור / תמונה", "מבחן / תעודה")
-    } else {
-        listOf("Homework", "Medical Note", "School Form", "Receipt", "Photo/Drawing", "Exam/Report")
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        if (success && !pendingCameraUriString.isNullOrBlank()) {
+            val uri = Uri.parse(pendingCameraUriString)
+            val bytes = runCatching {
+                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            }.getOrNull()
+            if (bytes != null && bytes.isNotEmpty()) {
+                capturedBytes = bytes
+                capturedBitmap = runCatching {
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                }.getOrNull()
+                capturedStage = true
+            }
+        }
     }
 
-    // Hardware camera launcher with complete crash protection
-    val hardwareCameraLauncher = rememberLauncherForActivityResult(
+    val takePicturePreviewLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicturePreview()
-    ) { bitmap: Bitmap? ->
-        val finalName = "${fileName.trim().ifBlank { "צילום_מסמך" }}.jpg"
-        onUploadFile(targetFolderId, finalName, "JPG", "1.6 MB")
-        onShowToast(if (isHebrew) "צילום המסמך נשמר וסונכרן ל-Google Drive! 📸" else "Photo captured & synced to Drive! 📸")
-        onDismiss()
+    ) { bitmap ->
+        if (bitmap != null) {
+            val out = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
+            capturedBytes = out.toByteArray()
+            capturedBitmap = bitmap
+            capturedStage = true
+        }
     }
 
-    // Hardware camera permission launcher
+    fun launchSystemCamera() {
+        permissionDeniedMessage = null
+        val tempPair = runCatching {
+            FamilyFileManagerHelper.createTempCameraImageUri(context)
+        }.getOrNull()
+        if (tempPair != null) {
+            pendingCameraUriString = tempPair.second.toString()
+            runCatching {
+                takePictureLauncher.launch(tempPair.second)
+            }.onFailure {
+                runCatching { takePicturePreviewLauncher.launch(null) }
+            }
+        } else {
+            runCatching { takePicturePreviewLauncher.launch(null) }
+        }
+    }
+
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        try {
-            hardwareCameraLauncher.launch(null)
-        } catch (t: Throwable) {
-            val finalName = "${fileName.trim().ifBlank { "צילום_מסמך" }}.jpg"
-            onUploadFile(targetFolderId, finalName, "JPG", "1.4 MB")
-            onShowToast(if (isHebrew) "המסמך נסרק בהצלחה וסונכרן ל-Google Drive! 📸" else "Document scanned & synced to Drive! 📸")
-            onDismiss()
+    ) { granted ->
+        if (granted) {
+            launchSystemCamera()
+        } else {
+            permissionDeniedMessage = if (isHebrew) {
+                "הרשאת מצלמה נדחתה. ניתן להשתמש בצילום מהיר או לאשר הרשאת מצלמה בהגדרות."
+            } else {
+                "Camera permission denied. You can still use quick capture or grant permission in Settings."
+            }
         }
     }
 
-    // Photo picker launcher (zero permission, works on all modern Android devices)
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) {
-            val finalName = "${fileName.trim().ifBlank { "תמונה_מהמכשיר" }}.jpg"
-            onUploadFile(targetFolderId, finalName, "JPG", "2.1 MB")
-            onShowToast(if (isHebrew) "התמונה נבחרה וסונכרנה ל-Google Drive! 🖼️" else "Photo chosen & synced to Drive! 🖼️")
-            onDismiss()
-        }
-    }
-
-    val safeDismiss = {
-        onDismiss()
-    }
+    val infiniteTransition = rememberInfiniteTransition(label = "scanner_line")
+    val scanLineProgress by infiniteTransition.animateFloat(
+        initialValue = 0.1f,
+        targetValue = 0.9f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1800, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "scan_line"
+    )
 
     Dialog(
-        onDismissRequest = safeDismiss,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false
-        )
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
-            shape = RoundedCornerShape(26.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 8.dp,
             modifier = Modifier
-                .fillMaxWidth(0.95f)
-                .fillMaxHeight(0.9f)
-                .padding(vertical = 12.dp)
-                .testTag("camera_scanner_dialog")
+                .fillMaxWidth(0.94f)
+                .wrapContentHeight()
+                .testTag("camera_scanner_dialog"),
+            shape = RoundedCornerShape(28.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 8.dp
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(20.dp),
-                verticalArrangement = Arrangement.SpaceBetween
+                    .fillMaxWidth()
+                    .padding(20.dp)
             ) {
                 // Header
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Surface(
-                            shape = CircleShape,
-                            color = GoogleBlueLight,
-                            modifier = Modifier.size(40.dp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primaryContainer),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Default.PhotoCamera,
-                                    contentDescription = null,
-                                    tint = GoogleBlue,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
+                            Icon(
+                                imageVector = if (isDocumentMode) Icons.Default.DocumentScanner else Icons.Default.PhotoCamera,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
                         }
-
+                        Spacer(modifier = Modifier.width(12.dp))
                         Column {
                             Text(
-                                text = if (isHebrew) "סורק ומצלמת מסמכים" else "Document Camera & Scanner",
-                                style = MaterialTheme.typography.titleMedium.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = GoogleBlue
-                                )
+                                text = if (isDocumentMode) {
+                                    if (isHebrew) "צילום וסריקת מסמך" else "Scan Document"
+                                } else {
+                                    if (isHebrew) "צילום תמונה למשפחה" else "Take Family Photo"
+                                },
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold)
                             )
                             Text(
-                                text = if (isHebrew) "צילום ישיר וסנכרון מיידי ל-Drive" else "Instant capture & Drive sync",
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                text = if (isHebrew) "העלאה ישירה לתיקייה המשפחתית המשותפת" else "Direct upload to shared family folder",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
-
-                    IconButton(
-                        onClick = safeDismiss,
-                        modifier = Modifier
-                            .size(32.dp)
-                            .testTag("close_camera_scanner_btn")
-                    ) {
-                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close")
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Close")
                     }
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Camera Viewfinder Simulator Box with Scanning Grid & Corner Guides
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(Color(0xFF1E293B)),
-                    contentAlignment = Alignment.Center
+                // Mode Switcher: Photo vs Document
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // Document Framing Guidelines
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(0.85f)
-                            .fillMaxHeight(0.85f)
-                            .border(2.dp, GoogleBlue.copy(alpha = 0.7f), RoundedCornerShape(14.dp))
-                            .padding(16.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.DocumentScanner,
-                                contentDescription = null,
-                                tint = GoogleBlueLight,
-                                modifier = Modifier.size(48.dp)
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text(
-                                text = if (isHebrew) "מקם את המסמך במסגרת" else "Position document inside frame",
-                                color = Color.White,
-                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
-                            )
-                            Text(
-                                text = "[$docCategory]",
-                                color = GoogleYellow,
-                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = Color.White.copy(alpha = 0.15f)
-                            ) {
-                                Text(
-                                    text = if (isHebrew) "סריקה ויישור אוטומטי פעילים ✓" else "Auto-crop & contrast active ✓",
-                                    color = GoogleGreenLight,
-                                    fontSize = 11.sp,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                )
-                            }
-                        }
-                    }
-
-                    // Watermark timestamp
-                    Text(
-                        text = "Google Drive Sync • Ready",
-                        color = Color.White.copy(alpha = 0.5f),
-                        fontSize = 10.sp,
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(12.dp)
+                    FilterChip(
+                        selected = !isDocumentMode,
+                        onClick = {
+                            isDocumentMode = false
+                            selectedFormat = "JPG"
+                        },
+                        label = { Text(if (isHebrew) "צילום תמונה (JPG)" else "Photo (JPG)") },
+                        leadingIcon = {
+                            Icon(Icons.Default.PhotoCamera, contentDescription = null, modifier = Modifier.size(16.dp))
+                        },
+                        modifier = Modifier.testTag("camera_mode_photo_chip")
                     )
+                    FilterChip(
+                        selected = isDocumentMode,
+                        onClick = {
+                            isDocumentMode = true
+                            selectedFormat = "PDF"
+                        },
+                        label = { Text(if (isHebrew) "צילום מסמך (PDF)" else "Document (PDF)") },
+                        leadingIcon = {
+                            Icon(Icons.Default.DocumentScanner, contentDescription = null, modifier = Modifier.size(16.dp))
+                        },
+                        modifier = Modifier.testTag("camera_mode_document_chip")
+                    )
+                }
+
+                permissionDeniedMessage?.let { msg ->
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = msg,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Document Categories
-                Text(
-                    text = if (isHebrew) "סוג המסמך:" else "Document Type:",
-                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth()
+                // Viewfinder / Captured Preview
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(210.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color(0xFF0F172A))
+                        .border(
+                            width = 2.dp,
+                            color = if (capturedStage) Color(0xFF10B981) else MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
+                            shape = RoundedCornerShape(20.dp)
+                        ),
+                    contentAlignment = Alignment.Center
                 ) {
-                    items(categories) { cat ->
-                        val isSelected = docCategory == cat
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.surfaceVariant,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable {
-                                    docCategory = cat
-                                    fileName = "${cat}_${System.currentTimeMillis() % 1000}"
-                                }
-                        ) {
-                            Text(
-                                text = cat,
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                ),
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    if (capturedBitmap != null) {
+                        Image(
+                            bitmap = capturedBitmap!!.asImageBitmap(),
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        Canvas(modifier = Modifier.fillMaxSize()) {
+                            val frameW = size.width * 0.72f
+                            val frameH = size.height * 0.76f
+                            val left = (size.width - frameW) / 2f
+                            val top = (size.height - frameH) / 2f
+
+                            drawRoundRect(
+                                color = Color.White.copy(alpha = 0.12f),
+                                topLeft = Offset(left, top),
+                                size = Size(frameW, frameH),
+                                cornerRadius = CornerRadius(16f, 16f)
                             )
+
+                            drawRoundRect(
+                                color = if (capturedStage) Color(0xFF10B981) else Color(0xFF38BDF8),
+                                topLeft = Offset(left, top),
+                                size = Size(frameW, frameH),
+                                cornerRadius = CornerRadius(16f, 16f),
+                                style = Stroke(width = 4f)
+                            )
+
+                            if (!capturedStage && isDocumentMode) {
+                                val scanY = top + frameH * scanLineProgress
+                                drawLine(
+                                    color = Color(0xFF38BDF8),
+                                    start = Offset(left + 8f, scanY),
+                                    end = Offset(left + frameW - 8f, scanY),
+                                    strokeWidth = 5f
+                                )
+                            }
                         }
+                    }
+
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                            .padding(horizontal = 16.dp, vertical = 10.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (capturedStage) Icons.Default.CheckCircle else Icons.Default.CameraAlt,
+                            contentDescription = null,
+                            tint = if (capturedStage) Color(0xFF10B981) else Color.White,
+                            modifier = Modifier.size(36.dp)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = if (capturedStage) {
+                                if (isHebrew) "הצילום נקלט בהצלחה ומוכן להעלאה! ✨" else "Captured & Ready to Upload! ✨"
+                            } else {
+                                if (isHebrew) "צלמו באמצעות מצלמת המכשיר או צילום מהיר" else "Capture with device camera or quick capture"
+                            },
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White
+                        )
                     }
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // File Name Field
-                OutlinedTextField(
-                    value = fileName,
-                    onValueChange = { fileName = it },
-                    label = { Text(if (isHebrew) "שם המסמך" else "Document Name") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("scanned_file_name_input")
-                )
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Capture Actions Row
-                Column(
+                // Launch Native System Camera Button + Quick Capture Button
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // Main Shutter Button (In-App Document Camera Scanner - 100% reliable)
-                    Button(
+                    OutlinedButton(
                         onClick = {
-                            val finalName = "${fileName.trim().ifBlank { "צילום_מסמך" }}.jpg"
-                            onUploadFile(targetFolderId, finalName, "JPG", "1.5 MB")
-                            onShowToast(if (isHebrew) "המסמך נסרק בהצלחה וסונכרן ל-Google Drive! 📸" else "Document scanned & synced to Drive! 📸")
-                            onDismiss()
+                            val hasPerm = ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.CAMERA
+                            ) == PackageManager.PERMISSION_GRANTED
+                            if (hasPerm) {
+                                launchSystemCamera()
+                            } else {
+                                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                            }
                         },
-                        shape = RoundedCornerShape(18.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = GoogleBlue),
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp)
-                            .testTag("shutter_capture_btn")
+                            .weight(1f)
+                            .testTag("launch_system_camera_button"),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Default.PhotoCamera, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (isHebrew) "מצלמת המכשיר" else "System Camera", fontWeight = FontWeight.Bold)
+                    }
+
+                    FilledTonalButton(
+                        onClick = {
+                            capturedStage = !capturedStage
+                            if (capturedStage && capturedBytes == null) {
+                                val title = docName.ifBlank {
+                                    if (isDocumentMode) "מסמך_סרוק" else "תמונה_משפחתית"
+                                }
+                                capturedBytes = if (selectedFormat == "PDF") {
+                                    FamilyFileManagerHelper.generateDocumentPdfBytes(
+                                        title = title,
+                                        uploaderName = "משפחה",
+                                        dateFormatted = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm")),
+                                        bodyLines = listOf("מסמך שנסרק והועלה ישירות לתיקייה המשפחתית.")
+                                    )
+                                } else {
+                                    FamilyFileManagerHelper.generateSampleImageBytes(title, "משפחה")
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("capture_scan_button"),
+                        shape = RoundedCornerShape(12.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Camera,
+                            if (capturedStage) Icons.Default.Refresh else Icons.Default.Camera,
                             contentDescription = null,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (capturedStage) {
+                                if (isHebrew) "צילום מחדש" else "Retake"
+                            } else {
+                                if (isHebrew) "צילום מהיר" else "Quick Capture"
+                            },
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Document / Photo Name Input
+                OutlinedTextField(
+                    value = docName,
+                    onValueChange = { docName = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("scanned_doc_name_input"),
+                    label = {
+                        Text(
+                            if (isDocumentMode) {
+                                if (isHebrew) "שם המסמך (למשל: אישור רפואי / דף עבודה)" else "Document Name"
+                            } else {
+                                if (isHebrew) "שם התמונה (למשל: טיול שבת / יצירה)" else "Photo Name"
+                            }
+                        )
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    leadingIcon = { Icon(Icons.Default.Description, contentDescription = null) }
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Target Folder Picker
+                Text(
+                    text = if (isHebrew) "שמירה בתיקייה:" else "Save to folder:",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(folders, key = { it.id }) { folder ->
+                        FilterChip(
+                            selected = targetFolderId == folder.id,
+                            onClick = { targetFolderId = folder.id },
+                            label = { Text("${folder.iconEmoji} ${folder.getDisplayName(isHebrew)}") }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Save & Upload Button
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text(if (isHebrew) "ביטול" else "Cancel")
+                    }
+
+                    Button(
+                        onClick = {
+                            val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("ddMM_HHmm"))
+                            val baseTitle = docName.trim().ifEmpty {
+                                if (isDocumentMode) {
+                                    if (isHebrew) "מסמך_סרוק_$timestamp" else "Scanned_Doc_$timestamp"
+                                } else {
+                                    if (isHebrew) "תמונה_$timestamp" else "Photo_$timestamp"
+                                }
+                            }
+                            val ext = if (isDocumentMode) selectedFormat else "JPG"
+                            val finalFileName = FamilyFileManagerHelper.sanitizeFileName(baseTitle, ext.lowercase())
+                            val bytesToUpload = capturedBytes ?: if (ext == "PDF") {
+                                FamilyFileManagerHelper.generateDocumentPdfBytes(
+                                    title = finalFileName,
+                                    uploaderName = "משפחה",
+                                    dateFormatted = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm")),
+                                    bodyLines = listOf("מסמך שנסרק והועלה לתיקייה המשפחתית.")
+                                )
+                            } else {
+                                FamilyFileManagerHelper.generateSampleImageBytes(finalFileName, "משפחה")
+                            }
+
+                            if (onUploadBinaryFile != null) {
+                                onUploadBinaryFile(targetFolderId, finalFileName, ext, bytesToUpload)
+                            } else {
+                                onUploadFile(
+                                    targetFolderId,
+                                    finalFileName,
+                                    ext,
+                                    FamilyFileManagerHelper.formatFileSize(bytesToUpload.size.toLong())
+                                )
+                            }
+                            onDismiss()
+                        },
+                        modifier = Modifier
+                            .weight(1.3f)
+                            .height(48.dp)
+                            .testTag("confirm_camera_upload_button"),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.CloudUpload,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (isHebrew) "צלם וסרוק עכשיו ל-Drive 📸" else "Capture & Scan to Drive 📸",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp
+                            text = if (isHebrew) "העלה לתיקייה" else "Upload Now",
+                            fontWeight = FontWeight.Bold
                         )
-                    }
-
-                    // Secondary Options: Device Camera / Gallery Photo Picker
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = {
-                                try {
-                                    val checkIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-                                    val hasActivity = context.packageManager.queryIntentActivities(checkIntent, 0).isNotEmpty()
-                                    if (hasActivity) {
-                                        cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
-                                    } else {
-                                        // Safe fallback: Take in-app document picture
-                                        val finalName = "${fileName.trim().ifBlank { "צילום_מסמך" }}.jpg"
-                                        onUploadFile(targetFolderId, finalName, "JPG", "1.4 MB")
-                                        onShowToast(if (isHebrew) "המסמך נסרק ונשמר ב-Google Drive! 📸" else "Document saved to Drive! 📸")
-                                        onDismiss()
-                                    }
-                                } catch (t: Throwable) {
-                                    val finalName = "${fileName.trim().ifBlank { "צילום_מסמך" }}.jpg"
-                                    onUploadFile(targetFolderId, finalName, "JPG", "1.4 MB")
-                                    onShowToast(if (isHebrew) "המסמך נשמר בהצלחה ב-Google Drive! 📸" else "Document saved to Drive! 📸")
-                                    onDismiss()
-                                }
-                            },
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("open_device_camera_btn")
-                        ) {
-                            Icon(Icons.Default.PhotoCameraFront, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = if (isHebrew) "מצלמת מכשיר" else "Device Cam",
-                                fontSize = 12.sp,
-                                maxLines = 1
-                            )
-                        }
-
-                        OutlinedButton(
-                            onClick = {
-                                try {
-                                    photoPickerLauncher.launch(
-                                        androidx.activity.result.PickVisualMediaRequest(
-                                            ActivityResultContracts.PickVisualMedia.ImageOnly
-                                        )
-                                    )
-                                } catch (t: Throwable) {
-                                    onShowToast(if (isHebrew) "בחר קובץ דרך בחירת קבצים" else "Use file picker")
-                                }
-                            },
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("pick_from_gallery_btn")
-                        ) {
-                            Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = if (isHebrew) "בחר מהגלריה" else "From Gallery",
-                                fontSize = 12.sp,
-                                maxLines = 1
-                            )
-                        }
                     }
                 }
             }

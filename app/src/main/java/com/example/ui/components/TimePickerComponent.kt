@@ -1,6 +1,5 @@
 package com.example.ui.components
 
-import android.app.TimePickerDialog
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -9,8 +8,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessTime
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -18,17 +16,104 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.ui.theme.*
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.ZoneId
+import java.util.Locale
 
 /**
- * Convenient, intuitive time selection field with click-to-open dialog
- * and quick-select presets for children and parents.
+ * Pure utility for strict 24-hour (`HH:mm`) time parsing, formatting, and local timezone preservation.
+ * Never formats with AM/PM.
+ */
+object TimeFormatUtils {
+
+    /**
+     * Parses a time string into `(hour24, minute)` coerced to valid 24-hour bounds (`0..23`, `0..59`).
+     */
+    fun parse24Hour(rawTime: String?, defaultHour: Int = 16, defaultMinute: Int = 0): Pair<Int, Int> {
+        if (rawTime.isNullOrBlank()) {
+            return Pair(defaultHour.coerceIn(0, 23), defaultMinute.coerceIn(0, 59))
+        }
+        val cleaned = rawTime.trim()
+            .replace("AM", "", ignoreCase = true)
+            .replace("PM", "", ignoreCase = true)
+            .trim()
+        val parts = cleaned.split(":")
+        val h = parts.getOrNull(0)?.trim()?.toIntOrNull() ?: defaultHour
+        val m = parts.getOrNull(1)?.trim()?.toIntOrNull() ?: defaultMinute
+        return Pair(h.coerceIn(0, 23), m.coerceIn(0, 59))
+    }
+
+    /**
+     * Formats `(hour24, minute)` strictly in 24-hour `HH:mm` format using `Locale.ROOT` (never AM/PM).
+     */
+    fun format24Hour(hour24: Int, minute: Int): String {
+        val h = hour24.coerceIn(0, 23)
+        val m = minute.coerceIn(0, 59)
+        return String.format(Locale.ROOT, "%02d:%02d", h, m)
+    }
+
+    /**
+     * Normalizes any input time string into strict 24-hour `HH:mm`.
+     */
+    fun normalize24HourString(rawTime: String?, fallback: String = "16:00"): String {
+        val (defH, defM) = parse24Hour(fallback, 16, 0)
+        val (h, m) = parse24Hour(rawTime, defH, defM)
+        return format24Hour(h, m)
+    }
+
+    /**
+     * Converts a `dueTimeFormatted` string (`HH:mm`) into total minutes from midnight (`0..1439`)
+     * for deterministic chronological sorting in the Calendar agenda.
+     */
+    fun toMinutesSinceMidnight(rawTime: String?): Int {
+        val (h, m) = parse24Hour(rawTime, 16, 0)
+        return h * 60 + m
+    }
+
+    /**
+     * Combines an existing [dateEpochDay] with a new 24-hour `HH:mm` time in [zoneId],
+     * guaranteeing that changing the time never alters the selected calendar date.
+     */
+    fun combineDateAnd24HourTimeToEpochMillis(
+        dateEpochDay: Long,
+        time24h: String,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): Pair<Long, Long> {
+        val date = LocalDate.ofEpochDay(dateEpochDay)
+        val (h, m) = parse24Hour(time24h)
+        val dateTime = LocalDateTime.of(date, LocalTime.of(h, m))
+        val millis = dateTime.atZone(zoneId).toInstant().toEpochMilli()
+        return Pair(date.toEpochDay(), millis)
+    }
+
+    /**
+     * Extracts `(dateEpochDay, time24h)` from an epoch timestamp in the given local [zoneId].
+     */
+    fun extractDateAnd24HourTime(
+        epochMillis: Long,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): Pair<Long, String> {
+        val zdt = Instant.ofEpochMilli(epochMillis).atZone(zoneId)
+        return Pair(
+            zdt.toLocalDate().toEpochDay(),
+            format24Hour(zdt.hour, zdt.minute)
+        )
+    }
+}
+
+/**
+ * Reusable soft-tactile Material 3 24-hour time field used across Tasks, Calendar, and Timetable.
+ * Opens [FamilyTimeSelectionDialog] with both clock dial and direct numeric entry in strict 24h `HH:mm` format.
  */
 @Composable
 fun TimePickerField(
@@ -39,21 +124,23 @@ fun TimePickerField(
     modifier: Modifier = Modifier
 ) {
     var showDialog by remember { mutableStateOf(false) }
+    val displayTime = remember(time) { TimeFormatUtils.normalize24HourString(time, "16:00") }
 
     Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = Color.White,
-        border = BorderStroke(1.5.dp, Color(0xFFE2E8F0)),
-        shadowElevation = 1.dp,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        tonalElevation = 1.dp,
         modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(14.dp))
             .clickable { showDialog = true }
+            .defaultMinSize(minHeight = 48.dp)
             .testTag("time_picker_field_$label")
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+                .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -61,32 +148,33 @@ fun TimePickerField(
                 Text(
                     text = label,
                     style = MaterialTheme.typography.labelSmall.copy(
-                        color = TextSecondary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 11.sp
                     )
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = time.ifBlank { "18:00" },
+                    text = displayTime,
                     style = MaterialTheme.typography.bodyLarge.copy(
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFF1E293B),
-                        fontSize = 17.sp
-                    )
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 16.sp
+                    ),
+                    modifier = Modifier.testTag("time_picker_value_$label")
                 )
             }
 
             Surface(
                 shape = RoundedCornerShape(10.dp),
-                color = GoogleBlueLight,
-                modifier = Modifier.size(36.dp)
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.size(34.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = Icons.Default.AccessTime,
-                        contentDescription = "Select Time",
-                        tint = VibrantActionBlue,
-                        modifier = Modifier.size(20.dp)
+                        contentDescription = if (isHebrew) "בחירת שעה" else "Select Time",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }
@@ -95,12 +183,12 @@ fun TimePickerField(
 
     if (showDialog) {
         FamilyTimeSelectionDialog(
-            initialTime = time.ifBlank { "18:00" },
+            initialTime = displayTime,
             title = label,
             isHebrew = isHebrew,
             onDismiss = { showDialog = false },
             onConfirm = { chosenTime ->
-                onTimeSelected(chosenTime)
+                onTimeSelected(TimeFormatUtils.normalize24HourString(chosenTime, displayTime))
                 showDialog = false
             }
         )
@@ -108,11 +196,13 @@ fun TimePickerField(
 }
 
 /**
- * Beautiful, convenient dialog for picking time with:
- * 1. Quick presets (Morning, Noon, Afternoon, Evening, Night)
- * 2. Visual +/- hour and minute step controls
- * 3. One-click native Android clock picker launcher
+ * Reusable Material 3 24-hour time picker dialog supporting:
+ * 1. Strict 24-hour `HH:mm` format (`is24Hour = true`, never displays AM/PM).
+ * 2. Both clock-based selection ([TimePicker]) and direct numeric keyboard entry ([TimeInput]).
+ * 3. Quick 24-hour presets for one-tap selection.
+ * 4. Clear Hebrew Confirm ("אישור") and Cancel ("ביטול") buttons.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FamilyTimeSelectionDialog(
     initialTime: String,
@@ -121,230 +211,151 @@ fun FamilyTimeSelectionDialog(
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit
 ) {
-    val context = LocalContext.current
     val parsedParts = remember(initialTime) {
-        val parts = initialTime.split(":")
-        val h = parts.getOrNull(0)?.toIntOrNull() ?: 18
-        val m = parts.getOrNull(1)?.toIntOrNull() ?: 0
-        Pair(h.coerceIn(0, 23), m.coerceIn(0, 59))
+        TimeFormatUtils.parse24Hour(initialTime, defaultHour = 16, defaultMinute = 0)
     }
 
-    var selectedHour by remember { mutableIntStateOf(parsedParts.first) }
-    var selectedMinute by remember { mutableIntStateOf(parsedParts.second) }
+    // Key the TimePickerState when a preset is tapped so it updates cleanly
+    var presetSeed by remember { mutableIntStateOf(0) }
+    var currentHour by remember { mutableIntStateOf(parsedParts.first) }
+    var currentMinute by remember { mutableIntStateOf(parsedParts.second) }
+    var isNumericInputMode by remember { mutableStateOf(false) }
 
-    val formattedTime = remember(selectedHour, selectedMinute) {
-        String.format("%02d:%02d", selectedHour, selectedMinute)
+    val timePickerState = remember(presetSeed) {
+        TimePickerState(
+            initialHour = currentHour.coerceIn(0, 23),
+            initialMinute = currentMinute.coerceIn(0, 59),
+            is24Hour = true
+        )
     }
+
+    val formattedTime = TimeFormatUtils.format24Hour(timePickerState.hour, timePickerState.minute)
 
     val quickPresets = remember(isHebrew) {
         if (isHebrew) {
             listOf(
-                "08:00" to "בוקר ☀️",
-                "12:00" to "צהריים 🥪",
-                "16:00" to "אחה״צ 🎨",
-                "18:00" to "ערב 🏠",
-                "20:00" to "לילה 🌙"
+                "08:00" to "בוקר",
+                "12:00" to "צהריים",
+                "16:00" to "אחה״צ",
+                "18:00" to "ערב",
+                "20:00" to "לילה"
             )
         } else {
             listOf(
-                "08:00" to "Morning ☀️",
-                "12:00" to "Noon 🥪",
-                "16:00" to "Afternoon 🎨",
-                "18:00" to "Evening 🏠",
-                "20:00" to "Night 🌙"
+                "08:00" to "Morning",
+                "12:00" to "Noon",
+                "16:00" to "Afternoon",
+                "18:00" to "Evening",
+                "20:00" to "Night"
             )
         }
     }
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         Surface(
-            shape = RoundedCornerShape(28.dp),
-            color = Color.White,
-            tonalElevation = 6.dp,
-            shadowElevation = 10.dp,
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 4.dp,
+            shadowElevation = 6.dp,
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp)
+                .fillMaxWidth(0.92f)
+                .widthIn(max = 420.dp)
+                .padding(vertical = 12.dp)
+                .testTag("family_24h_time_picker_dialog")
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(22.dp),
+                    .padding(horizontal = 20.dp, vertical = 18.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Header with clock icon
+                // Header with title and Clock <-> Numeric Keyboard toggle
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = GoogleBlueLight,
-                        modifier = Modifier.size(40.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Default.Schedule,
-                                contentDescription = null,
-                                tint = VibrantActionBlue,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                    }
-
-                    Column {
-                        Text(
-                            text = if (isHebrew) "בחירת שעה" else "Choose Time",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF1E293B)
-                            )
-                        )
-                        Text(
-                            text = title,
-                            style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(18.dp))
-
-                // Big display of chosen time with Hour and Minute controls
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = Color(0xFFF8FAFC),
-                    border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
-                    modifier = Modifier.fillMaxWidth()
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 14.dp, horizontal = 12.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.weight(1f)
                     ) {
-                        // Hour column
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            IconButton(
-                                onClick = { selectedHour = (selectedHour + 1) % 24 },
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Icon(Icons.Default.Add, contentDescription = "Hour +", tint = VibrantActionBlue)
-                            }
-                            Text(
-                                text = String.format("%02d", selectedHour),
-                                style = MaterialTheme.typography.headlineMedium.copy(
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = VibrantActionBlue,
-                                    fontSize = 32.sp
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Schedule,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
                                 )
-                            )
-                            IconButton(
-                                onClick = { selectedHour = if (selectedHour == 0) 23 else selectedHour - 1 },
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Icon(Icons.Default.Remove, contentDescription = "Hour -", tint = VibrantActionBlue)
                             }
-                            Text(
-                                text = if (isHebrew) "שעות" else "Hours",
-                                style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
-                            )
                         }
 
-                        Text(
-                            text = ":",
-                            style = MaterialTheme.typography.headlineMedium.copy(
-                                fontWeight = FontWeight.ExtraBold,
-                                color = Color(0xFF94A3B8),
-                                fontSize = 32.sp
-                            ),
-                            modifier = Modifier.padding(bottom = 20.dp)
+                        Column {
+                            Text(
+                                text = if (isHebrew) "בחירת שעה (24 שעות)" else "Select Time (24-Hour)",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            )
+                            Text(
+                                text = "$title • $formattedTime",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                ),
+                                modifier = Modifier.testTag("time_picker_header_formatted")
+                            )
+                        }
+                    }
+
+                    // Toggle between Clock Dial and Direct Numeric Input
+                    FilledTonalIconButton(
+                        onClick = {
+                            currentHour = timePickerState.hour
+                            currentMinute = timePickerState.minute
+                            isNumericInputMode = !isNumericInputMode
+                        },
+                        modifier = Modifier
+                            .size(40.dp)
+                            .testTag("time_picker_mode_toggle")
+                    ) {
+                        Icon(
+                            imageVector = if (isNumericInputMode) Icons.Default.AccessTime else Icons.Default.Keyboard,
+                            contentDescription = if (isNumericInputMode) {
+                                if (isHebrew) "מעבר לבחירה בשעון" else "Switch to clock dial"
+                            } else {
+                                if (isHebrew) "מעבר להקלדת שעה" else "Switch to numeric input"
+                            }
                         )
-
-                        // Minute column
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            IconButton(
-                                onClick = { selectedMinute = (selectedMinute + 5) % 60 },
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Icon(Icons.Default.Add, contentDescription = "Minute +", tint = VibrantActionBlue)
-                            }
-                            Text(
-                                text = String.format("%02d", selectedMinute),
-                                style = MaterialTheme.typography.headlineMedium.copy(
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = VibrantActionBlue,
-                                    fontSize = 32.sp
-                                )
-                            )
-                            IconButton(
-                                onClick = { selectedMinute = if (selectedMinute < 5) 55 else selectedMinute - 5 },
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Icon(Icons.Default.Remove, contentDescription = "Minute -", tint = VibrantActionBlue)
-                            }
-                            Text(
-                                text = if (isHebrew) "דקות" else "Minutes",
-                                style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
-                            )
-                        }
                     }
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Native clock picker button
-                OutlinedButton(
-                    onClick = {
-                        val tpd = TimePickerDialog(
-                            context,
-                            android.R.style.Theme_DeviceDefault_Light_Dialog,
-                            { _, h, m ->
-                                selectedHour = h
-                                selectedMinute = m
-                            },
-                            selectedHour,
-                            selectedMinute,
-                            true
-                        )
-                        tpd.show()
-                    },
-                    shape = RoundedCornerShape(20.dp),
-                    border = BorderStroke(1.dp, GoogleBlueLight),
-                    colors = ButtonDefaults.outlinedButtonColors(containerColor = GoogleBlueLight.copy(alpha = 0.5f)),
-                    modifier = Modifier.fillMaxWidth().height(42.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.AccessTime,
-                        contentDescription = null,
-                        tint = VibrantActionBlue,
-                        modifier = Modifier.size(18.dp)
+                // Material 3 24-Hour TimePicker or TimeInput (is24Hour = true, no AM/PM)
+                if (isNumericInputMode) {
+                    TimeInput(
+                        state = timePickerState,
+                        modifier = Modifier.testTag("m3_time_input_24h")
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = if (isHebrew) "פתח שעון מחוגים מלא ⏱️" else "Open Clock Picker ⏱️",
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = VibrantActionBlue
-                        )
+                } else {
+                    TimePicker(
+                        state = timePickerState,
+                        modifier = Modifier.testTag("m3_time_picker_24h")
                     )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Quick presets row
-                Text(
-                    text = if (isHebrew) "שעות נפוצות לבחירה מהירה:" else "Quick Time Presets:",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = TextSecondary
-                    ),
-                    modifier = Modifier.align(Alignment.Start)
-                )
-
                 Spacer(modifier = Modifier.height(8.dp))
 
+                // Quick 24h presets row
                 LazyRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxWidth()
@@ -352,65 +363,74 @@ fun FamilyTimeSelectionDialog(
                     items(quickPresets) { (timeStr, label) ->
                         val isPresetActive = formattedTime == timeStr
                         Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = if (isPresetActive) VibrantActionBlue else Color(0xFFF1F5F9),
-                            border = if (isPresetActive) null else BorderStroke(1.dp, Color(0xFFE2E8F0)),
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isPresetActive) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            },
                             modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
+                                .clip(RoundedCornerShape(10.dp))
                                 .clickable {
-                                    val parts = timeStr.split(":")
-                                    selectedHour = parts[0].toInt()
-                                    selectedMinute = parts[1].toInt()
+                                    val (h, m) = TimeFormatUtils.parse24Hour(timeStr)
+                                    currentHour = h
+                                    currentMinute = m
+                                    presetSeed++
                                 }
+                                .testTag("time_preset_$timeStr")
                         ) {
                             Text(
                                 text = "$label $timeStr",
                                 style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isPresetActive) Color.White else Color(0xFF334155)
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (isPresetActive) {
+                                        MaterialTheme.colorScheme.onPrimary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
                                 ),
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
                             )
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(22.dp))
+                Spacer(modifier = Modifier.height(18.dp))
 
-                // Action Buttons (Confirm & Cancel) - Matches reference button styles
+                // Clear Hebrew Confirm and Cancel buttons
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     OutlinedButton(
                         onClick = onDismiss,
-                        shape = RoundedCornerShape(24.dp),
-                        border = BorderStroke(1.5.dp, Color(0xFFCBD5E1)),
+                        shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .weight(1f)
-                            .height(50.dp)
+                            .height(48.dp)
+                            .testTag("cancel_time_button")
                     ) {
                         Text(
                             text = if (isHebrew) "ביטול" else "Cancel",
-                            fontWeight = FontWeight.Bold,
-                            color = TextSecondary
+                            fontWeight = FontWeight.Bold
                         )
                     }
 
                     Button(
                         onClick = { onConfirm(formattedTime) },
-                        shape = RoundedCornerShape(24.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = VibrantActionBlue),
-                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 4.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary
+                        ),
                         modifier = Modifier
                             .weight(1.3f)
-                            .height(50.dp)
+                            .height(48.dp)
                             .testTag("confirm_time_button")
                     ) {
                         Text(
                             text = if (isHebrew) "אישור ($formattedTime)" else "Confirm ($formattedTime)",
                             fontWeight = FontWeight.Bold,
-                            color = Color.White
+                            color = MaterialTheme.colorScheme.onPrimary
                         )
                     }
                 }

@@ -2,6 +2,7 @@ package com.example.data
 
 import com.example.base.FirestoreEmulatorTestBase
 import com.example.model.*
+import com.example.util.FirestoreErrorHandler
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
@@ -1474,6 +1475,997 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         assertFalse("Child must never be granted parent privileges", reopenedChildRepo.currentMember.value.isParent)
     }
 
+    @Test
+    fun testV16InvitationEndToEnd_parentCreatesChildInvitation_persistedValidatedRedeemedAndAppearsInParentMembersList() = runBlocking {
+        val parentEmail = "parent_inviter_${System.currentTimeMillis()}@example.com"
+        val childEmail = "child_invitee_${System.currentTimeMillis()}@example.com"
+
+        // 1. Parent signs in and creates family
+        val parentUid = signInTestUser(parentEmail)
+        val parentRepo = repo()
+        val createdFamily = withTimeout(timeoutMs) {
+            parentRepo.createFamilyAsParent(
+                familyNameInput = "משפחת כהן",
+                parentDisplayName = "אבא כהן",
+                creatorUidOverride = parentUid,
+                creatorEmailOverride = parentEmail,
+                familyIdentity = FamilyIdentity.FATHER
+            )
+        }.getOrThrow()
+        val familyId = createdFamily.familyId
+
+        // Verify no unconfirmed placeholder invite code is exposed before creating an invitation
+        assertEquals("", parentRepo.cloudFamilyGroup.value.inviteCode)
+
+        // 2. Parent creates a CHILD invitation via createRoleSpecificInvitation (and also test inviteNewMember dialog path)
+        val childInvitation = withTimeout(timeoutMs) {
+            parentRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "נועה כהן"
+            )
+        }.getOrThrow()
+
+        val code = childInvitation.code
+        assertTrue("Invitation code must be non-blank uppercase", code.length >= 6 && code == code.uppercase())
+        assertEquals(UserRole.CHILD, childInvitation.invitedRole)
+        assertEquals(familyId, childInvitation.familyId)
+        assertTrue(
+            "Confirmed invitation must be present in parent's pendingInvitations",
+            parentRepo.pendingInvitations.value.any { it.code == code }
+        )
+        assertEquals(code, parentRepo.cloudFamilyGroup.value.inviteCode)
+
+        // 3. Verify invitation document is persisted in /family_invites/{code} with exact document ID = code
+        val inviteSnap = withTimeout(timeoutMs) {
+            firestore.collection("family_invites").document(code).get().awaitTask()
+        }
+        assertTrue("Invitation document MUST exist in /family_invites/{code}", inviteSnap.exists())
+        assertEquals(code, inviteSnap.id)
+        assertEquals(code, inviteSnap.getString("code"))
+        assertEquals(familyId, inviteSnap.getString("familyId"))
+        assertEquals("CHILD", inviteSnap.getString("invitedRole"))
+        assertEquals(parentUid, inviteSnap.getString("createdById"))
+        assertEquals("PENDING", inviteSnap.getString("status"))
+        assertEquals(false, inviteSnap.getBoolean("isUsed"))
+        assertEquals(false, inviteSnap.getBoolean("isRevoked"))
+
+        // Also verify InviteMemberDialog synchronous compatibility helper inviteNewMember persists to /family_invites/{code}
+        val dialogInvitation = parentRepo.inviteNewMember(
+            name = "איתי כהן",
+            emoji = "👦",
+            role = UserRole.CHILD,
+            googleEmail = null,
+            schoolGrade = "כיתה ג'"
+        )
+        assertNotNull("inviteNewMember by PARENT must return confirmed invitation", dialogInvitation)
+        val dialogInviteSnap = withTimeout(timeoutMs) {
+            firestore.collection("family_invites").document(dialogInvitation!!.code).get().awaitTask()
+        }
+        assertTrue("inviteNewMember document MUST exist in /family_invites/{code}", dialogInviteSnap.exists())
+        assertEquals(parentUid, dialogInviteSnap.getString("createdById"))
+
+        // 4. A different Google user (not yet a family member) signs in and validates the code
+        val childUid = signInTestUser(childEmail)
+        val childRepo = repo()
+
+        // Non-member cannot list all family_invites or read family tasks prior to joining
+        val unauthorizedListInvites = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("family_invites").get().awaitTask()
+            }
+        }
+        assertTrue("Non-member must not be able to list /family_invites", unauthorizedListInvites.isFailure)
+
+        val unauthorizedReadTasks = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyId).collection("tasks").get().awaitTask()
+            }
+        }
+        assertTrue("Non-member must not have access to family tasks before redeeming invite", unauthorizedReadTasks.isFailure)
+
+        // Non-member securely validates the specific invitation code
+        val validationResult = withTimeout(timeoutMs) {
+            childRepo.validateInvitationCode(code)
+        }
+        assertTrue(
+            "Second Google user must be able to validate legitimate invitation code: $validationResult",
+            validationResult is InvitationValidationResult.Valid
+        )
+        val validInvite = (validationResult as InvitationValidationResult.Valid).invitation
+        assertEquals(code, validInvite.code)
+        assertEquals(familyId, validInvite.familyId)
+        assertEquals("משפחת כהן", validInvite.familyName)
+        assertEquals(UserRole.CHILD, validInvite.invitedRole)
+
+        // 5. Invited user redeems the invitation and joins with CHILD permissions
+        val joinedState = withTimeout(timeoutMs) {
+            childRepo.redeemInvitationAndJoinFamily(
+                rawCode = code,
+                memberDisplayName = "נועה כהן"
+            )
+        }.getOrThrow()
+
+        assertEquals(familyId, joinedState.familyId)
+        assertEquals(UserRole.CHILD, joinedState.role)
+        assertFalse("Joined child must NOT have parent privileges", childRepo.currentMember.value.isParent)
+        assertTrue("Joined child must have child role", childRepo.currentMember.value.isChild)
+
+        // 6. Verify the new child appears in the parent's family members list in Firestore and repository state
+        signInTestUser(parentEmail)
+        val refreshedParentRepo = repo()
+        val parentMembership = withTimeout(timeoutMs) {
+            refreshedParentRepo.checkAuthenticatedUserMembership(
+                uid = parentUid,
+                email = parentEmail,
+                displayName = "אבא כהן",
+                forceRefresh = true
+            )
+        }
+        assertTrue(parentMembership is FamilyMembershipState.ActiveMember)
+        val parentSeenMembers = refreshedParentRepo.members.value
+        val childInParentList = parentSeenMembers.find { it.id == childUid }
+        assertNotNull("New child must appear in parent's family members list", childInParentList)
+        assertEquals("נועה כהן", childInParentList!!.name)
+        assertEquals(UserRole.CHILD, childInParentList.role)
+    }
+
+    @Test
+    fun testV16InvitationSecurityAndFailureHandling_childCannotCreate_failedWriteNeverExposesCode_invalidAndExpiredRejected() = runBlocking {
+        val parentEmail = "parent_sec_${System.currentTimeMillis()}@example.com"
+        val childEmail = "child_sec_${System.currentTimeMillis()}@example.com"
+        val outsiderEmail = "outsider_sec_${System.currentTimeMillis()}@example.com"
+
+        // 1. Setup family with Parent and Child
+        val parentUid = signInTestUser(parentEmail)
+        val parentRepo = repo()
+        val createdFamily = withTimeout(timeoutMs) {
+            parentRepo.createFamilyAsParent(
+                familyNameInput = "משפחת לוי",
+                parentDisplayName = "אמא לוי",
+                creatorUidOverride = parentUid,
+                creatorEmailOverride = parentEmail,
+                familyIdentity = FamilyIdentity.MOTHER
+            )
+        }.getOrThrow()
+        val familyId = createdFamily.familyId
+
+        val childInvite = withTimeout(timeoutMs) {
+            parentRepo.createRoleSpecificInvitation(invitedRole = UserRole.CHILD, invitedNickname = "גיא")
+        }.getOrThrow()
+
+        val childUid = signInTestUser(childEmail)
+        val childRepo = repo()
+        withTimeout(timeoutMs) {
+            childRepo.redeemInvitationAndJoinFamily(
+                rawCode = childInvite.code,
+                memberDisplayName = "גיא לוי"
+            )
+        }.getOrThrow()
+
+        // 2. Child cannot create invitations (via repository OR direct Firestore write)
+        val childCreateAttempt = withTimeout(timeoutMs) {
+            childRepo.createRoleSpecificInvitation(invitedRole = UserRole.CHILD, customCodeOverride = "CHILDCODE1")
+        }
+        assertTrue("CHILD must not be able to create invitations", childCreateAttempt.isFailure)
+        assertNull(
+            "CHILD inviteNewMember must return null",
+            childRepo.inviteNewMember("חבר", "👦", UserRole.CHILD, null, null)
+        )
+        val directChildFirestoreAttempt = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("family_invites").document("CHILDFORCE1").set(
+                    mapOf(
+                        "code" to "CHILDFORCE1",
+                        "familyId" to familyId,
+                        "invitedRole" to "CHILD",
+                        "createdById" to childUid,
+                        "status" to "PENDING",
+                        "isUsed" to false,
+                        "isRevoked" to false
+                    )
+                ).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must reject direct invitation creation by CHILD", directChildFirestoreAttempt.isFailure)
+
+        // 3. Failed invitation writes NEVER produce a shareable success code
+        signInTestUser(parentEmail)
+        val parentOnlineRepo = repo()
+        withTimeout(timeoutMs) {
+            parentOnlineRepo.checkAuthenticatedUserMembership(parentUid, parentEmail, "אמא לוי", forceRefresh = true)
+        }
+        val pendingCountBefore = parentOnlineRepo.pendingInvitations.value.size
+        parentOnlineRepo.simulateOfflineNetworkFailure = true
+
+        val failedOfflineCreate = withTimeout(timeoutMs) {
+            parentOnlineRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "כישלון רשת",
+                customCodeOverride = "FAILNET1"
+            )
+        }
+        assertTrue("Offline invitation write must fail", failedOfflineCreate.isFailure)
+        assertFalse(
+            "Failed invitation write must NEVER add code to pendingInvitations",
+            parentOnlineRepo.pendingInvitations.value.any { it.code == "FAILNET1" }
+        )
+        assertEquals(pendingCountBefore, parentOnlineRepo.pendingInvitations.value.size)
+        assertNotEquals("FAILNET1", parentOnlineRepo.cloudFamilyGroup.value.inviteCode)
+        assertNotNull(parentOnlineRepo.lastClassifiedInvitationFailure)
+        assertEquals(
+            com.example.util.FirestoreErrorHandler.InvitationFailureCategory.UNAVAILABLE,
+            parentOnlineRepo.lastClassifiedInvitationFailure?.category
+        )
+        assertEquals(
+            "family_invites/{inviteCode}",
+            parentOnlineRepo.lastClassifiedInvitationFailure?.sanitizedPath
+        )
+
+        parentOnlineRepo.simulateOfflineNetworkFailure = false
+
+        // 4. Invalid and expired invitations are rejected during validation and redemption
+        val expiredInvite = withTimeout(timeoutMs) {
+            parentOnlineRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "פג תוקף",
+                customExpirationMs = -60_000L
+            )
+        }.getOrThrow()
+
+        signInTestUser(outsiderEmail)
+        val outsiderRepo = repo()
+
+        val nonExistentValidation = withTimeout(timeoutMs) {
+            outsiderRepo.validateInvitationCode("NOTEXIST99")
+        }
+        assertTrue("Non-existent code must be rejected", nonExistentValidation is InvitationValidationResult.Invalid)
+        assertEquals("NOT_FOUND", (nonExistentValidation as InvitationValidationResult.Invalid).errorCode)
+
+        val nonExistentRedeem = withTimeout(timeoutMs) {
+            outsiderRepo.redeemInvitationAndJoinFamily("NOTEXIST99", "אורח")
+        }
+        assertTrue("Redeeming non-existent code must fail", nonExistentRedeem.isFailure)
+
+        val expiredValidation = withTimeout(timeoutMs) {
+            outsiderRepo.validateInvitationCode(expiredInvite.code)
+        }
+        assertTrue("Expired code must be rejected", expiredValidation is InvitationValidationResult.Invalid)
+        assertEquals("EXPIRED", (expiredValidation as InvitationValidationResult.Invalid).errorCode)
+
+        val expiredRedeem = withTimeout(timeoutMs) {
+            outsiderRepo.redeemInvitationAndJoinFamily(expiredInvite.code, "אורח")
+        }
+        assertTrue("Redeeming expired code must fail", expiredRedeem.isFailure)
+    }
+
+    /**
+     * V1.6 Critical Regression Test:
+     * Covers all 7 requirements for CHILD task completion persistence & PARENT approval workflow:
+     * 1. Child completing an assigned task persists in Firestore (/families/{familyId}/tasks/{taskId})
+     *    with isCompleted=true, approvedByParent=false, and sync state PENDING_APPROVAL.
+     * 2. Parent observes the child's completion in real-time via Firestore snapshot listener.
+     * 3. Child is denied updates to another child's task (both in repository and Firestore rules).
+     * 4. Child is denied changes to task title, assignee, rewards/points, approvedByParent=true,
+     *    task creation, or task deletion.
+     * 5. Failed writes revert the optimistic UI state to incomplete and populate a clear Hebrew error.
+     * 6. Notifications are NOT sent for rejected writes, and only sent once after committed writes.
+     * 7. Parent approval workflow persists approvedByParent=true and awards earnedPoints to the child.
+     */
+    @Test
+    fun testV16ChildTaskCompletionPersistence_parentRealtimeObservation_andApprovalWorkflow() = runBlocking {
+        val ts = System.currentTimeMillis()
+        val parentEmail = "v16_task_parent_$ts@example.com"
+        val roiChildEmail = "v16_task_roi_$ts@example.com"
+        val siblingChildEmail = "v16_task_noa_$ts@example.com"
+
+        // 1. Parent signs in and creates a family
+        val parentUid = signInTestUser(parentEmail)
+        val parentRepo = repo()
+        assertEquals(
+            "All task operations must target the configured named Firestore database",
+            FamilyRepository.NAMED_FIRESTORE_DATABASE_ID,
+            parentRepo.configuredDatabaseId
+        )
+
+        val familyCreation = withTimeout(timeoutMs) {
+            parentRepo.createFamilyAsParent(
+                familyNameInput = "משפחת משימות",
+                parentDisplayName = "אבא דני",
+                familyIdentity = FamilyIdentity.FATHER
+            )
+        }
+        assertTrue("Parent must create family", familyCreation.isSuccess)
+        val familyId = familyCreation.getOrThrow().familyId
+
+        // Create invitations for Roi (CHILD 1) and Noa (CHILD 2)
+        val roiInvite = withTimeout(timeoutMs) {
+            parentRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "רועי"
+            )
+        }.getOrThrow()
+        val noaInvite = withTimeout(timeoutMs) {
+            parentRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "נועה"
+            )
+        }.getOrThrow()
+
+        // Roi joins as CHILD
+        val roiUid = signInTestUser(roiChildEmail)
+        val roiRepo = repo()
+        val roiJoin = withTimeout(timeoutMs) {
+            roiRepo.redeemInvitationAndJoinFamily(
+                rawCode = roiInvite.code,
+                memberDisplayName = "רועי",
+                familyIdentity = FamilyIdentity.SON
+            )
+        }
+        assertTrue("Roi must join family as CHILD: ${roiJoin.exceptionOrNull()}", roiJoin.isSuccess)
+        assertEquals(UserRole.CHILD, roiRepo.currentMember.value.role)
+
+        // Noa joins as second CHILD
+        val noaUid = signInTestUser(siblingChildEmail)
+        val noaRepo = repo()
+        val noaJoin = withTimeout(timeoutMs) {
+            noaRepo.redeemInvitationAndJoinFamily(
+                rawCode = noaInvite.code,
+                memberDisplayName = "נועה",
+                familyIdentity = FamilyIdentity.DAUGHTER
+            )
+        }
+        assertTrue("Noa must join family as CHILD", noaJoin.isSuccess)
+
+        // Parent signs in and creates a task for Roi and a task for Noa
+        signInTestUser(parentEmail)
+        val roiTaskId = "task_roi_room_$ts"
+        val noaTaskId = "task_noa_dishes_$ts"
+
+        val roiTask = FamilyTask(
+            id = roiTaskId,
+            familyId = familyId,
+            title = "סידור החדר של רועי",
+            description = "לסדר צעצועים ומיטה",
+            category = TaskCategory.BEDROOM,
+            assignedToMemberId = roiUid,
+            dateEpochDay = LocalDate.now().toEpochDay(),
+            dueTimeFormatted = "17:30",
+            priority = TaskPriority.HIGH,
+            points = 25,
+            isCompleted = false,
+            approvedByParent = false
+        )
+        val noaTask = FamilyTask(
+            id = noaTaskId,
+            familyId = familyId,
+            title = "פינוי מדיח כלים",
+            category = TaskCategory.DISHES,
+            assignedToMemberId = noaUid,
+            dateEpochDay = LocalDate.now().toEpochDay(),
+            dueTimeFormatted = "18:00",
+            points = 15,
+            isCompleted = false,
+            approvedByParent = false
+        )
+
+        parentRepo.addTask(roiTask)
+        parentRepo.addTask(noaTask)
+
+        // Wait for tasks to be persisted in Firestore and visible to Roi's real-time listener
+        withTimeout(timeoutMs) {
+            while (roiRepo.tasks.value.none { it.id == roiTaskId } || roiRepo.tasks.value.none { it.id == noaTaskId }) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+        assertTrue("Roi must immediately see the task created by Parent", roiRepo.tasks.value.any { it.id == roiTaskId })
+
+        // Switch active auth to Roi (CHILD)
+        signInTestUser(roiChildEmail)
+        val notificationsBeforeComplete = roiRepo.notifications.value.size
+
+        // 2. Roi (CHILD) completes his assigned task
+        val completeRes = withTimeout(timeoutMs) {
+            roiRepo.toggleTaskCompletionAsync(roiTaskId)
+        }
+        assertTrue(
+            "Roi completing his assigned task must succeed in Firestore without PERMISSION_DENIED: ${completeRes.exceptionOrNull()}",
+            completeRes.isSuccess
+        )
+
+        val completedLocalTask = roiRepo.tasks.value.first { it.id == roiTaskId }
+        assertTrue("Task must remain marked completed on Roi's device", completedLocalTask.isCompleted)
+        assertFalse(
+            "Child completion must NOT self-approve; approvedByParent must be false (pending approval)",
+            completedLocalTask.approvedByParent
+        )
+        assertEquals(
+            "Task sync state must be PENDING_APPROVAL after child completion commit",
+            TaskCompletionSyncState.PENDING_APPROVAL,
+            roiRepo.taskSyncStates.value[roiTaskId]
+        )
+        assertNull("No error message should be set on successful completion", roiRepo.taskOperationError.value)
+
+        // Verify notification was sent AFTER commit and not duplicated by snapshot listener
+        val notificationsAfterComplete = roiRepo.notifications.value.size
+        assertEquals(
+            "Exactly one notification must be emitted after child completion commit (no duplicates from snapshot listener)",
+            notificationsBeforeComplete + 1,
+            notificationsAfterComplete
+        )
+
+        // Verify persisted document in Firestore directly
+        val cloudSnapAfterChild = withTimeout(timeoutMs) {
+            firestore.collection("families").document(familyId)
+                .collection("tasks").document(roiTaskId).get().awaitTask()
+        }
+        assertTrue("Task document must exist in Firestore", cloudSnapAfterChild.exists())
+        assertEquals("isCompleted must be persisted as true in Firestore", true, cloudSnapAfterChild.getBoolean("isCompleted"))
+        assertEquals("approvedByParent must remain false in Firestore", false, cloudSnapAfterChild.getBoolean("approvedByParent"))
+        assertEquals("completedByMemberId must be Roi's UID", roiUid, cloudSnapAfterChild.getString("completedByMemberId"))
+
+        // 3. Parent observes the completion in real-time with PENDING_APPROVAL status
+        withTimeout(timeoutMs) {
+            while (parentRepo.tasks.value.find { it.id == roiTaskId }?.isCompleted != true) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+        val parentObservedTask = parentRepo.tasks.value.first { it.id == roiTaskId }
+        assertTrue("Parent must observe Roi's task as completed in real-time", parentObservedTask.isCompleted)
+        assertFalse("Parent must observe Roi's task as pending parent approval", parentObservedTask.approvedByParent)
+        assertEquals(
+            TaskCompletionSyncState.PENDING_APPROVAL,
+            parentRepo.taskSyncStates.value[roiTaskId]
+        )
+
+        // 4. Child is denied updates to another child's task (Noa's task)
+        val notificationsBeforeSiblingAttempt = roiRepo.notifications.value.size
+        val siblingToggleRes = withTimeout(timeoutMs) {
+            roiRepo.toggleTaskCompletionAsync(noaTaskId)
+        }
+        assertTrue("Roi must be denied completing Noa's task", siblingToggleRes.isFailure)
+        assertEquals(
+            FirestoreErrorHandler.TaskFailureCategory.ASSIGNEE_MISMATCH,
+            roiRepo.lastClassifiedTaskFailure?.category
+        )
+        assertNotNull("Clear Hebrew error message must be set when child tries to complete another child's task", roiRepo.taskOperationError.value)
+        assertFalse("Noa's task must remain incomplete", roiRepo.tasks.value.first { it.id == noaTaskId }.isCompleted)
+        assertEquals(
+            "Rejected sibling task write must NOT trigger any notification",
+            notificationsBeforeSiblingAttempt,
+            roiRepo.notifications.value.size
+        )
+
+        // Also verify direct Firestore SDK update by Roi on Noa's task is rejected by firestore.rules
+        val directSiblingFirestoreAttempt = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyId)
+                    .collection("tasks").document(noaTaskId)
+                    .update(
+                        mapOf(
+                            "isCompleted" to true,
+                            "completedAtMillis" to System.currentTimeMillis(),
+                            "completedByMemberId" to roiUid,
+                            "updatedAt" to System.currentTimeMillis()
+                        )
+                    ).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must reject child updating another child's task", directSiblingFirestoreAttempt.isFailure)
+
+        // 5. Child is denied changes to protected fields (title, assignee, rewards/points, approvedByParent, create, delete)
+        val roiTaskRef = firestore.collection("families").document(familyId).collection("tasks").document(roiTaskId)
+
+        val tamperTitleAttempt = runCatching {
+            withTimeout(5000L) {
+                roiTaskRef.update(mapOf("title" to "hacked title", "updatedAt" to System.currentTimeMillis())).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must deny child changing task title", tamperTitleAttempt.isFailure)
+
+        val tamperAssigneeAttempt = runCatching {
+            withTimeout(5000L) {
+                roiTaskRef.update(mapOf("assignedToMemberId" to noaUid, "assignedUid" to noaUid)).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must deny child changing task assignee", tamperAssigneeAttempt.isFailure)
+
+        val tamperPointsAttempt = runCatching {
+            withTimeout(5000L) {
+                roiTaskRef.update(mapOf("points" to 999, "pointsValue" to 999)).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must deny child changing task reward points", tamperPointsAttempt.isFailure)
+
+        val tamperSelfApprovalAttempt = runCatching {
+            withTimeout(5000L) {
+                roiTaskRef.update(mapOf("approvedByParent" to true, "updatedAt" to System.currentTimeMillis())).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must deny child setting approvedByParent=true", tamperSelfApprovalAttempt.isFailure)
+
+        val childApproveRepoAttempt = withTimeout(timeoutMs) {
+            roiRepo.approveTaskCompletionAsync(roiTaskId)
+        }
+        assertTrue("Repository must deny child calling approveTaskCompletionAsync", childApproveRepoAttempt.isFailure)
+
+        val childCreateTaskAttempt = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyId)
+                    .collection("tasks").document("task_child_created_$ts")
+                    .set(
+                        mapOf(
+                            "id" to "task_child_created_$ts",
+                            "familyId" to familyId,
+                            "title" to "Unauthorized child task",
+                            "assignedUid" to roiUid,
+                            "assignedToMemberId" to roiUid,
+                            "points" to 0,
+                            "isCompleted" to false,
+                            "approvedByParent" to false
+                        )
+                    ).awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must deny child creating any task", childCreateTaskAttempt.isFailure)
+
+        val childDeleteTaskAttempt = runCatching {
+            withTimeout(5000L) {
+                roiTaskRef.delete().awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must deny child deleting a task", childDeleteTaskAttempt.isFailure)
+
+        // 6. Failed write reverts optimistic UI with a clear Hebrew error and does NOT send notification
+        // Switch to Noa (CHILD) and simulate a failed Firestore write on Noa's assigned task
+        signInTestUser(siblingChildEmail)
+        val noaNotificationsBeforeFail = noaRepo.notifications.value.size
+        noaRepo.simulateOfflineNetworkFailure = true
+
+        val failedCompleteRes = withTimeout(timeoutMs) {
+            noaRepo.toggleTaskCompletionAsync(noaTaskId)
+        }
+        assertTrue("Simulated network failure must fail completion", failedCompleteRes.isFailure)
+        assertFalse(
+            "Failed write must revert optimistic UI back to incomplete (isCompleted=false)",
+            noaRepo.tasks.value.first { it.id == noaTaskId }.isCompleted
+        )
+        assertEquals(
+            "Sync state must be FAILED after failed completion write",
+            TaskCompletionSyncState.FAILED,
+            noaRepo.taskSyncStates.value[noaTaskId]
+        )
+        assertFalse(
+            "Hebrew error message must be populated on failed task write",
+            noaRepo.taskOperationError.value.isNullOrBlank()
+        )
+        assertEquals(
+            "Failed task completion write must NOT emit any push notification",
+            noaNotificationsBeforeFail,
+            noaRepo.notifications.value.size
+        )
+        noaRepo.simulateOfflineNetworkFailure = false
+
+        // 7. Parent approves Roi's completed task -> persists approvedByParent=true and awards points
+        signInTestUser(parentEmail)
+        val roiPointsBeforeApproval = parentRepo.members.value.find { it.id == roiUid }?.earnedPoints ?: 0
+
+        val approvalRes = withTimeout(timeoutMs) {
+            parentRepo.approveTaskCompletionAsync(roiTaskId)
+        }
+        assertTrue("Parent approving Roi's completed task must succeed: ${approvalRes.exceptionOrNull()}", approvalRes.isSuccess)
+        assertEquals(
+            TaskCompletionSyncState.SAVED_APPROVED,
+            parentRepo.taskSyncStates.value[roiTaskId]
+        )
+
+        val cloudSnapAfterApproval = withTimeout(timeoutMs) {
+            roiTaskRef.get().awaitTask()
+        }
+        assertEquals("isCompleted must be true after parent approval", true, cloudSnapAfterApproval.getBoolean("isCompleted"))
+        assertEquals("approvedByParent must be true after parent approval", true, cloudSnapAfterApproval.getBoolean("approvedByParent"))
+
+        val roiMemberDocAfterApproval = withTimeout(timeoutMs) {
+            firestore.collection("families").document(familyId)
+                .collection("members").document(roiUid).get().awaitTask()
+        }
+        assertEquals(
+            "Roi's earnedPoints in Firestore must increase by task points (25) upon parent approval",
+            (roiPointsBeforeApproval + 25).toLong(),
+            roiMemberDocAfterApproval.getLong("earnedPoints")
+        )
+
+        // Verify Roi's real-time listener receives the approved state
+        withTimeout(timeoutMs) {
+            while (roiRepo.tasks.value.find { it.id == roiTaskId }?.approvedByParent != true) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+        assertTrue("Roi must see approvedByParent=true in real-time after parent approval", roiRepo.tasks.value.first { it.id == roiTaskId }.approvedByParent)
+        assertEquals(
+            TaskCompletionSyncState.SAVED_APPROVED,
+            roiRepo.taskSyncStates.value[roiTaskId]
+        )
+    }
+
+    @Test
+    fun testV100_multiDeviceFcmTokenRegistrationRefreshLogoutAndCrossUserIsolation() = runBlocking {
+        val ts = System.currentTimeMillis()
+        val aliceEmail = "alice_fcm_$ts@test.com"
+        val bobEmail = "bob_fcm_$ts@test.com"
+
+        // 1. Alice signs in and registers two devices (phone + tablet) under her authenticated UID
+        val aliceUid = signInTestUser(aliceEmail)
+        val aliceRepo = repo()
+        val phoneToken = "fcm_token_alice_phone_$ts"
+        val tabletToken = "fcm_token_alice_tablet_$ts"
+
+        val regPhoneRes = withTimeout(timeoutMs) {
+            aliceRepo.registerDeviceFcmTokenInCloud(
+                token = phoneToken,
+                familyId = "fam_fcm_$ts",
+                role = UserRole.PARENT
+            )
+        }
+        assertTrue("Alice registering phone FCM token must succeed: ${regPhoneRes.exceptionOrNull()}", regPhoneRes.isSuccess)
+
+        val regTabletRes = withTimeout(timeoutMs) {
+            aliceRepo.registerDeviceFcmTokenInCloud(
+                token = tabletToken,
+                familyId = "fam_fcm_$ts",
+                role = UserRole.PARENT
+            )
+        }
+        assertTrue("Alice registering tablet FCM token must succeed: ${regTabletRes.exceptionOrNull()}", regTabletRes.isSuccess)
+
+        val aliceTokens = withTimeout(timeoutMs) {
+            aliceRepo.getDeviceFcmTokensFromCloud(aliceUid)
+        }.getOrThrow()
+        assertEquals("Alice must have 2 registered device tokens", 2, aliceTokens.size)
+        assertTrue(aliceTokens.contains(phoneToken))
+        assertTrue(aliceTokens.contains(tabletToken))
+
+        // 2. Bob signs in and attempts to read or delete Alice's FCM tokens -> MUST FAIL (PERMISSION_DENIED)
+        val bobUid = signInTestUser(bobEmail)
+        val bobRepo = repo()
+        val bobReadAliceTokens = withTimeout(timeoutMs) {
+            bobRepo.getDeviceFcmTokensFromCloud(aliceUid)
+        }
+        assertTrue("Bob must be denied reading Alice's FCM tokens", bobReadAliceTokens.isFailure)
+
+        val phoneTokenId = com.example.notifications.FcmTokenManager.computeTokenId(phoneToken)
+        val bobDeleteAliceToken = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("users").document(aliceUid)
+                    .collection("fcm_tokens").document(phoneTokenId)
+                    .delete().awaitTask()
+            }
+        }
+        assertTrue("Bob must be denied deleting Alice's FCM token", bobDeleteAliceToken.isFailure)
+
+        // 3. Alice signs back in and cleans up her tablet token on logout
+        signInTestUser(aliceEmail)
+        val deleteTabletRes = withTimeout(timeoutMs) {
+            aliceRepo.deleteDeviceFcmTokenInCloud(tabletToken)
+        }
+        assertTrue("Alice deleting her own tablet token on logout must succeed", deleteTabletRes.isSuccess)
+
+        val remainingTokens = withTimeout(timeoutMs) {
+            aliceRepo.getDeviceFcmTokensFromCloud(aliceUid)
+        }.getOrThrow()
+        assertEquals("Only phone token should remain after tablet logout", listOf(phoneToken), remainingTokens)
+    }
+
+    @Test
+    fun testV100_sharedFamilyFileManager_googleDriveRootSetupEqualParentChildPermissionsNoFirestoreChunksAndCrossFamilyIsolation() = runBlocking {
+        val ts = System.currentTimeMillis()
+        val parentEmail = "parent_files_$ts@test.com"
+        val childEmail = "child_files_$ts@test.com"
+        val strangerEmail = "stranger_files_$ts@test.com"
+
+        // 1. Parent creates Family A ("משפחת כהן") and invites Child ("נועה כהן")
+        val parentUid = signInTestUser(parentEmail)
+        val parentRepo = repo()
+        val parentActive = withTimeout(timeoutMs) {
+            parentRepo.createFamilyAsParent(
+                familyNameInput = "משפחת כהן",
+                parentDisplayName = "אבא כהן",
+                creatorUidOverride = parentUid,
+                creatorEmailOverride = parentEmail,
+                familyIdentity = FamilyIdentity.FATHER
+            )
+        }.getOrThrow()
+        val familyIdA = parentActive.familyId
+
+        // 1b. Parent configures the Google Drive `FamilyTasks` root folder -> persisted to Firestore
+        val driveConfig1 = withTimeout(timeoutMs) {
+            parentRepo.connectOrSetupFamilyDriveFolder(targetFamilyId = familyIdA)
+        }.getOrThrow()
+        assertTrue(driveConfig1.isConfigured)
+        assertEquals("FamilyTasks", driveConfig1.driveRootFolderName)
+        assertTrue(driveConfig1.driveRootFolderId.isNotBlank())
+
+        // Re-running connectOrSetupFamilyDriveFolder reuses the exact same Drive root folder ID
+        val driveConfig2 = withTimeout(timeoutMs) {
+            parentRepo.connectOrSetupFamilyDriveFolder(targetFamilyId = familyIdA)
+        }.getOrThrow()
+        assertEquals(driveConfig1.driveRootFolderId, driveConfig2.driveRootFolderId)
+
+        val childInvite = withTimeout(timeoutMs) {
+            parentRepo.createRoleInvitationInCloud(
+                invitedRole = UserRole.CHILD,
+                inviteeNameHint = "נועה כהן",
+                familyIdOverride = familyIdA
+            )
+        }.getOrThrow()
+
+        // 2. Child signs in and joins Family A WITHOUT passing joiningEmailOverride ->
+        //    verified Google email (childEmail) must be automatically obtained from Firebase Auth!
+        val childUid = signInTestUser(childEmail)
+        val childRepo = repo()
+        val childJoined = withTimeout(timeoutMs) {
+            childRepo.redeemInvitationAndJoinFamily(
+                rawCode = childInvite.inviteCode,
+                memberDisplayName = "נועה כהן",
+                joiningUidOverride = childUid,
+                familyIdentity = FamilyIdentity.DAUGHTER
+            )
+        }.getOrThrow()
+        assertEquals(
+            "Signed-in child's verified Google email must be automatically captured from Firebase Auth",
+            childEmail.lowercase(),
+            childJoined.member.googleEmail?.lowercase()
+        )
+
+        // Simulate 403/404 when Child first tries to access the Parent's shared FamilyTasks folder before Google Picker selection:
+        // Must NOT create a separate personal folder in Child's Drive and must NOT disguise unauthorized files in Firestore!
+        com.example.files.GoogleDriveFamilyService.simulateUnauthorizedDriveIdForTest(driveConfig1.driveRootFolderId)
+
+        val unauthChildConnect = withTimeout(timeoutMs) {
+            childRepo.connectOrSetupFamilyDriveFolder(targetFamilyId = familyIdA)
+        }
+        assertTrue(
+            "When Drive returns 403/404 on the parent's shared folder, Child must NOT silently create a separate personal FamilyTasks folder",
+            unauthChildConnect.isFailure
+        )
+        assertEquals(
+            com.example.model.DriveConnectionStatus.NEEDS_SHARED_FOLDER_PICKER,
+            childRepo.familyDriveConfig.value.connectionStatus
+        )
+        assertEquals(
+            "Parent's authoritative driveRootFolderId must be preserved",
+            driveConfig1.driveRootFolderId,
+            childRepo.familyDriveConfig.value.driveRootFolderId
+        )
+
+        // Selecting a mismatched folder ID in Google Picker must be rejected
+        val wrongPickerAttempt = withTimeout(timeoutMs) {
+            childRepo.verifyAndConnectPickedSharedFolderSuspend(
+                pickedDriveId = "personal_unrelated_folder_123",
+                pickedName = "FamilyTasks",
+                targetFamilyId = familyIdA
+            )
+        }
+        assertTrue("Mismatched folder ID in Google Picker must be rejected", wrongPickerAttempt.isFailure)
+
+        // Selecting the exact registered driveRootFolderId in Google Picker authorizes access and connects!
+        val childDriveConfig = withTimeout(timeoutMs) {
+            childRepo.verifyAndConnectPickedSharedFolderSuspend(
+                pickedDriveId = driveConfig1.driveRootFolderId,
+                pickedName = "FamilyTasks",
+                targetFamilyId = familyIdA
+            )
+        }.getOrThrow()
+        assertEquals(
+            "Child must connect to the exact same FamilyTasks root folder ID created by Parent",
+            driveConfig1.driveRootFolderId,
+            childDriveConfig.driveRootFolderId
+        )
+
+        // 3. Child creates a shared folder in Family A -> succeeds, uses Parent's driveRootFolderId, and syncs to Firestore
+        val childCreatedFolder = withTimeout(timeoutMs) {
+            childRepo.createSharedFolderInCloud(
+                nameHe = "פרויקטים במדעים",
+                nameEn = "Science Projects",
+                iconEmoji = "🔬",
+                colorHex = 0xFF0284C7L,
+                parentFolderId = "f_school",
+                targetFamilyId = familyIdA
+            )
+        }.getOrThrow()
+        assertEquals("f_school", childCreatedFolder.parentFolderId)
+        assertEquals(
+            "Subfolder created by Child must physically use Parent's shared driveRootFolderId as its Drive parent",
+            driveConfig1.driveRootFolderId,
+            childCreatedFolder.driveParentFolderId
+        )
+
+        // 4. Child uploads a file into the shared folder -> metadata persisted in Firestore, binary stored in Google Drive (NO Firestore binary chunks)
+        val childImageBytes = com.example.files.FamilyFileManagerHelper.generateSampleImageBytes(
+            title = "ניסוי_הר_געש.jpg",
+            uploaderName = "נועה כהן"
+        )
+        val childUploadedDoc = withTimeout(timeoutMs) {
+            childRepo.uploadFamilyFileInCloud(
+                folderId = childCreatedFolder.id,
+                rawFileName = "ניסוי_הר_געש.jpg",
+                rawExtension = "JPG",
+                rawBytes = childImageBytes,
+                targetFamilyId = familyIdA
+            )
+        }.getOrThrow()
+        assertEquals(childUid, childUploadedDoc.uploadedByUid)
+        assertEquals(familyIdA, childUploadedDoc.familyId)
+        assertTrue(childUploadedDoc.driveFileId.isNotBlank())
+        assertEquals(
+            "File uploaded by Child must physically reside inside the shared subfolder's Drive ID",
+            childCreatedFolder.driveFolderId,
+            childUploadedDoc.driveParentFolderId
+        )
+
+        // Verify Firestore security rules explicitly block writing binary chunks to /files/{fileId}/chunks/{chunkId}
+        val forbiddenChunkWriteAttempt = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyIdA)
+                    .collection("files").document(childUploadedDoc.id)
+                    .collection("chunks").document("chunk_0")
+                    .set(mapOf("base64" to "AAECAwQF"))
+                    .awaitTask()
+            }
+        }
+        assertTrue("Firestore rules must strictly prohibit storing binary file chunks in Firestore", forbiddenChunkWriteAttempt.isFailure)
+
+        // 5. Switch back to Parent -> Parent sees Child's automatically verified Google email, grants Drive Editor access without typing email manually, and sees Child's folder and file in real time
+        signInTestUser(parentEmail)
+        withTimeout(timeoutMs) {
+            parentRepo.checkAuthenticatedUserMembership(
+                uid = parentUid,
+                email = parentEmail,
+                displayName = "אבא כהן",
+                forceRefresh = true
+            )
+        }
+        val sharedDriveConfig = withTimeout(timeoutMs) {
+            parentRepo.shareFamilyDriveWithAllMembersSuspend(targetFamilyId = familyIdA)
+        }.getOrThrow()
+        assertTrue(
+            "Parent must be able to grant Google Drive Editor access to Child's automatically verified email without manual typing",
+            sharedDriveConfig.sharedWithEmails.any { it.equals(childEmail, ignoreCase = true) }
+        )
+
+        withTimeout(timeoutMs) {
+            while (parentRepo.documents.value.none { it.id == childUploadedDoc.id } ||
+                parentRepo.folders.value.none { it.id == childCreatedFolder.id }
+            ) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+        assertTrue("Parent must see Child's created folder in real time", parentRepo.folders.value.any { it.id == childCreatedFolder.id })
+        assertTrue("Parent must see Child's uploaded file in real time", parentRepo.documents.value.any { it.id == childUploadedDoc.id })
+
+        // Parent uploads two files with identical names to verify duplicate filename resolution in cloud
+        val pdfBytes = com.example.files.FamilyFileManagerHelper.generateDocumentPdfBytes(
+            title = "אישור_טיול.pdf",
+            uploaderName = "אבא כהן",
+            dateFormatted = "20/10/2026",
+            bodyLines = listOf("אישור יציאה לטיול שנתי")
+        )
+        val parentDoc1 = withTimeout(timeoutMs) {
+            parentRepo.uploadFamilyFileInCloud(
+                folderId = childCreatedFolder.id,
+                rawFileName = "אישור_טיול.pdf",
+                rawExtension = "PDF",
+                rawBytes = pdfBytes,
+                targetFamilyId = familyIdA
+            )
+        }.getOrThrow()
+        val parentDoc2 = withTimeout(timeoutMs) {
+            parentRepo.uploadFamilyFileInCloud(
+                folderId = childCreatedFolder.id,
+                rawFileName = "אישור_טיול.pdf",
+                rawExtension = "PDF",
+                rawBytes = pdfBytes,
+                targetFamilyId = familyIdA
+            )
+        }.getOrThrow()
+        assertEquals("אישור_טיול.pdf", parentDoc1.name)
+        assertEquals("אישור_טיול (2).pdf", parentDoc2.name)
+        assertNotEquals("Unique file IDs must prevent overwriting files with identical names", parentDoc1.id, parentDoc2.id)
+
+        // 6. Switch to Child -> Child has EQUAL permissions in the shared FamilyTasks workspace to rename, move, and delete files & folders
+        signInTestUser(childEmail)
+        withTimeout(timeoutMs) {
+            childRepo.checkAuthenticatedUserMembership(
+                uid = childUid,
+                email = childEmail,
+                displayName = "נועה כהן"
+            )
+        }
+        withTimeout(timeoutMs) {
+            while (childRepo.documents.value.none { it.id == parentDoc1.id }) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+        assertTrue("Child must see Parent's uploaded file in real time", childRepo.documents.value.any { it.id == parentDoc1.id })
+
+        // Child renames shared folder in Firestore -> SUCCEEDS (equal permissions)
+        val childRenameFolderRes = withTimeout(timeoutMs) {
+            childRepo.renameSharedFolderInCloud(childCreatedFolder.id, "פרויקטים במדעים - מעודכן", familyIdA)
+        }
+        assertTrue("Child must have equal permission to rename shared folder: ${childRenameFolderRes.exceptionOrNull()}", childRenameFolderRes.isSuccess)
+
+        // Child moves Parent's file to another folder in Firestore -> SUCCEEDS (equal permissions)
+        val childMoveParentFileRes = withTimeout(timeoutMs) {
+            childRepo.moveFamilyFileInCloud(parentDoc2.id, "f_school", familyIdA)
+        }
+        assertTrue("Child must have equal permission to move shared file: ${childMoveParentFileRes.exceptionOrNull()}", childMoveParentFileRes.isSuccess)
+
+        // Child deletes Parent's file in Firestore -> SUCCEEDS (equal permissions in FamilyTasks workspace)
+        val childDeleteParentFileRes = withTimeout(timeoutMs) {
+            childRepo.deleteFamilyFileInCloud(parentDoc1.id, familyIdA)
+        }
+        assertTrue("Child must have equal permission to delete shared file in FamilyTasks: ${childDeleteParentFileRes.exceptionOrNull()}", childDeleteParentFileRes.isSuccess)
+
+        // Child deletes their own uploaded file -> SUCCEEDS
+        val childDeleteOwnFileRes = withTimeout(timeoutMs) {
+            childRepo.deleteFamilyFileInCloud(childUploadedDoc.id, familyIdA)
+        }
+        assertTrue("Child must be allowed to delete their own uploaded file: ${childDeleteOwnFileRes.exceptionOrNull()}", childDeleteOwnFileRes.isSuccess)
+
+        // Child creates and deletes a shared folder -> SUCCEEDS (equal permissions)
+        val tempChildFolder = withTimeout(timeoutMs) {
+            childRepo.createSharedFolderInCloud(
+                nameHe = "תיקייה זמנית",
+                parentFolderId = "f_school",
+                targetFamilyId = familyIdA
+            )
+        }.getOrThrow()
+        val childDeleteFolderRes = withTimeout(timeoutMs) {
+            childRepo.deleteSharedFolderInCloud(tempChildFolder.id, familyIdA)
+        }
+        assertTrue("Child must have equal permission to delete shared folder: ${childDeleteFolderRes.exceptionOrNull()}", childDeleteFolderRes.isSuccess)
+
+        // 7. Stranger from Family B attempts to read, upload, or delete files/folders in Family A -> MUST FAIL (PERMISSION_DENIED)
+        val strangerUid = signInTestUser(strangerEmail)
+        val strangerRepo = repo()
+        withTimeout(timeoutMs) {
+            strangerRepo.createFamilyAsParent(
+                familyNameInput = "משפחת לוי",
+                parentDisplayName = "זר לוי",
+                creatorUidOverride = strangerUid,
+                creatorEmailOverride = strangerEmail,
+                familyIdentity = FamilyIdentity.FATHER
+            )
+        }.getOrThrow()
+
+        val strangerReadFamilyAFiles = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyIdA)
+                    .collection("files").get().awaitTask()
+            }
+        }
+        assertTrue("Stranger from another family must be denied reading Family A files", strangerReadFamilyAFiles.isFailure)
+
+        val strangerUploadToFamilyA = withTimeout(timeoutMs) {
+            strangerRepo.uploadFamilyFileInCloud(
+                folderId = "f_school",
+                rawFileName = "חדירה.pdf",
+                rawExtension = "PDF",
+                rawBytes = pdfBytes,
+                targetFamilyId = familyIdA
+            )
+        }
+        assertTrue("Stranger from another family must be denied uploading to Family A", strangerUploadToFamilyA.isFailure)
+
+        val strangerDeleteFamilyAFile = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyIdA)
+                    .collection("files").document(parentDoc2.id)
+                    .delete().awaitTask()
+            }
+        }
+        assertTrue("Stranger from another family must be denied deleting Family A files", strangerDeleteFamilyAFile.isFailure)
+    }
+
     private val activeRepos = mutableListOf<FamilyRepository>()
 
     private fun repo(): FamilyRepository {
@@ -1504,6 +2496,7 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         }
     }
 }
+
 
 
 

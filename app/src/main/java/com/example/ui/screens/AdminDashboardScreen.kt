@@ -66,15 +66,7 @@ fun AdminDashboardScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                androidx.compose.ui.graphics.Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFFEBF3FE),
-                        Color(0xFFF7F9FD),
-                        Color.White
-                    )
-                )
-            )
+            .background(MaterialTheme.colorScheme.background)
             .testTag("admin_dashboard_screen"),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 110.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -82,7 +74,10 @@ fun AdminDashboardScreen(
         // Quick Screen Help Guide
         item {
             com.example.ui.components.ScreenHelpBanner(
-                title = if (isHebrew) "ניהול משפחה והרשאות (V1.6)" else "Family & Permissions Management (V1.6)",
+                title = if (isHebrew)
+                    "ניהול משפחה והרשאות (${com.example.util.AppVersionManager.displayVersionLabel})"
+                else
+                    "Family & Permissions Management (${com.example.util.AppVersionManager.displayVersionLabel})",
                 tips = if (isHebrew) listOf(
                     "שני תפקידים במשפחה: הורה (מנהל משפחה עם הרשאות מלאות) וילד/ה (צפייה וביצוע משימות אישיות).",
                     "הזמנת חברים: צרו קוד הזמנה ייחודי לתפקיד הורה או ילד/ה ושתפו אותו ב-WhatsApp ללא צורך באתר חיצוני.",
@@ -138,7 +133,10 @@ fun AdminDashboardScreen(
 
                             Column {
                                 Text(
-                                    text = if (isHebrew) "ניהול משפחה והרשאות • V1.6" else "Family Management • V1.6",
+                                    text = if (isHebrew)
+                                        "ניהול משפחה והרשאות • ${com.example.util.AppVersionManager.displayVersionLabel}"
+                                    else
+                                        "Family Management • ${com.example.util.AppVersionManager.displayVersionLabel}",
                                     style = MaterialTheme.typography.labelMedium.copy(
                                         color = Color.White.copy(alpha = 0.85f)
                                     )

@@ -1,6 +1,9 @@
 package com.example.ui.dialogs
 
-import android.content.Intent
+import android.graphics.BitmapFactory
+import android.util.Base64
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -9,415 +12,532 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.files.FamilyFileManagerHelper
+import com.example.model.DocumentFolder
 import com.example.model.FamilyDocument
-import com.example.ui.theme.*
+import com.example.model.FamilyMember
 
 @Composable
 fun FilePreviewDialog(
     file: FamilyDocument,
-    isHebrew: Boolean,
+    folder: DocumentFolder? = null,
+    uploader: FamilyMember? = null,
+    isHebrew: Boolean = true,
+    fileBytesProvider: (suspend (FamilyDocument) -> ByteArray?)? = null,
     onDismiss: () -> Unit,
-    onRename: (FamilyDocument) -> Unit,
-    onDelete: (FamilyDocument) -> Unit,
-    onShowToast: (String) -> Unit
+    onRename: (() -> Unit)? = null,
+    onMove: (() -> Unit)? = null,
+    onDelete: (() -> Unit)? = null,
+    onShowToast: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
-    var currentPage by remember { mutableIntStateOf(1) }
-    val totalPages = 3
-    var isZoomed by remember { mutableStateOf(false) }
+    val ext = file.extension.uppercase()
+    val isImage = ext in setOf("JPG", "JPEG", "PNG", "WEBP")
+    val isPdf = ext == "PDF"
 
-    val (badgeColor, bgColor) = when (file.extension.uppercase()) {
-        "PDF" -> GoogleRed to GoogleRedLight
-        "DOC", "DOCX" -> GoogleBlue to GoogleBlueLight
-        "PNG", "JPG", "JPEG" -> GoogleGreen to GoogleGreenLight
-        else -> GoogleYellowDark to GoogleYellowLight
+    var loadedBytes by remember(file.id) { mutableStateOf<ByteArray?>(null) }
+    var renderedBitmap by remember(file.id) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var isLoadingContent by remember(file.id) { mutableStateOf(true) }
+
+    LaunchedEffect(file.id) {
+        isLoadingContent = true
+        val fetched = runCatching { fileBytesProvider?.invoke(file) }.getOrNull()
+        loadedBytes = fetched
+        val cachedFile = runCatching {
+            FamilyFileManagerHelper.ensureLocalCacheFileForDocument(context, file, fetched)
+        }.getOrNull()
+
+        renderedBitmap = when {
+            isImage -> {
+                val raw = fetched ?: cachedFile?.readBytes()
+                raw?.let { bytes ->
+                    runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
+                } ?: file.thumbnailBase64?.takeIf { it.isNotBlank() }?.let { b64 ->
+                    runCatching {
+                        val decoded = Base64.decode(b64, Base64.DEFAULT)
+                        BitmapFactory.decodeByteArray(decoded, 0, decoded.size)
+                    }.getOrNull()
+                }
+            }
+            isPdf && cachedFile != null -> {
+                FamilyFileManagerHelper.renderPdfFirstPageBitmap(cachedFile)
+            }
+            else -> null
+        }
+        isLoadingContent = false
     }
 
-    val isImage = file.extension.uppercase() in listOf("JPG", "JPEG", "PNG", "WEBP")
-    val isPdf = file.extension.uppercase() == "PDF"
+    val typeColor = when (ext) {
+        "PDF" -> Color(0xFFEF4444)
+        "JPG", "PNG", "JPEG", "WEBP" -> Color(0xFF10B981)
+        "DOCX", "DOC", "TXT" -> Color(0xFF3B82F6)
+        "XLSX", "XLS" -> Color(0xFF059669)
+        "PPTX", "PPT" -> Color(0xFFD97706)
+        "ZIP" -> Color(0xFF7C3AED)
+        else -> Color(0xFF6366F1)
+    }
+
+    val uploaderDisplayName = uploader?.getDisplayName(isHebrew)?.takeIf { it.isNotBlank() }
+        ?: file.uploadedByName.ifBlank { if (isHebrew) "חבר משפחה" else "Family Member" }
 
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
-            shape = RoundedCornerShape(26.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 8.dp,
             modifier = Modifier
                 .fillMaxWidth(0.95f)
-                .fillMaxHeight(0.9f)
-                .padding(vertical = 12.dp)
-                .testTag("file_preview_dialog")
+                .fillMaxHeight(0.88f)
+                .testTag("file_preview_dialog"),
+            shape = RoundedCornerShape(28.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 8.dp
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(18.dp),
-                verticalArrangement = Arrangement.SpaceBetween
-            ) {
-                // Top Bar
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Header Bar
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(typeColor.copy(alpha = 0.1f))
+                        .padding(horizontal = 18.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.weight(1f)
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(38.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(bgColor),
+                                .size(42.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(typeColor.copy(alpha = 0.18f)),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = file.extension,
-                                fontWeight = FontWeight.Bold,
-                                color = badgeColor,
-                                fontSize = 11.sp
+                            Icon(
+                                imageVector = when {
+                                    isPdf -> Icons.Default.PictureAsPdf
+                                    isImage -> Icons.Default.Image
+                                    else -> Icons.Default.Description
+                                },
+                                contentDescription = ext,
+                                tint = typeColor,
+                                modifier = Modifier.size(24.dp)
                             )
                         }
-
-                        Column(modifier = Modifier.weight(1f)) {
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
                             Text(
                                 text = file.name,
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.Bold
-                                ),
-                                maxLines = 1
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "${file.sizeFormatted} • ${file.uploadDateFormatted} • Google Drive",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                text = "${folder?.getDisplayName(isHebrew) ?: (if (isHebrew) "תיקייה משותפת" else "Shared Folder")} • ${file.sizeFormatted} • $uploaderDisplayName",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
 
-                    IconButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (onMove != null) {
+                            IconButton(
+                                onClick = onMove,
+                                modifier = Modifier.testTag("preview_move_button")
+                            ) {
+                                Icon(
+                                    Icons.Default.DriveFileMove,
+                                    contentDescription = if (isHebrew) "העבר לתיקייה" else "Move to Folder"
+                                )
+                            }
+                        }
+                        if (onRename != null) {
+                            IconButton(
+                                onClick = onRename,
+                                modifier = Modifier.testTag("preview_rename_button")
+                            ) {
+                                Icon(
+                                    Icons.Default.Edit,
+                                    contentDescription = if (isHebrew) "שינוי שם" else "Rename"
+                                )
+                            }
+                        }
+                        if (onDelete != null) {
+                            IconButton(
+                                onClick = onDelete,
+                                modifier = Modifier.testTag("preview_delete_button")
+                            ) {
+                                Icon(
+                                    Icons.Default.DeleteOutline,
+                                    contentDescription = if (isHebrew) "מחיקה" else "Delete",
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                        IconButton(
+                            onClick = onDismiss,
+                            modifier = Modifier.testTag("close_preview_button")
+                        ) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = if (isHebrew) "סגור" else "Close"
+                            )
+                        }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // Document / Image Viewer Canvas Box
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = if (isImage) Color(0xFF0F172A) else Color(0xFFF8FAFC),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                // Main Document / Image Preview Area
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
                         .weight(1f)
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                        .border(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                            RoundedCornerShape(20.dp)
+                        )
+                        .verticalScroll(rememberScrollState())
+                        .padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    if (isImage) {
-                        // High Quality Image Document Viewer
+                    // Shared Google Drive FamilyTasks Badge
+                    Surface(
+                        shape = CircleShape,
+                        color = Color(0xFF10B981).copy(alpha = 0.14f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.CloudDone,
+                                contentDescription = null,
+                                tint = Color(0xFF059669),
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isHebrew) "Google Drive • תיקיית FamilyTasks משותפת" else "Google Drive • Shared FamilyTasks Folder",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = Color(0xFF059669)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    if (isLoadingContent) {
                         Box(
                             modifier = Modifier
-                                .fillMaxSize()
-                                .padding(12.dp),
+                                .fillMaxWidth()
+                                .height(260.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.Center
-                            ) {
-                                Surface(
-                                    shape = RoundedCornerShape(16.dp),
-                                    color = Color(0xFF1E293B),
-                                    shadowElevation = 6.dp,
-                                    border = androidx.compose.foundation.BorderStroke(2.dp, GoogleBlue.copy(alpha = 0.5f)),
-                                    modifier = Modifier
-                                        .fillMaxWidth(if (isZoomed) 0.98f else 0.88f)
-                                        .height(if (isZoomed) 290.dp else 230.dp)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .background(
-                                                androidx.compose.ui.graphics.Brush.verticalGradient(
-                                                    listOf(Color(0xFF1E293B), Color(0xFF0F172A))
-                                                )
-                                            ),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Column(
-                                            horizontalAlignment = Alignment.CenterHorizontally,
-                                            modifier = Modifier.padding(16.dp)
-                                        ) {
-                                            Surface(
-                                                shape = CircleShape,
-                                                color = GoogleBlueLight,
-                                                modifier = Modifier.size(64.dp)
-                                            ) {
-                                                Box(contentAlignment = Alignment.Center) {
-                                                    Text(text = "📸", fontSize = 32.sp)
-                                                }
-                                            }
-                                            Spacer(modifier = Modifier.height(10.dp))
-                                            Text(
-                                                text = file.name,
-                                                color = Color.White,
-                                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                                textAlign = TextAlign.Center,
-                                                maxLines = 2
-                                            )
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            Surface(
-                                                shape = RoundedCornerShape(8.dp),
-                                                color = GoogleGreen.copy(alpha = 0.2f)
-                                            ) {
-                                                Text(
-                                                    text = "✓ תמונה סרוקה • Google Drive • ${file.sizeFormatted}",
-                                                    color = GoogleGreenLight,
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-
-                                Spacer(modifier = Modifier.height(10.dp))
-
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    OutlinedButton(
-                                        onClick = { isZoomed = !isZoomed },
-                                        shape = RoundedCornerShape(10.dp),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = if (isZoomed) Icons.Default.ZoomOut else Icons.Default.ZoomIn,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(text = if (isZoomed) "הקטן תצוגה" else "הגדל זום", fontSize = 11.sp)
-                                    }
-
-                                    FilledTonalButton(
-                                        onClick = {
-                                            onShowToast(if (isHebrew) "תמונה נפתחה בתצוגה מלאה באיכות גבוהה! 🔍" else "Opened full screen image preview! 🔍")
-                                        },
-                                        shape = RoundedCornerShape(10.dp),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                                    ) {
-                                        Icon(imageVector = Icons.Default.Fullscreen, contentDescription = null, modifier = Modifier.size(14.dp))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(text = if (isHebrew) "מסך מלא" else "Fullscreen", fontSize = 11.sp)
-                                    }
-                                }
-                            }
+                            CircularProgressIndicator(strokeWidth = 3.dp)
                         }
-                    } else if (isPdf) {
-                        // PDF Document Viewer Mockup
-                        Column(
+                    } else if (isImage && renderedBitmap != null) {
+                        // Full-screen style crisp Image Viewer
+                        Surface(
                             modifier = Modifier
-                                .fillMaxSize()
-                                .padding(14.dp)
-                                .verticalScroll(rememberScrollState()),
-                            verticalArrangement = Arrangement.SpaceBetween
+                                .fillMaxWidth()
+                                .heightIn(min = 240.dp, max = 420.dp)
+                                .testTag("image_fullscreen_preview"),
+                            shape = RoundedCornerShape(16.dp),
+                            shadowElevation = 4.dp,
+                            color = Color.Black.copy(alpha = 0.9f)
                         ) {
-                            Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = Color.White,
-                                shadowElevation = 3.dp,
+                            Image(
+                                bitmap = renderedBitmap!!.asImageBitmap(),
+                                contentDescription = file.name,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Fit
+                            )
+                        }
+                    } else if (isPdf && renderedBitmap != null) {
+                        // Rendered PDF Document Viewer
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 280.dp, max = 460.dp)
+                                .testTag("pdf_document_preview"),
+                            shape = RoundedCornerShape(12.dp),
+                            shadowElevation = 4.dp,
+                            color = Color.White
+                        ) {
+                            Image(
+                                bitmap = renderedBitmap!!.asImageBitmap(),
+                                contentDescription = file.name,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(4.dp)
-                            ) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(16.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text(
-                                            text = "📄 ${file.name}",
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color.Black,
-                                            style = MaterialTheme.typography.titleSmall
-                                        )
-                                        Text(
-                                            text = "עמוד $currentPage מתוך $totalPages",
-                                            fontSize = 11.sp,
-                                            color = Color.Gray
-                                        )
-                                    }
-
-                                    Spacer(modifier = Modifier.height(10.dp))
-                                    HorizontalDivider(color = Color.LightGray)
-                                    Spacer(modifier = Modifier.height(10.dp))
-
-                                    Text(
-                                        text = when (currentPage) {
-                                            1 -> "פרק 1: הנחיות ואישורים רשמיים\n\nמסמך זה מאוחסן ומגובה בענן המשפחתי המאובטח.\nכל השינויים מסונכרנים ישירות עם Google Drive ומשותפים עם מנהלי הבית."
-                                            2 -> "פרק 2: פרטי התלמיד / בן המשפחה\n\nהועלה על ידי: ${file.uploadedByName}\nתאריך רישום: ${file.uploadDateFormatted}\nגודל קובץ: ${file.sizeFormatted}"
-                                            else -> "פרק 3: חתימת אישור ומעקב\n\nהמסמך מאומת ומוכן להדפסה, שיתוף והורדה בכל עת."
-                                        },
-                                        style = MaterialTheme.typography.bodySmall.copy(
-                                            color = Color(0xFF334155),
-                                            lineHeight = 20.sp
-                                        )
+                                    .padding(8.dp),
+                                contentScale = ContentScale.FillWidth
+                            )
+                        }
+                    } else if (isImage) {
+                        // Fallback vector photo canvas
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(240.dp)
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(
+                                    Brush.linearGradient(
+                                        listOf(Color(0xFF0EA5E9), Color(0xFF6366F1), Color(0xFFA855F7))
                                     )
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(8.dp))
-
-                            // Page controls
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.Center,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                TextButton(
-                                    onClick = { if (currentPage > 1) currentPage-- },
-                                    enabled = currentPage > 1
-                                ) {
-                                    Text("◀ עמוד קודם", fontSize = 12.sp)
-                                }
-
-                                Text(
-                                    text = "$currentPage / $totalPages",
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(horizontal = 12.dp)
                                 )
-
-                                TextButton(
-                                    onClick = { if (currentPage < totalPages) currentPage++ },
-                                    enabled = currentPage < totalPages
-                                ) {
-                                    Text("עמוד הבא ▶", fontSize = 12.sp)
-                                }
+                                .testTag("image_fullscreen_preview"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Canvas(modifier = Modifier.fillMaxSize()) {
+                                drawCircle(
+                                    color = Color.White.copy(alpha = 0.25f),
+                                    radius = size.minDimension * 0.18f,
+                                    center = Offset(size.width * 0.75f, size.height * 0.28f)
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(
+                                    Icons.Default.PhotoLibrary,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(56.dp)
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = file.name,
+                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = Color.White
+                                )
                             }
                         }
                     } else {
-                        // Word or other document
-                        Box(
+                        // Document / Office / Archive Sheet Preview
+                        Surface(
                             modifier = Modifier
-                                .fillMaxSize()
-                                .padding(16.dp),
-                            contentAlignment = Alignment.Center
+                                .fillMaxWidth()
+                                .testTag("document_sheet_preview"),
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            shadowElevation = 2.dp
                         ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(text = "📑", fontSize = 54.sp)
-                                Spacer(modifier = Modifier.height(10.dp))
+                            Column(modifier = Modifier.padding(18.dp)) {
                                 Text(
                                     text = file.name,
-                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                    color = typeColor
                                 )
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
                                 Text(
-                                    text = "קובץ מסמך Google Drive • ${file.sizeFormatted}",
-                                    style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    text = if (isHebrew) {
+                                        "פרטי קובץ משותף:\n" +
+                                            "• תיקייה: ${folder?.getDisplayName(true) ?: "כללי"}\n" +
+                                            "• הועלה על ידי: $uploaderDisplayName\n" +
+                                            "• תאריך העלאה: ${file.uploadDateFormatted.ifBlank { file.uploadedDateFormatted }}\n" +
+                                            "• סוג קובץ: $ext (${file.sizeFormatted})\n\n" +
+                                            "ניתן לפתוח קובץ זה בלחיצה אחת באמצעות אפליקציה תומכת במכשיר או לשתף אותו באופן מאובטח."
+                                    } else {
+                                        "Shared Family File Details:\n" +
+                                            "• Folder: ${folder?.getDisplayName(false) ?: "General"}\n" +
+                                            "• Uploaded by: $uploaderDisplayName\n" +
+                                            "• Date: ${file.uploadDateFormatted.ifBlank { file.uploadedDateFormatted }}\n" +
+                                            "• Format: $ext (${file.sizeFormatted})\n\n" +
+                                            "Open with an installed viewer app or share securely using Android Sharesheet."
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    lineHeight = 22.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Uploader & Date Metadata Pill
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surface
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(text = uploader?.avatarEmoji ?: "👤", fontSize = 20.sp)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = if (isHebrew) "הועלה ע\"י $uploaderDisplayName" else "Uploaded by $uploaderDisplayName",
+                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                    Text(
+                                        text = if (isHebrew) "תאריך: ${file.uploadDateFormatted.ifBlank { file.uploadedDateFormatted }}" else "Date: ${file.uploadDateFormatted.ifBlank { file.uploadedDateFormatted }}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = typeColor.copy(alpha = 0.12f)
+                            ) {
+                                Text(
+                                    text = "$ext • ${file.sizeFormatted}",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = typeColor,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                 )
                             }
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Bottom Action Buttons: Share, Download, Rename, Delete
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                // Bottom Action Bar: Download, Share (Sharesheet), Open External (ACTION_VIEW)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // Share Button
-                    Button(
-                        onClick = {
-                            val sendIntent = Intent().apply {
-                                action = Intent.ACTION_SEND
-                                putExtra(Intent.EXTRA_TEXT, "קובץ משפחתי מ-Family Hub: ${file.name}\nקישור דרייב: ${file.driveFileUrl}")
-                                type = "text/plain"
-                            }
-                            context.startActivity(Intent.createChooser(sendIntent, "שתף קובץ"))
-                        },
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = GoogleBlue),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("preview_share_btn")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(text = if (isHebrew) "שתף" else "Share", fontSize = 12.sp)
+                        OutlinedButton(
+                            onClick = {
+                                runCatching {
+                                    FamilyFileManagerHelper.ensureLocalCacheFileForDocument(context, file, loadedBytes)
+                                }
+                                onShowToast(
+                                    if (isHebrew) "הקובץ \"${file.name}\" נשמר במכשיר בהצלחה 📥"
+                                    else "Saved \"${file.name}\" to device 📥"
+                                )
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("preview_download_button"),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(if (isHebrew) "הורדה" else "Download", fontWeight = FontWeight.Bold)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                val res = FamilyFileManagerHelper.shareFileViaSharesheet(
+                                    context = context,
+                                    doc = file,
+                                    rawBytes = loadedBytes,
+                                    isHebrew = isHebrew
+                                )
+                                res.onFailure { err ->
+                                    onShowToast(err.localizedMessage ?: if (isHebrew) "שיתוף הקובץ נכשל" else "Share failed")
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("preview_share_button"),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(if (isHebrew) "שיתוף" else "Share", fontWeight = FontWeight.Bold)
+                        }
                     }
 
-                    // Download Button
-                    OutlinedButton(
-                        onClick = {
-                            onShowToast(if (isHebrew) "הקובץ ${file.name} נשמר בהצלחה למכשיר! 📥" else "File downloaded! 📥")
-                        },
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("preview_download_btn")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Icon(imageVector = Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(text = if (isHebrew) "הורד" else "Save", fontSize = 12.sp)
-                    }
+                        OutlinedButton(
+                            onClick = {
+                                val res = FamilyFileManagerHelper.openFileWithCompatibleEditor(
+                                    context = context,
+                                    doc = file,
+                                    rawBytes = loadedBytes,
+                                    isHebrew = isHebrew
+                                )
+                                res.onFailure { err ->
+                                    onShowToast(err.localizedMessage ?: if (isHebrew) "לא נמצאה אפליקציית עריכה תואמת" else "No compatible editor found")
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("preview_edit_button"),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Icon(Icons.Default.EditNote, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(if (isHebrew) "עריכה" else "Edit", fontWeight = FontWeight.Bold)
+                        }
 
-                    // Rename Button
-                    OutlinedButton(
-                        onClick = {
-                            onDismiss()
-                            onRename(file)
-                        },
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("preview_rename_btn")
-                    ) {
-                        Icon(imageVector = Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(text = if (isHebrew) "שנה שם" else "Rename", fontSize = 12.sp)
-                    }
+                        OutlinedButton(
+                            onClick = {
+                                val res = FamilyFileManagerHelper.openFileWithExternalApp(
+                                    context = context,
+                                    doc = file,
+                                    rawBytes = loadedBytes,
+                                    isHebrew = isHebrew
+                                )
+                                res.onFailure { err ->
+                                    onShowToast(err.localizedMessage ?: if (isHebrew) "לא נמצאה אפליקציה מתאימה לפתיחת הקובץ" else "No compatible app found")
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("preview_open_external_button"),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(if (isHebrew) "פתיחה בחוץ" else "Open", fontWeight = FontWeight.Bold)
+                        }
 
-                    // Delete Button
-                    OutlinedButton(
-                        onClick = {
-                            onDismiss()
-                            onDelete(file)
-                        },
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = GoogleRed),
-                        modifier = Modifier
-                            .weight(0.7f)
-                            .testTag("preview_delete_btn")
-                    ) {
-                        Icon(imageVector = Icons.Default.DeleteOutline, contentDescription = "Delete", modifier = Modifier.size(16.dp))
+                        Button(
+                            onClick = onDismiss,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("preview_done_button"),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(if (isHebrew) "סגור" else "Done", fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }

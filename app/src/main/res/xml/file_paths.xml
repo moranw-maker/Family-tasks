@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path
+        name="shared_family_files"
+        path="family_files/" />
+    <cache-path
+        name="camera_captures"
+        path="camera_captures/" />
+    <files-path
+        name="internal_family_files"
+        path="family_files/" />
+</paths>
