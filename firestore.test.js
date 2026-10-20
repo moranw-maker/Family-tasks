@@ -1599,5 +1599,160 @@ test("V1.0.0 FCM Push Security: Authenticated user can register/refresh/delete o
   );
 });
 
+test("Family Alarm Clock Ownership & Editing Permissions: Parent-for-Child, Child-for-Self, and Parent-for-Self", async () => {
+  const parentDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const childDb = testEnv.authenticatedContext(BOB_UID).firestore();
 
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const adminDb = context.firestore();
+    await adminDb.collection("families").doc("fam_alarms").set({
+      familyId: "fam_alarms",
+      familyName: "משפחת אלון",
+      ownerUid: ALICE_UID,
+      createdById: ALICE_UID,
+      adminUids: [ALICE_UID],
+      memberUids: [ALICE_UID, BOB_UID],
+      memberIds: [ALICE_UID, BOB_UID],
+    });
+    await adminDb.collection("families").doc("fam_alarms").collection("members").doc(ALICE_UID).set({
+      id: ALICE_UID,
+      uid: ALICE_UID,
+      familyId: "fam_alarms",
+      name: "אבא",
+      role: "PARENT",
+      earnedPoints: 0,
+    });
+    await adminDb.collection("families").doc("fam_alarms").collection("members").doc(BOB_UID).set({
+      id: BOB_UID,
+      uid: BOB_UID,
+      familyId: "fam_alarms",
+      name: "נועם",
+      role: "CHILD",
+      earnedPoints: 0,
+    });
+  });
 
+  // 1. Parent creates an alarm assigned to the Child (BOB_UID) -> SUCCEEDS
+  const parentForChildRef = parentDb.collection("families").doc("fam_alarms").collection("alarms").doc("alarm_parent_for_child");
+  await assertSucceeds(
+    parentForChildRef.set({
+      id: "alarm_parent_for_child",
+      familyId: "fam_alarms",
+      title: "השכמה לבית ספר",
+      hour: 7,
+      minute: 0,
+      createdByMemberId: ALICE_UID,
+      createdByRole: "PARENT",
+      assignedToMemberId: BOB_UID,
+      assignedMemberId: BOB_UID,
+      isEnabled: true,
+      soundType: "SYSTEM_ALARM",
+      volumePercent: 85,
+      snoozeDurationMinutes: 5,
+      scheduleStatus: "PENDING_TARGET_DEVICE",
+    })
+  );
+
+  // Child can read the alarm
+  const childViewOfParentAlarm = childDb.collection("families").doc("fam_alarms").collection("alarms").doc("alarm_parent_for_child");
+  await assertSucceeds(childViewOfParentAlarm.get());
+
+  // Child CANNOT edit time, disable, change volume/sound, or delete the parent-created alarm -> MUST FAIL
+  await assertFails(childViewOfParentAlarm.update({ isEnabled: false }));
+  await assertFails(childViewOfParentAlarm.update({ hour: 9, minute: 30 }));
+  await assertFails(childViewOfParentAlarm.update({ volumePercent: 10 }));
+  await assertFails(childViewOfParentAlarm.delete());
+
+  // Child's device CAN write local scheduling acknowledgement on the parent-created alarm assigned to that child -> SUCCEEDS
+  await assertSucceeds(
+    childViewOfParentAlarm.update({
+      scheduleStatus: "SCHEDULED_LOCALLY",
+      acknowledgedByMemberId: BOB_UID,
+      acknowledgedByDeviceName: "Pixel 8",
+      acknowledgedAtMillis: 1700000100000,
+      nextTriggerAtMillis: 1700050000000,
+      lastScheduleError: "",
+      updatedByUid: BOB_UID,
+      updatedAt: 1700000100000,
+    })
+  );
+
+  // Parent CAN edit, disable, and delete the parent-created child alarm -> SUCCEEDS
+  await assertSucceeds(parentForChildRef.update({ isEnabled: false, hour: 7, minute: 15 }));
+
+  // 2. Child creates their OWN alarm -> SUCCEEDS
+  const childOwnAlarmRef = childDb.collection("families").doc("fam_alarms").collection("alarms").doc("alarm_child_own");
+  await assertSucceeds(
+    childOwnAlarmRef.set({
+      id: "alarm_child_own",
+      familyId: "fam_alarms",
+      title: "אימון כדורסל",
+      hour: 16,
+      minute: 30,
+      createdByMemberId: BOB_UID,
+      createdByRole: "CHILD",
+      assignedToMemberId: BOB_UID,
+      assignedMemberId: BOB_UID,
+      isEnabled: true,
+      soundType: "SYSTEM_ALARM",
+      volumePercent: 80,
+      snoozeDurationMinutes: 5,
+      scheduleStatus: "SCHEDULED_LOCALLY",
+    })
+  );
+
+  // Child CAN edit, disable, and delete their own alarm -> SUCCEEDS
+  await assertSucceeds(childOwnAlarmRef.update({ minute: 45, isEnabled: false }));
+  // Parent CAN also edit, enable, and delete the child's alarm -> SUCCEEDS
+  await assertSucceeds(
+    parentDb.collection("families").doc("fam_alarms").collection("alarms").doc("alarm_child_own").update({
+      isEnabled: true,
+    })
+  );
+  await assertSucceeds(childOwnAlarmRef.delete());
+
+  // Child CANNOT create an alarm assigned to the Parent -> MUST FAIL
+  await assertFails(
+    childDb.collection("families").doc("fam_alarms").collection("alarms").doc("alarm_illegal_for_parent").set({
+      id: "alarm_illegal_for_parent",
+      familyId: "fam_alarms",
+      title: "השכמה לאבא",
+      hour: 5,
+      minute: 0,
+      createdByMemberId: BOB_UID,
+      createdByRole: "CHILD",
+      assignedToMemberId: ALICE_UID,
+      assignedMemberId: ALICE_UID,
+      isEnabled: true,
+    })
+  );
+
+  // 3. Parent creates their OWN personal alarm -> SUCCEEDS
+  const parentOwnAlarmRef = parentDb.collection("families").doc("fam_alarms").collection("alarms").doc("alarm_parent_own");
+  await assertSucceeds(
+    parentOwnAlarmRef.set({
+      id: "alarm_parent_own",
+      familyId: "fam_alarms",
+      title: "פגישת בוקר",
+      hour: 6,
+      minute: 30,
+      createdByMemberId: ALICE_UID,
+      createdByRole: "PARENT",
+      assignedToMemberId: ALICE_UID,
+      assignedMemberId: ALICE_UID,
+      isEnabled: true,
+      scheduleStatus: "SCHEDULED_LOCALLY",
+    })
+  );
+
+  // Child CANNOT modify, disable, delete, or acknowledge Parent's personal alarm -> MUST FAIL
+  const childViewOfParentOwn = childDb.collection("families").doc("fam_alarms").collection("alarms").doc("alarm_parent_own");
+  await assertFails(childViewOfParentOwn.update({ isEnabled: false }));
+  await assertFails(
+    childViewOfParentOwn.update({
+      scheduleStatus: "SCHEDULED_LOCALLY",
+      acknowledgedByMemberId: BOB_UID,
+    })
+  );
+  await assertFails(childViewOfParentOwn.delete());
+});

@@ -7,6 +7,7 @@ enum class AppScreen {
     HOME,
     CALENDAR,
     TIMETABLE,
+    ALARMS,
     FILES,
     AI_ASSISTANT,
     SETTINGS,
@@ -878,6 +879,7 @@ data class FamilyAlarm(
     val hour: Int,
     val minute: Int,
     val assignedMemberId: String = "",
+    val assignedToMemberId: String = assignedMemberId,
     val assignedMemberName: String = "",
     val daysOfWeek: List<SchoolDay> = listOf(
         SchoolDay.SUNDAY,
@@ -892,19 +894,32 @@ data class FamilyAlarm(
     val createdAtMillis: Long = System.currentTimeMillis(),
     val createdByMemberId: String = "",
     val createdByMemberName: String = "",
+    val createdByRole: String = "", // "PARENT" or "CHILD"
     val isPersonal: Boolean = false,
-    val soundType: String = "SYSTEM_ALARM", // SYSTEM_ALARM, SYSTEM_NOTIFICATION, SYSTEM_RINGTONE, CUSTOM_URI
+    val soundType: String = "SYSTEM_ALARM", // SYSTEM_ALARM, SYSTEM_NOTIFICATION, SYSTEM_RINGTONE, MELODY_CLASSIC, MELODY_GENTLE, MELODY_ENERGETIC, CUSTOM_URI
     val customSoundUri: String = "",
     val customSoundTitle: String = "",
     val vibrateEnabled: Boolean = true,
     val snoozeDurationMinutes: Int = 5,
     val volumePercent: Int = 85,
-    val scheduleStatus: String = "SCHEDULED_LOCALLY", // SCHEDULED_LOCALLY, PENDING_TARGET_DEVICE, EXACT_PERMISSION_NEEDED, DISABLED
+    val scheduleStatus: String = STATUS_PENDING_TARGET_DEVICE, // SCHEDULED_LOCALLY, PENDING_TARGET_DEVICE, EXACT_PERMISSION_NEEDED, SCHEDULE_ERROR, DISABLED
     val acknowledgedByMemberId: String = "",
     val acknowledgedByDeviceName: String = "",
     val acknowledgedAtMillis: Long = 0L,
-    val nextTriggerAtMillis: Long = 0L
+    val nextTriggerAtMillis: Long = 0L,
+    val lastScheduleError: String = ""
 ) {
+    companion object {
+        const val STATUS_SCHEDULED_LOCALLY = "SCHEDULED_LOCALLY"
+        const val STATUS_PENDING_TARGET_DEVICE = "PENDING_TARGET_DEVICE"
+        const val STATUS_EXACT_PERMISSION_NEEDED = "EXACT_PERMISSION_NEEDED"
+        const val STATUS_SCHEDULE_ERROR = "SCHEDULE_ERROR"
+        const val STATUS_DISABLED = "DISABLED"
+    }
+
+    val effectiveAssignedMemberId: String
+        get() = assignedToMemberId.ifBlank { assignedMemberId }
+
     val timeFormatted: String
         get() = String.format(java.util.Locale.US, "%02d:%02d", hour.coerceIn(0, 23), minute.coerceIn(0, 59))
 
@@ -913,9 +928,57 @@ data class FamilyAlarm(
 
     val isConfirmedOnTargetDevice: Boolean
         get() = isEnabled && (
-            scheduleStatus == "SCHEDULED_LOCALLY" &&
-                (assignedMemberId.isBlank() || acknowledgedByMemberId == assignedMemberId || isPersonal)
+            scheduleStatus == STATUS_SCHEDULED_LOCALLY &&
+                (effectiveAssignedMemberId.isBlank() || acknowledgedByMemberId == effectiveAssignedMemberId)
         )
+
+    /**
+     * Checks whether [member] (or [authUid]) has permission to edit, enable/disable, or delete this alarm:
+     * - PARENT can manage all alarms in the family (own, parent-created child alarms, and child-created alarms).
+     * - CHILD can ONLY edit/enable/disable/delete alarms that the child created for themselves.
+     * - Legacy alarms with blank/unknown `createdByMemberId` can only be modified by a PARENT (never guessed for a child).
+     */
+    fun canMemberModify(member: FamilyMember, authUid: String = ""): Boolean {
+        if (member.isParent) return true
+        if (createdByMemberId.isBlank()) return false
+        if (createdByRole.equals("PARENT", ignoreCase = true)) return false
+
+        val candidateIds = buildSet {
+            if (member.id.isNotBlank()) add(member.id)
+            if (authUid.isNotBlank()) add(authUid)
+        }
+        if (candidateIds.isEmpty()) return false
+
+        val isCreatedByThisChild = createdByMemberId in candidateIds
+        val targetId = effectiveAssignedMemberId
+        val isAssignedToThisChild = targetId.isNotBlank() && targetId in candidateIds
+        return isCreatedByThisChild && isAssignedToThisChild
+    }
+
+    fun canMemberDelete(member: FamilyMember, authUid: String = ""): Boolean =
+        canMemberModify(member, authUid)
+
+    /**
+     * Determines if this alarm should ring on the device belonging to [memberId] / [authUid]:
+     * - Parent-created alarm for child -> rings ONLY on that child's device.
+     * - Child-created alarm for self -> rings ONLY on that child's device.
+     * - Parent-created alarm for self -> rings ONLY on that parent's device.
+     */
+    fun isTargetedAtDeviceMember(memberId: String, authUid: String = ""): Boolean {
+        val candidateIds = buildSet {
+            if (memberId.isNotBlank()) add(memberId)
+            if (authUid.isNotBlank()) add(authUid)
+        }
+        if (candidateIds.isEmpty()) return false
+        val targetId = effectiveAssignedMemberId
+        return if (targetId.isNotBlank()) {
+            targetId in candidateIds
+        } else {
+            // Legacy alarm without explicit target: ring only on creator's device if known
+            createdByMemberId.isNotBlank() && createdByMemberId in candidateIds
+        }
+    }
 }
+
 
 

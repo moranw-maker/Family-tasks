@@ -128,6 +128,45 @@ service cloud.firestore {
         && request.resource.data.get('spentPoints', 0) <= resource.data.get('earnedPoints', 0);
     }
 
+    // Alarm ownership & target-device acknowledgement helpers
+    function alarmTargetMemberId(data) {
+      return data.get('assignedToMemberId', '') != ''
+        ? data.get('assignedToMemberId', '')
+        : data.get('assignedMemberId', '');
+    }
+
+    function isChildOwnAlarmCreate() {
+      return request.resource.data.get('createdByMemberId', '') == request.auth.uid
+        && request.resource.data.get('createdByRole', 'CHILD') != 'PARENT'
+        && alarmTargetMemberId(request.resource.data) == request.auth.uid;
+    }
+
+    function isChildOwnAlarmRecord() {
+      return resource.data.get('createdByMemberId', '') == request.auth.uid
+        && resource.data.get('createdByRole', 'CHILD') != 'PARENT'
+        && alarmTargetMemberId(resource.data) == request.auth.uid;
+    }
+
+    // Allows the assigned child's device to update ONLY local scheduling acknowledgement fields
+    // on a parent-created alarm assigned to that child, without modifying time, enabled state, sound, or recurrence.
+    function isChildTargetDeviceAckOnly() {
+      let changedKeys = request.resource.data.diff(resource.data).affectedKeys();
+      return alarmTargetMemberId(resource.data) == request.auth.uid
+        && changedKeys.hasOnly([
+          'scheduleStatus',
+          'acknowledgedByMemberId',
+          'acknowledgedByDeviceName',
+          'acknowledgedAtMillis',
+          'nextTriggerAtMillis',
+          'lastScheduleError',
+          'updatedByUid',
+          'updatedAt',
+          'updatedAtMillis'
+        ])
+        && request.resource.data.get('acknowledgedByMemberId', '') == request.auth.uid
+        && (!('updatedByUid' in request.resource.data) || request.resource.data.updatedByUid == request.auth.uid);
+    }
+
     // Validates invitation-based membership creation in /families/{familyId}/members/{uid}:
     // - /family_invites/{inviteCode} must exist, belong to {familyId}, and be unused/unrevoked/unexpired
     // - If invitedRole is present on the invite, the member's role must match it (otherwise must be a child role)
@@ -435,10 +474,42 @@ service cloud.firestore {
 
       // -----------------------------------------------------------------------
       // 2e-2. Family Alarm Clock (/families/{familyId}/alarms/{alarmId})
+      // - Parent can create/edit/enable/disable/delete any family alarm (own, child's, or child-created).
+      // - Child can create/edit/enable/disable/delete ONLY alarms created by that child for themselves.
+      // - Child can write local scheduling acknowledgement fields ONLY on parent-created alarms assigned to that child.
+      // - Child cannot edit, disable, delete, or acknowledge a parent's personal alarm.
       // -----------------------------------------------------------------------
       match /alarms/{alarmId} {
         allow get, list: if isFamilyMember(familyId);
-        allow create, update, delete: if isFamilyMember(familyId);
+
+        allow create: if (
+          isParent(familyId)
+          && request.resource.data.get('createdByMemberId', request.auth.uid) == request.auth.uid
+          && request.resource.data.get('title', '') is string
+          && request.resource.data.get('title', '').size() > 0
+        ) || (
+          isChild(familyId)
+          && isChildOwnAlarmCreate()
+          && request.resource.data.get('title', '') is string
+          && request.resource.data.get('title', '').size() > 0
+        );
+
+        allow update: if isParent(familyId)
+          || (
+            isChild(familyId)
+            && isChildOwnAlarmRecord()
+            && isChildOwnAlarmCreate()
+          )
+          || (
+            isChild(familyId)
+            && isChildTargetDeviceAckOnly()
+          );
+
+        allow delete: if isParent(familyId)
+          || (
+            isChild(familyId)
+            && isChildOwnAlarmRecord()
+          );
       }
 
       // -----------------------------------------------------------------------

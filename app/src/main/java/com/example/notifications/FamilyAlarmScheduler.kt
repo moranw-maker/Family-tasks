@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import com.example.MainActivity
 import com.example.model.FamilyAlarm
@@ -18,14 +19,19 @@ data class LocalAlarmScheduleResult(
     val isScheduled: Boolean,
     val isExact: Boolean,
     val nextTriggerAtMillis: Long,
-    val statusCode: String // "SCHEDULED_LOCALLY", "EXACT_PERMISSION_NEEDED", "DISABLED"
+    val statusCode: String, // "SCHEDULED_LOCALLY", "EXACT_PERMISSION_NEEDED", "SCHEDULE_ERROR", "DISABLED"
+    val errorMessage: String = ""
 )
 
 /**
  * Local Android AlarmManager scheduler for FamilyTasks alarms.
  *
- * - Supports personal alarms and parent-created alarms assigned to children.
- * - Schedules real Android alarms on the target member's device via [AlarmManager].
+ * - Enforces strict target-device routing:
+ *   - Parent-created alarm for a child rings ONLY on that child's device.
+ *   - Child-created alarm for self rings ONLY on that child's device.
+ *   - Parent-created alarm for self rings ONLY on that parent's device.
+ * - Schedules real Android alarms on the target member's device via [AlarmManager.setAlarmClock] /
+ *   [AlarmManager.setExactAndAllowWhileIdle].
  * - Respects Android 12+ (API 31+) exact-alarm permissions ([AlarmManager.canScheduleExactAlarms]).
  * - Persists active device alarms locally so [FamilyAlarmBootReceiver] restores them after device reboot.
  */
@@ -52,20 +58,31 @@ object FamilyAlarmScheduler {
     const val EXTRA_IS_SNOOZE_TRIGGER = "extra_is_snooze_trigger"
 
     /**
-     * Checks whether this alarm is targeted at the current device's active member.
-     * - If `assignedMemberId` is blank ("Whole Family"), every family member's device schedules it.
-     * - If `assignedMemberId` matches `currentMemberId`, this device is the target device and schedules it.
-     * - If `isPersonal` and created by `currentMemberId`, this device schedules it.
-     * - Otherwise (e.g., parent created an alarm specifically for a child's `assignedMemberId`),
-     *   the parent's device does NOT schedule it locally; it waits for the child's device to schedule and acknowledge it.
+     * Checks whether [alarm] should be scheduled locally on the device belonging to
+     * [currentMemberId] / [currentAuthUid].
+     *
+     * Rules:
+     * 1. Disabled alarms are never scheduled.
+     * 2. If the alarm specifies an assigned member (`assignedToMemberId` / `assignedMemberId`),
+     *    it is scheduled ONLY if this device belongs to that assigned member.
+     * 3. If the alarm has no explicit assigned member, it is scheduled only on its creator's device.
      */
-    fun shouldScheduleOnDevice(alarm: FamilyAlarm, currentMemberId: String): Boolean {
+    fun shouldScheduleOnDevice(
+        alarm: FamilyAlarm,
+        currentMemberId: String,
+        currentAuthUid: String = ""
+    ): Boolean {
         if (!alarm.isEnabled) return false
-        if (currentMemberId.isBlank()) return true
-        if (alarm.assignedMemberId.isBlank()) return true
-        if (alarm.assignedMemberId == currentMemberId) return true
-        if (alarm.isPersonal && alarm.createdByMemberId == currentMemberId) return true
-        return false
+        if (currentMemberId.isBlank() && currentAuthUid.isBlank()) return false
+
+        val targetId = alarm.effectiveAssignedMemberId
+        if (targetId.isBlank() && alarm.createdByMemberId.isBlank()) {
+            return true
+        }
+        return alarm.isTargetedAtDeviceMember(
+            memberId = currentMemberId,
+            authUid = currentAuthUid
+        )
     }
 
     fun canScheduleExactAlarms(context: Context): Boolean {
@@ -77,11 +94,31 @@ object FamilyAlarmScheduler {
         }
     }
 
+    fun isIgnoringBatteryOptimizations(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return true
+            runCatching { pm.isIgnoringBatteryOptimizations(context.packageName) }.getOrDefault(true)
+        } else {
+            true
+        }
+    }
+
     fun openExactAlarmPermissionSettings(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             runCatching {
                 val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
                     data = Uri.parse("package:${context.packageName}")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            }
+        }
+    }
+
+    fun openBatteryOptimizationSettings(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            runCatching {
+                val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 context.startActivity(intent)
@@ -115,14 +152,14 @@ object FamilyAlarmScheduler {
             }
             val dayOfWeek = candidate.get(Calendar.DAY_OF_WEEK)
             val matchesDay = allowedCalendarDays.isEmpty() || dayOfWeek in allowedCalendarDays
-            if (matchesDay && candidate.timeInMillis > nowMillis + 2_000L) {
+            if (matchesDay && candidate.timeInMillis > nowMillis + 1_000L) {
                 return candidate.timeInMillis
             }
         }
 
         // Fallback: tomorrow at the specified hour/minute
         return cal.apply {
-            if (timeInMillis <= nowMillis + 2_000L) {
+            if (timeInMillis <= nowMillis + 1_000L) {
                 add(Calendar.DAY_OF_YEAR, 1)
             }
         }.timeInMillis
@@ -142,7 +179,7 @@ object FamilyAlarmScheduler {
                 isScheduled = false,
                 isExact = false,
                 nextTriggerAtMillis = 0L,
-                statusCode = "DISABLED"
+                statusCode = FamilyAlarm.STATUS_DISABLED
             )
         }
 
@@ -151,7 +188,8 @@ object FamilyAlarmScheduler {
                 isScheduled = false,
                 isExact = false,
                 nextTriggerAtMillis = 0L,
-                statusCode = "PENDING_TARGET_DEVICE"
+                statusCode = FamilyAlarm.STATUS_SCHEDULE_ERROR,
+                errorMessage = "AlarmManager service unavailable"
             )
 
         val triggerAtMillis = computeNextTriggerAtMillis(alarm, nowMillis)
@@ -159,6 +197,7 @@ object FamilyAlarmScheduler {
         val canExact = canScheduleExactAlarms(context)
 
         var scheduledExact = false
+        var lastErr = ""
         val scheduledSuccessfully = runCatching {
             if (canExact) {
                 val showIntent = Intent(context, MainActivity::class.java).apply {
@@ -183,7 +222,8 @@ object FamilyAlarmScheduler {
                 scheduledExact = false
             }
             true
-        }.getOrElse {
+        }.getOrElse { err ->
+            lastErr = err.localizedMessage ?: "Exact schedule error"
             runCatching {
                 alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
                 scheduledExact = false
@@ -192,16 +232,17 @@ object FamilyAlarmScheduler {
         }
 
         val statusCode = when {
-            !scheduledSuccessfully -> "PENDING_TARGET_DEVICE"
-            scheduledExact -> "SCHEDULED_LOCALLY"
-            else -> "EXACT_PERMISSION_NEEDED"
+            !scheduledSuccessfully -> FamilyAlarm.STATUS_SCHEDULE_ERROR
+            scheduledExact -> FamilyAlarm.STATUS_SCHEDULED_LOCALLY
+            else -> FamilyAlarm.STATUS_EXACT_PERMISSION_NEEDED
         }
 
         return LocalAlarmScheduleResult(
             isScheduled = scheduledSuccessfully,
             isExact = scheduledExact,
             nextTriggerAtMillis = if (scheduledSuccessfully) triggerAtMillis else 0L,
-            statusCode = statusCode
+            statusCode = statusCode,
+            errorMessage = if (scheduledSuccessfully) "" else lastErr
         )
     }
 
@@ -236,7 +277,21 @@ object FamilyAlarmScheduler {
         val pendingIntent = buildTriggerPendingIntent(context, tempAlarm, isSnooze = true)
         runCatching {
             if (canScheduleExactAlarms(context)) {
-                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
+                val showIntent = Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
+                val showPendingIntent = PendingIntent.getActivity(
+                    context,
+                    requestCodeForAlarm(alarmId, 11),
+                    showIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                try {
+                    val clockInfo = AlarmManager.AlarmClockInfo(triggerAtMillis, showPendingIntent)
+                    alarmManager.setAlarmClock(clockInfo, pendingIntent)
+                } catch (_: SecurityException) {
+                    alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
+                }
             } else {
                 alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
             }
@@ -245,9 +300,12 @@ object FamilyAlarmScheduler {
     }
 
     /**
-     * Cancels a previously scheduled local alarm and any pending snooze for [alarmId].
+     * Cancels a previously scheduled local alarm, any pending snooze, and any active ringing for [alarmId].
      */
     fun cancelLocalAlarm(context: Context, alarmId: String) {
+        if (FamilyAlarmRingingService.activeRingingAlarm.value?.alarmId == alarmId) {
+            FamilyAlarmRingingService.dismissActiveAlarm(context, alarmId)
+        }
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
         runCatching {
             val intent = Intent(context, FamilyAlarmReceiver::class.java).apply {
@@ -261,6 +319,7 @@ object FamilyAlarmScheduler {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             alarmManager.cancel(pi)
+            pi.cancel()
 
             val snoozeIntent = Intent(context, FamilyAlarmReceiver::class.java).apply {
                 action = ACTION_TRIGGER_FAMILY_ALARM
@@ -273,20 +332,22 @@ object FamilyAlarmScheduler {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             alarmManager.cancel(snoozePi)
+            snoozePi.cancel()
         }
     }
 
     /**
      * Synchronizes all alarms for the current device member:
-     * - Registers enabled alarms assigned to `currentMemberId` (or whole family) in [AlarmManager].
-     * - Cancels alarms that were disabled, deleted, or reassigned to another member.
+     * - Registers enabled alarms targeted at `currentMemberId` / `currentAuthUid` in [AlarmManager].
+     * - Cancels alarms that were disabled, deleted, or assigned to a different member.
      * - Persists the active alarms list locally so [FamilyAlarmBootReceiver] can restore them on reboot.
      * - Returns a map of `alarmId -> LocalAlarmScheduleResult` for alarms that belong to this device.
      */
     fun syncAlarmsForCurrentDevice(
         context: Context,
         alarms: List<FamilyAlarm>,
-        currentMemberId: String
+        currentMemberId: String,
+        currentAuthUid: String = ""
     ): Map<String, LocalAlarmScheduleResult> {
         val previousAlarms = loadPersistedAlarms(context)
         val currentIds = alarms.map { it.id }.toSet()
@@ -302,7 +363,7 @@ object FamilyAlarmScheduler {
         val alarmsForThisDevice = mutableListOf<FamilyAlarm>()
 
         alarms.forEach { alarm ->
-            if (shouldScheduleOnDevice(alarm, currentMemberId)) {
+            if (shouldScheduleOnDevice(alarm, currentMemberId, currentAuthUid)) {
                 val res = scheduleLocalAlarm(context, alarm)
                 results[alarm.id] = res
                 if (res.isScheduled) {
@@ -313,7 +374,8 @@ object FamilyAlarmScheduler {
             }
         }
 
-        persistAlarmsForBootRestore(context, alarmsForThisDevice, currentMemberId)
+        val effectiveMemberId = currentAuthUid.ifBlank { currentMemberId }
+        persistAlarmsForBootRestore(context, alarmsForThisDevice, effectiveMemberId)
         return results
     }
 
@@ -390,8 +452,12 @@ object FamilyAlarmScheduler {
                     put("title", alarm.title)
                     put("hour", alarm.hour)
                     put("minute", alarm.minute)
-                    put("assignedMemberId", alarm.assignedMemberId)
+                    put("assignedMemberId", alarm.effectiveAssignedMemberId)
+                    put("assignedToMemberId", alarm.effectiveAssignedMemberId)
                     put("assignedMemberName", alarm.assignedMemberName)
+                    put("createdByMemberId", alarm.createdByMemberId)
+                    put("createdByMemberName", alarm.createdByMemberName)
+                    put("createdByRole", alarm.createdByRole)
                     put("daysOfWeek", alarm.daysOfWeek.joinToString(",") { it.name })
                     put("isEnabled", alarm.isEnabled)
                     put("ringtoneEmoji", alarm.ringtoneEmoji)
@@ -436,6 +502,9 @@ object FamilyAlarmScheduler {
                             SchoolDay.FRIDAY
                         )
                     }
+                val assignedId = obj.optString("assignedToMemberId", "").ifBlank {
+                    obj.optString("assignedMemberId", "")
+                }
                 list.add(
                     FamilyAlarm(
                         id = obj.optString("id"),
@@ -443,12 +512,16 @@ object FamilyAlarmScheduler {
                         title = obj.optString("title", "שעון מעורר"),
                         hour = obj.optInt("hour", 7),
                         minute = obj.optInt("minute", 0),
-                        assignedMemberId = obj.optString("assignedMemberId", ""),
+                        assignedMemberId = assignedId,
+                        assignedToMemberId = assignedId,
                         assignedMemberName = obj.optString("assignedMemberName", ""),
+                        createdByMemberId = obj.optString("createdByMemberId", ""),
+                        createdByMemberName = obj.optString("createdByMemberName", ""),
+                        createdByRole = obj.optString("createdByRole", ""),
                         daysOfWeek = days,
                         isEnabled = obj.optBoolean("isEnabled", true),
                         ringtoneEmoji = obj.optString("ringtoneEmoji", "⏰"),
-                        soundType = obj.optString("soundType", "SYSTEM_ALARM"),
+                        soundType = obj.optString("soundType", AlarmAudioController.SOUND_MELODY_ENERGETIC),
                         customSoundUri = obj.optString("customSoundUri", ""),
                         customSoundTitle = obj.optString("customSoundTitle", ""),
                         vibrateEnabled = obj.optBoolean("vibrateEnabled", true),

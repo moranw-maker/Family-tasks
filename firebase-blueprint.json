@@ -154,6 +154,29 @@
         "chunkCount": { "type": "integer", "description": "Number of binary payload chunks in subcollection" }
       },
       "required": ["id", "familyId", "folderId", "name", "extension", "sizeBytes", "uploadedByUid"]
+    },
+    "FamilyAlarm": {
+      "title": "FamilyAlarm",
+      "description": "Shared family alarm clock entry with ownership, target device assignment, and device acknowledgement",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique alarm ID" },
+        "familyId": { "type": "string", "description": "Owning family ID" },
+        "title": { "type": "string", "description": "Alarm label" },
+        "hour": { "type": "integer", "description": "24-hour alarm hour (0-23)" },
+        "minute": { "type": "integer", "description": "Alarm minute (0-59)" },
+        "createdByMemberId": { "type": "string", "description": "UID/memberId of the creator (Parent or Child)" },
+        "createdByRole": { "type": "string", "enum": ["PARENT", "CHILD"], "description": "Role of the creator" },
+        "assignedToMemberId": { "type": "string", "description": "UID/memberId of the target family member whose device rings" },
+        "assignedMemberId": { "type": "string", "description": "Mirror field for target family member ID" },
+        "isEnabled": { "type": "boolean", "description": "Whether the alarm is enabled" },
+        "soundType": { "type": "string", "description": "Selected alarm tone type" },
+        "volumePercent": { "type": "integer", "description": "Alarm volume percentage (10-100)" },
+        "snoozeDurationMinutes": { "type": "integer", "description": "Snooze duration in minutes" },
+        "scheduleStatus": { "type": "string", "description": "Target device scheduling status" },
+        "acknowledgedByMemberId": { "type": "string", "description": "UID of the target member device that registered the alarm" }
+      },
+      "required": ["id", "familyId", "title", "hour", "minute", "createdByMemberId", "assignedToMemberId", "isEnabled"]
     }
   },
   "firestore": {
@@ -188,6 +211,11 @@
     "/families/{familyId}/files/{fileId}": {
       "schema": { "$ref": "#/entities/FamilyDocument" },
       "description": "Shared family file metadata"
+    },
+    "/families/{familyId}/alarms/{alarmId}": {
+      "schema": { "$ref": "#/entities/FamilyAlarm" },
+      "description": "Shared family alarms with ownership and target-device scheduling acknowledgement"
     }
   }
 }
+

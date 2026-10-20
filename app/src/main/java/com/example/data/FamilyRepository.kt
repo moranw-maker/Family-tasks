@@ -3485,13 +3485,25 @@ class FamilyRepository(
                 .addSnapshotListener { snapshot, error ->
                     if (error != null || snapshot == null) return@addSnapshotListener
                     val currentMemberId = _currentMember.value.id
+                    val authUid = authProvider()?.currentUser?.uid.orEmpty()
+                    val effectiveDeviceMemberId = authUid.ifBlank { currentMemberId }
                     val deviceModelLabel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
                     val remoteAlarms = snapshot.documents.mapNotNull { doc ->
                         val title = doc.getString("title") ?: return@mapNotNull null
                         val hour = (doc.getLong("hour") ?: 7L).toInt().coerceIn(0, 23)
                         val minute = (doc.getLong("minute") ?: 0L).toInt().coerceIn(0, 59)
-                        val assignedMemberId = doc.getString("assignedMemberId").orEmpty()
+                        val assignedToId = doc.getString("assignedToMemberId")
+                            ?.takeIf { it.isNotBlank() }
+                            ?: doc.getString("assignedMemberId").orEmpty()
                         val assignedMemberName = doc.getString("assignedMemberName").orEmpty()
+                        val createdById = doc.getString("createdByMemberId").orEmpty()
+                        val createdByName = doc.getString("createdByMemberName").orEmpty()
+                        val rawCreatedByRole = doc.getString("createdByRole").orEmpty()
+                        // Safe migration of missing createdByRole only when creator is a known member in _members
+                        val migratedCreatedByRole = rawCreatedByRole.ifBlank {
+                            val creatorMember = _members.value.find { it.id == createdById }
+                            creatorMember?.role?.toFirestoreValue().orEmpty()
+                        }
                         val rawDays = (doc.get("daysOfWeek") as? List<*>)?.mapNotNull { d ->
                             (d as? String)?.let { runCatching { SchoolDay.valueOf(it) }.getOrNull() }
                         } ?: SchoolDay.entries
@@ -3503,26 +3515,29 @@ class FamilyRepository(
                             title = title,
                             hour = hour,
                             minute = minute,
-                            assignedMemberId = assignedMemberId,
+                            assignedMemberId = assignedToId,
+                            assignedToMemberId = assignedToId,
                             assignedMemberName = assignedMemberName,
                             daysOfWeek = rawDays,
                             isEnabled = isEnabled,
                             ringtoneEmoji = emoji,
                             createdAtMillis = doc.getLong("createdAtMillis") ?: 0L,
-                            createdByMemberId = doc.getString("createdByMemberId").orEmpty(),
-                            createdByMemberName = doc.getString("createdByMemberName").orEmpty(),
-                            isPersonal = doc.getBoolean("isPersonal") ?: false,
-                            soundType = doc.getString("soundType") ?: "SYSTEM_ALARM",
+                            createdByMemberId = createdById,
+                            createdByMemberName = createdByName,
+                            createdByRole = migratedCreatedByRole,
+                            isPersonal = doc.getBoolean("isPersonal") ?: (assignedToId.isNotBlank() && assignedToId == createdById),
+                            soundType = doc.getString("soundType") ?: "MELODY_ENERGETIC",
                             customSoundUri = doc.getString("customSoundUri").orEmpty(),
                             customSoundTitle = doc.getString("customSoundTitle").orEmpty(),
                             vibrateEnabled = doc.getBoolean("vibrateEnabled") ?: true,
                             snoozeDurationMinutes = (doc.getLong("snoozeDurationMinutes") ?: 5L).toInt().coerceIn(1, 60),
                             volumePercent = (doc.getLong("volumePercent") ?: 85L).toInt().coerceIn(10, 100),
-                            scheduleStatus = doc.getString("scheduleStatus") ?: if (isEnabled) "SCHEDULED_LOCALLY" else "DISABLED",
+                            scheduleStatus = doc.getString("scheduleStatus") ?: if (isEnabled) FamilyAlarm.STATUS_SCHEDULED_LOCALLY else FamilyAlarm.STATUS_DISABLED,
                             acknowledgedByMemberId = doc.getString("acknowledgedByMemberId").orEmpty(),
                             acknowledgedByDeviceName = doc.getString("acknowledgedByDeviceName").orEmpty(),
                             acknowledgedAtMillis = doc.getLong("acknowledgedAtMillis") ?: 0L,
-                            nextTriggerAtMillis = doc.getLong("nextTriggerAtMillis") ?: 0L
+                            nextTriggerAtMillis = doc.getLong("nextTriggerAtMillis") ?: 0L,
+                            lastScheduleError = doc.getString("lastScheduleError").orEmpty()
                         )
                     }.sortedWith(compareBy({ it.hour }, { it.minute }))
 
@@ -3531,23 +3546,25 @@ class FamilyRepository(
                         val localResults = com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
                             context = ctx,
                             alarms = remoteAlarms,
-                            currentMemberId = currentMemberId
+                            currentMemberId = currentMemberId,
+                            currentAuthUid = authUid
                         )
                         remoteAlarms.map { alarm ->
                             val localRes = localResults[alarm.id]
                             if (localRes != null && localRes.isScheduled) {
                                 val needsAckWrite = alarm.scheduleStatus != localRes.statusCode ||
-                                    (alarm.assignedMemberId.isNotBlank() && alarm.acknowledgedByMemberId != currentMemberId)
+                                    alarm.acknowledgedByMemberId != effectiveDeviceMemberId
                                 val updatedAlarm = alarm.copy(
                                     scheduleStatus = localRes.statusCode,
-                                    acknowledgedByMemberId = currentMemberId.ifBlank { alarm.acknowledgedByMemberId },
+                                    acknowledgedByMemberId = effectiveDeviceMemberId.ifBlank { alarm.acknowledgedByMemberId },
                                     acknowledgedByDeviceName = deviceModelLabel,
                                     acknowledgedAtMillis = if (alarm.acknowledgedAtMillis > 0L && !needsAckWrite) {
                                         alarm.acknowledgedAtMillis
                                     } else {
                                         System.currentTimeMillis()
                                     },
-                                    nextTriggerAtMillis = localRes.nextTriggerAtMillis
+                                    nextTriggerAtMillis = localRes.nextTriggerAtMillis,
+                                    lastScheduleError = localRes.errorMessage
                                 )
                                 if (needsAckWrite) {
                                     acknowledgeAlarmOnTargetDeviceInFirestore(familyId, updatedAlarm)
@@ -5141,55 +5158,87 @@ class FamilyRepository(
 
     fun addOrUpdateFamilyAlarm(alarm: FamilyAlarm): Boolean {
         val current = _currentMember.value
+        val authUid = authProvider()?.currentUser?.uid.orEmpty()
+        val effectiveCallerId = authUid.ifBlank { current.id }
+
+        val existing = _familyAlarms.value.find { it.id == alarm.id }
+        if (existing != null && !existing.canMemberModify(current, authUid)) {
+            return false
+        }
+
+        val resolvedCreatedById = existing?.createdByMemberId?.takeIf { it.isNotBlank() }
+            ?: alarm.createdByMemberId.takeIf { it.isNotBlank() }
+            ?: effectiveCallerId
+        val resolvedCreatedByName = existing?.createdByMemberName?.takeIf { it.isNotBlank() }
+            ?: alarm.createdByMemberName.takeIf { it.isNotBlank() }
+            ?: current.name
+        val resolvedCreatedByRole = existing?.createdByRole?.takeIf { it.isNotBlank() }
+            ?: alarm.createdByRole.takeIf { it.isNotBlank() }
+            ?: current.role.toFirestoreValue()
+
+        // Child can only create/assign alarms for themselves
+        val requestedTargetId = alarm.effectiveAssignedMemberId.ifBlank { effectiveCallerId }
+        val resolvedTargetId = if (!current.isParent) {
+            effectiveCallerId
+        } else {
+            requestedTargetId
+        }
+        val resolvedTargetName = _members.value.find { it.id == resolvedTargetId }?.name
+            ?: alarm.assignedMemberName.takeIf { it.isNotBlank() }
+            ?: current.name
+
         val deviceModelLabel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
-        val isTargetedToAnotherMember = alarm.assignedMemberId.isNotBlank() && alarm.assignedMemberId != current.id
+        val isTargetedToAnotherMember = resolvedTargetId.isNotBlank() &&
+            resolvedTargetId != current.id &&
+            (authUid.isBlank() || resolvedTargetId != authUid)
+
+        val normalizedInput = alarm.copy(
+            familyId = _activeFamilyId.value,
+            hour = alarm.hour.coerceIn(0, 23),
+            minute = alarm.minute.coerceIn(0, 59),
+            assignedMemberId = resolvedTargetId,
+            assignedToMemberId = resolvedTargetId,
+            assignedMemberName = resolvedTargetName,
+            createdByMemberId = resolvedCreatedById,
+            createdByMemberName = resolvedCreatedByName,
+            createdByRole = resolvedCreatedByRole,
+            isPersonal = resolvedTargetId == resolvedCreatedById
+        )
 
         val scheduledAlarm = when {
-            !alarm.isEnabled -> {
-                appContext?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, alarm.id) }
-                alarm.copy(
-                    familyId = _activeFamilyId.value,
-                    hour = alarm.hour.coerceIn(0, 23),
-                    minute = alarm.minute.coerceIn(0, 59),
-                    scheduleStatus = "DISABLED",
+            !normalizedInput.isEnabled -> {
+                appContext?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, normalizedInput.id) }
+                normalizedInput.copy(
+                    scheduleStatus = FamilyAlarm.STATUS_DISABLED,
                     nextTriggerAtMillis = 0L
                 )
             }
             isTargetedToAnotherMember -> {
-                // Created/updated by parent for a child's device: do NOT claim local scheduling succeeded on child's device yet!
-                appContext?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, alarm.id) }
-                alarm.copy(
-                    familyId = _activeFamilyId.value,
-                    hour = alarm.hour.coerceIn(0, 23),
-                    minute = alarm.minute.coerceIn(0, 59),
-                    createdByMemberId = alarm.createdByMemberId.ifBlank { current.id },
-                    createdByMemberName = alarm.createdByMemberName.ifBlank { current.name },
-                    scheduleStatus = "PENDING_TARGET_DEVICE",
+                // Created/updated by parent for a child's device: cancel on parent's phone and wait for child's device confirmation
+                appContext?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, normalizedInput.id) }
+                normalizedInput.copy(
+                    scheduleStatus = FamilyAlarm.STATUS_PENDING_TARGET_DEVICE,
                     acknowledgedByMemberId = "",
                     acknowledgedByDeviceName = "",
                     acknowledgedAtMillis = 0L,
-                    nextTriggerAtMillis = com.example.notifications.FamilyAlarmScheduler.computeNextTriggerAtMillis(alarm)
+                    nextTriggerAtMillis = com.example.notifications.FamilyAlarmScheduler.computeNextTriggerAtMillis(normalizedInput)
                 )
             }
             else -> {
-                // Personal alarm or alarm assigned to the current device's member (or whole family)
+                // Personal alarm or alarm assigned to the current device's member
                 val localRes = appContext?.let {
-                    com.example.notifications.FamilyAlarmScheduler.scheduleLocalAlarm(it, alarm)
+                    com.example.notifications.FamilyAlarmScheduler.scheduleLocalAlarm(it, normalizedInput)
                 }
                 val nextTrigger = localRes?.nextTriggerAtMillis
-                    ?: com.example.notifications.FamilyAlarmScheduler.computeNextTriggerAtMillis(alarm)
-                val status = localRes?.statusCode ?: "SCHEDULED_LOCALLY"
-                alarm.copy(
-                    familyId = _activeFamilyId.value,
-                    hour = alarm.hour.coerceIn(0, 23),
-                    minute = alarm.minute.coerceIn(0, 59),
-                    createdByMemberId = alarm.createdByMemberId.ifBlank { current.id },
-                    createdByMemberName = alarm.createdByMemberName.ifBlank { current.name },
+                    ?: com.example.notifications.FamilyAlarmScheduler.computeNextTriggerAtMillis(normalizedInput)
+                val status = localRes?.statusCode ?: FamilyAlarm.STATUS_SCHEDULED_LOCALLY
+                normalizedInput.copy(
                     scheduleStatus = status,
-                    acknowledgedByMemberId = current.id,
+                    acknowledgedByMemberId = effectiveCallerId,
                     acknowledgedByDeviceName = deviceModelLabel,
                     acknowledgedAtMillis = System.currentTimeMillis(),
-                    nextTriggerAtMillis = nextTrigger
+                    nextTriggerAtMillis = nextTrigger,
+                    lastScheduleError = localRes?.errorMessage.orEmpty()
                 )
             }
         }
@@ -5205,7 +5254,8 @@ class FamilyRepository(
             com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
                 context = it,
                 alarms = _familyAlarms.value,
-                currentMemberId = current.id
+                currentMemberId = current.id,
+                currentAuthUid = authUid
             )
         }
         persistFamilyAlarmInFirestore(scheduledAlarm, isDelete = false)
@@ -5213,19 +5263,30 @@ class FamilyRepository(
     }
 
     fun toggleFamilyAlarm(alarmId: String): Boolean {
+        val current = _currentMember.value
+        val authUid = authProvider()?.currentUser?.uid.orEmpty()
         val target = _familyAlarms.value.find { it.id == alarmId } ?: return false
+        if (!target.canMemberModify(current, authUid)) {
+            return false
+        }
         return addOrUpdateFamilyAlarm(target.copy(isEnabled = !target.isEnabled))
     }
 
     fun deleteFamilyAlarm(alarmId: String): Boolean {
+        val current = _currentMember.value
+        val authUid = authProvider()?.currentUser?.uid.orEmpty()
         val target = _familyAlarms.value.find { it.id == alarmId } ?: return false
+        if (!target.canMemberDelete(current, authUid)) {
+            return false
+        }
         appContext?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, alarmId) }
         _familyAlarms.value = _familyAlarms.value.filterNot { it.id == alarmId }
         appContext?.let {
             com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
                 context = it,
                 alarms = _familyAlarms.value,
-                currentMemberId = _currentMember.value.id
+                currentMemberId = current.id,
+                currentAuthUid = authUid
             )
         }
         persistFamilyAlarmInFirestore(target, isDelete = true)
@@ -5247,6 +5308,7 @@ class FamilyRepository(
                             "acknowledgedByDeviceName" to alarm.acknowledgedByDeviceName,
                             "acknowledgedAtMillis" to alarm.acknowledgedAtMillis,
                             "nextTriggerAtMillis" to alarm.nextTriggerAtMillis,
+                            "lastScheduleError" to alarm.lastScheduleError,
                             "updatedByUid" to authUser.uid,
                             "updatedAt" to System.currentTimeMillis()
                         )
@@ -5266,13 +5328,15 @@ class FamilyRepository(
                 if (isDelete) {
                     docRef.delete().await()
                 } else {
+                    val targetId = alarm.effectiveAssignedMemberId
                     val map = mapOf(
                         "id" to alarm.id,
                         "familyId" to familyId,
                         "title" to alarm.title,
                         "hour" to alarm.hour,
                         "minute" to alarm.minute,
-                        "assignedMemberId" to alarm.assignedMemberId,
+                        "assignedMemberId" to targetId,
+                        "assignedToMemberId" to targetId,
                         "assignedMemberName" to alarm.assignedMemberName,
                         "daysOfWeek" to alarm.daysOfWeek.map { it.name },
                         "isEnabled" to alarm.isEnabled,
@@ -5280,6 +5344,7 @@ class FamilyRepository(
                         "createdAtMillis" to alarm.createdAtMillis,
                         "createdByMemberId" to alarm.createdByMemberId,
                         "createdByMemberName" to alarm.createdByMemberName,
+                        "createdByRole" to alarm.createdByRole,
                         "isPersonal" to alarm.isPersonal,
                         "soundType" to alarm.soundType,
                         "customSoundUri" to alarm.customSoundUri,
@@ -5292,6 +5357,7 @@ class FamilyRepository(
                         "acknowledgedByDeviceName" to alarm.acknowledgedByDeviceName,
                         "acknowledgedAtMillis" to alarm.acknowledgedAtMillis,
                         "nextTriggerAtMillis" to alarm.nextTriggerAtMillis,
+                        "lastScheduleError" to alarm.lastScheduleError,
                         "updatedByUid" to authUser.uid,
                         "updatedAt" to System.currentTimeMillis()
                     )

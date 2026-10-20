@@ -330,7 +330,6 @@ fun FamilyTasksApp(
                                             currentMember = currentMember,
                                             timetableViewMode = timetableViewMode,
                                             isHebrew = isHebrew,
-                                            familyAlarms = familyAlarms,
                                             onSelectChild = { viewModel.selectChildForTimetable(it) },
                                             onViewModeChange = { viewModel.setTimetableViewMode(it) },
                                             onAddPeriod = { viewModel.openAddPeriodDialog(null) },
@@ -338,11 +337,21 @@ fun FamilyTasksApp(
                                             onDeletePeriod = { viewModel.deleteSchedulePeriod(it) },
                                             onTestAlert = { period, childName ->
                                                 viewModel.testTenMinuteAlert(period, childName)
-                                            },
+                                            }
+                                        )
+                                    }
+
+                                    AppScreen.ALARMS -> {
+                                        FamilyAlarmScreen(
+                                            alarms = familyAlarms,
+                                            members = members,
+                                            currentMember = currentMember,
+                                            isHebrew = isHebrew,
                                             onSaveAlarm = { viewModel.saveFamilyAlarm(it) },
                                             onToggleAlarm = { viewModel.toggleFamilyAlarm(it) },
                                             onDeleteAlarm = { viewModel.deleteFamilyAlarm(it) },
-                                            onShowToast = { viewModel.showToastMessage(it) }
+                                            onShowToast = { viewModel.showToastMessage(it) },
+                                            onNavigateBack = { viewModel.navigateTo(AppScreen.HOME) }
                                         )
                                     }
 
@@ -741,6 +750,7 @@ private fun FamilyBottomNavBar(
         add(NavBarItem(AppScreen.HOME, if (isHebrew) "משימות" else "Tasks", Icons.Filled.CheckCircle, Icons.Outlined.CheckCircle, "nav_home"))
         add(NavBarItem(AppScreen.CALENDAR, if (isHebrew) "לוח שנה" else "Calendar", Icons.Filled.CalendarMonth, Icons.Outlined.CalendarMonth, "nav_calendar"))
         add(NavBarItem(AppScreen.TIMETABLE, if (isHebrew) "מערכת" else "Schedule", Icons.Filled.Schedule, Icons.Outlined.Schedule, "nav_timetable"))
+        add(NavBarItem(AppScreen.ALARMS, if (isHebrew) "שעון מעורר" else "Alarms", Icons.Filled.Alarm, Icons.Outlined.Alarm, "nav_alarms"))
         add(NavBarItem(AppScreen.FILES, if (isHebrew) "מסמכים" else "Files", Icons.Filled.Folder, Icons.Outlined.Folder, "nav_files"))
         if (isParent) {
             add(NavBarItem(AppScreen.ADMIN_DASHBOARD, if (isHebrew) "משפחה" else "Family", Icons.Filled.AdminPanelSettings, Icons.Outlined.AdminPanelSettings, "nav_admin"))
@@ -759,7 +769,7 @@ private fun FamilyBottomNavBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(horizontal = 6.dp, vertical = 6.dp),
+                .padding(horizontal = 4.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -767,13 +777,15 @@ private fun FamilyBottomNavBar(
                 val isSelected = currentScreen == item.screen
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
                     modifier = Modifier
+                        .weight(1f)
                         .clip(RoundedCornerShape(14.dp))
                         .clickable { onNavigate(item.screen) }
                         .background(
                             if (isSelected) GoogleBlue.copy(alpha = 0.12f) else Color.Transparent
                         )
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .padding(horizontal = 2.dp, vertical = 6.dp)
                         .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                         .testTag(item.testTag)
                 ) {
@@ -781,12 +793,13 @@ private fun FamilyBottomNavBar(
                         imageVector = if (isSelected) item.selectedIcon else item.unselectedIcon,
                         contentDescription = item.label,
                         tint = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = item.label,
-                        fontSize = 11.sp,
+                        fontSize = 10.sp,
+                        maxLines = 1,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                         color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.onSurfaceVariant
                     )

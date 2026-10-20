@@ -1272,5 +1272,148 @@ class ExampleRobolectricTest {
             boundedThumbnail!!.length < 180_000
         )
     }
+
+    @Test
+    fun `test family alarm ownership permissions audio preview and ringing pipeline`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = FamilyRepository(context = context)
+
+        val parentMember = repository.members.value.first { it.id == "m_dad" }
+        val childMember = repository.members.value.first { it.id == "m_kid1" }
+
+        // 1. Parent creates an alarm for the child
+        repository.switchCurrentMember(parentMember)
+        val parentForChildAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_parent_for_child_test",
+            title = "השכמה לבית הספר",
+            hour = 6,
+            minute = 45,
+            assignedMemberId = childMember.id,
+            assignedToMemberId = childMember.id,
+            assignedMemberName = childMember.name,
+            createdByMemberId = parentMember.id,
+            createdByMemberName = parentMember.name,
+            createdByRole = "PARENT",
+            soundType = com.example.notifications.AlarmAudioController.SOUND_MELODY_ENERGETIC,
+            volumePercent = 85,
+            snoozeDurationMinutes = 5,
+            isEnabled = true
+        )
+        assertTrue(repository.addOrUpdateFamilyAlarm(parentForChildAlarm))
+
+        // Verify target-device routing: rings on child's device, NOT on parent's device
+        assertFalse(
+            "Parent-created child alarm must NOT be scheduled locally on parent's device",
+            com.example.notifications.FamilyAlarmScheduler.shouldScheduleOnDevice(parentForChildAlarm, parentMember.id)
+        )
+        assertTrue(
+            "Parent-created child alarm MUST be scheduled locally on child's device",
+            com.example.notifications.FamilyAlarmScheduler.shouldScheduleOnDevice(parentForChildAlarm, childMember.id)
+        )
+
+        // Switch to Child role: Child can see the alarm, but CANNOT edit, toggle, or delete it
+        repository.switchCurrentMember(childMember)
+        val storedParentAlarm = repository.familyAlarms.value.first { it.id == "alarm_parent_for_child_test" }
+        assertFalse("Child must not have modify permission on parent-created alarm", storedParentAlarm.canMemberModify(childMember))
+        assertFalse("Child must not have delete permission on parent-created alarm", storedParentAlarm.canMemberDelete(childMember))
+        assertFalse("Child toggle on parent-created alarm must be rejected", repository.toggleFamilyAlarm(storedParentAlarm.id))
+        assertFalse("Child edit on parent-created alarm must be rejected", repository.addOrUpdateFamilyAlarm(storedParentAlarm.copy(hour = 9)))
+        assertFalse("Child delete on parent-created alarm must be rejected", repository.deleteFamilyAlarm(storedParentAlarm.id))
+
+        // 2. Child creates their OWN alarm -> Child can edit, toggle, and delete; Parent can also manage it
+        val childOwnAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_child_own_test",
+            title = "אימון כדורסל",
+            hour = 16,
+            minute = 30,
+            assignedMemberId = childMember.id,
+            assignedToMemberId = childMember.id,
+            assignedMemberName = childMember.name,
+            createdByMemberId = childMember.id,
+            createdByMemberName = childMember.name,
+            createdByRole = "CHILD",
+            soundType = com.example.notifications.AlarmAudioController.SOUND_MELODY_GENTLE,
+            volumePercent = 75,
+            snoozeDurationMinutes = 10,
+            isEnabled = true
+        )
+        assertTrue("Child must be able to create their own alarm", repository.addOrUpdateFamilyAlarm(childOwnAlarm))
+        val storedChildAlarm = repository.familyAlarms.value.first { it.id == "alarm_child_own_test" }
+        assertTrue("Child can modify their own alarm", storedChildAlarm.canMemberModify(childMember))
+        assertTrue("Parent can also modify child's alarm", storedChildAlarm.canMemberModify(parentMember))
+        assertTrue("Child can toggle their own alarm", repository.toggleFamilyAlarm(storedChildAlarm.id))
+        assertFalse(repository.familyAlarms.value.first { it.id == "alarm_child_own_test" }.isEnabled)
+
+        // Parent can re-enable and delete child's alarm
+        repository.switchCurrentMember(parentMember)
+        assertTrue("Parent can toggle child's alarm", repository.toggleFamilyAlarm(storedChildAlarm.id))
+        assertTrue("Parent can delete child's alarm", repository.deleteFamilyAlarm(storedChildAlarm.id))
+
+        // 3. Parent creates their OWN personal alarm -> rings only on parent's device; child cannot modify
+        val parentOwnAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_parent_own_test",
+            title = "פגישת בוקר",
+            hour = 6,
+            minute = 15,
+            assignedMemberId = parentMember.id,
+            assignedToMemberId = parentMember.id,
+            assignedMemberName = parentMember.name,
+            createdByMemberId = parentMember.id,
+            createdByMemberName = parentMember.name,
+            createdByRole = "PARENT",
+            isPersonal = true,
+            soundType = com.example.notifications.AlarmAudioController.SOUND_MELODY_CLASSIC
+        )
+        assertTrue(repository.addOrUpdateFamilyAlarm(parentOwnAlarm))
+        assertTrue(com.example.notifications.FamilyAlarmScheduler.shouldScheduleOnDevice(parentOwnAlarm, parentMember.id))
+        assertFalse(com.example.notifications.FamilyAlarmScheduler.shouldScheduleOnDevice(parentOwnAlarm, childMember.id))
+        assertFalse(parentOwnAlarm.canMemberModify(childMember))
+
+        // 4. Test Sound Preview & Volume Preview lifecycle
+        assertEquals(6, com.example.notifications.AlarmAudioController.builtInSoundOptions.size)
+        com.example.notifications.AlarmAudioController.startPreview(
+            context = context,
+            soundType = com.example.notifications.AlarmAudioController.SOUND_MELODY_ENERGETIC,
+            customSoundUri = "",
+            volumePercent = 70
+        )
+        assertTrue(com.example.notifications.AlarmAudioController.previewState.value.isPlaying)
+        assertEquals(70, com.example.notifications.AlarmAudioController.previewState.value.activeVolumePercent)
+
+        com.example.notifications.AlarmAudioController.updateActivePreviewVolume(context, 95)
+        assertEquals(95, com.example.notifications.AlarmAudioController.previewState.value.activeVolumePercent)
+
+        com.example.notifications.AlarmAudioController.stopPreview(context)
+        assertFalse(com.example.notifications.AlarmAudioController.previewState.value.isPlaying)
+
+        // 5. Test Alarm Trigger -> Foreground Ringing State -> Snooze -> Dismiss pipeline
+        val triggerIntent = android.content.Intent(context, com.example.notifications.FamilyAlarmReceiver::class.java).apply {
+            action = com.example.notifications.FamilyAlarmScheduler.ACTION_TRIGGER_FAMILY_ALARM
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_ID, parentOwnAlarm.id)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_TITLE, parentOwnAlarm.title)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_HOUR, parentOwnAlarm.hour)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_MINUTE, parentOwnAlarm.minute)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_SOUND_TYPE, parentOwnAlarm.soundType)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_SNOOZE_MINUTES, 5)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_VOLUME_PERCENT, 80)
+        }
+        com.example.notifications.FamilyAlarmReceiver().onReceive(context, triggerIntent)
+
+        val activeRinging = com.example.notifications.FamilyAlarmRingingService.activeRingingAlarm.value
+        assertNotNull("Alarm trigger must activate FamilyAlarmRingingService state", activeRinging)
+        assertEquals(parentOwnAlarm.id, activeRinging?.alarmId)
+        assertEquals("06:15", activeRinging?.timeFormatted)
+
+        // Snooze active alarm
+        val snoozedUntil = com.example.notifications.FamilyAlarmRingingService.snoozeActiveAlarm(context)
+        assertTrue("Snooze must schedule future alarm trigger", snoozedUntil > System.currentTimeMillis())
+        assertNull("Active ringing state must clear on snooze", com.example.notifications.FamilyAlarmRingingService.activeRingingAlarm.value)
+
+        // Dismiss clean-up
+        com.example.notifications.FamilyAlarmRingingService.dismissActiveAlarm(context, parentOwnAlarm.id)
+        com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(context, parentOwnAlarm.id)
+        com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(context, parentForChildAlarm.id)
+    }
 }
+
 
