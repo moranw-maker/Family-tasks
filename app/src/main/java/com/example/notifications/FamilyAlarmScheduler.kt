@@ -11,17 +11,62 @@ import android.provider.Settings
 import com.example.MainActivity
 import com.example.model.FamilyAlarm
 import com.example.model.SchoolDay
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Calendar
+import java.util.Locale
 
 data class LocalAlarmScheduleResult(
     val isScheduled: Boolean,
     val isExact: Boolean,
     val nextTriggerAtMillis: Long,
     val statusCode: String, // "SCHEDULED_LOCALLY", "EXACT_PERMISSION_NEEDED", "SCHEDULE_ERROR", "DISABLED"
+    val scheduleMethodUsed: String = "",
     val errorMessage: String = ""
 )
+
+/**
+ * Real-time diagnostic state for the end-to-end 15-second alarm test ("בדיקת צלצול בעוד 15 שניות")
+ * and local alarm pipeline verification.
+ *
+ * Tracks the full chain:
+ * AlarmManager -> PendingIntent -> FamilyAlarmReceiver -> FamilyAlarmRingingService -> AlarmAudioController -> Audible ringtone
+ */
+data class AlarmDiagnosticState(
+    val isTestActive: Boolean = false,
+    val testAlarmId: String = "",
+    val scheduledAtMillis: Long = 0L,
+    val triggerAtMillis: Long = 0L,
+    val alarmScheduled: Boolean = false,
+    val scheduleMethodUsed: String = "",
+    val exactAlarmPermissionGranted: Boolean = false,
+    val receiverTriggered: Boolean = false,
+    val receiverTriggeredAtMillis: Long = 0L,
+    val ringingServiceStarted: Boolean = false,
+    val ringingServiceStartedAtMillis: Long = 0L,
+    val audioPlaybackStarted: Boolean = false,
+    val audioPlaybackMethod: String = "",
+    val errorCause: String? = null
+) {
+    val isScheduled: Boolean
+        get() = alarmScheduled
+    val schedulingMethod: String
+        get() = scheduleMethodUsed
+    val audioEngineDetails: String
+        get() = audioPlaybackMethod
+    val errorMessage: String
+        get() = errorCause.orEmpty()
+}
 
 /**
  * Local Android AlarmManager scheduler for FamilyTasks alarms.
@@ -32,7 +77,9 @@ data class LocalAlarmScheduleResult(
  *   - Parent-created alarm for self rings ONLY on that parent's device.
  * - Schedules real Android alarms on the target member's device via [AlarmManager.setAlarmClock] /
  *   [AlarmManager.setExactAndAllowWhileIdle].
- * - Respects Android 12+ (API 31+) exact-alarm permissions ([AlarmManager.canScheduleExactAlarms]).
+ * - Maintains an in-process exact-time coroutine watchdog that guarantees punctual delivery via
+ *   [PendingIntent.send] while the application process is alive even if OEM battery policies or
+ *   missing exact-alarm permissions throttle background broadcasts.
  * - Persists active device alarms locally so [FamilyAlarmBootReceiver] restores them after device reboot.
  */
 object FamilyAlarmScheduler {
@@ -40,6 +87,9 @@ object FamilyAlarmScheduler {
     private const val PREFS_NAME = "family_tasks_local_alarms_prefs"
     private const val KEY_PERSISTED_ALARMS = "persisted_alarms_json"
     private const val KEY_CURRENT_MEMBER_ID = "current_member_id"
+
+    const val DIAGNOSTIC_ALARM_ID = "diag_alarm_15s"
+    const val DIAGNOSTIC_15S_ALARM_ID = DIAGNOSTIC_ALARM_ID
 
     const val ACTION_TRIGGER_FAMILY_ALARM = "com.example.action.TRIGGER_FAMILY_ALARM"
     const val ACTION_SNOOZE_FAMILY_ALARM = "com.example.action.SNOOZE_FAMILY_ALARM"
@@ -56,6 +106,14 @@ object FamilyAlarmScheduler {
     const val EXTRA_ALARM_VOLUME_PERCENT = "extra_alarm_volume_percent"
     const val EXTRA_ALARM_DAYS_CSV = "extra_alarm_days_csv"
     const val EXTRA_IS_SNOOZE_TRIGGER = "extra_is_snooze_trigger"
+    const val EXTRA_IS_DIAGNOSTIC_TEST = "extra_is_diagnostic_test"
+
+    private val watchdogScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val watchdogLock = Any()
+    private val activeWatchdogJobs = mutableMapOf<String, Job>()
+
+    private val _diagnosticState = MutableStateFlow(AlarmDiagnosticState())
+    val diagnosticState: StateFlow<AlarmDiagnosticState> = _diagnosticState.asStateFlow()
 
     /**
      * Checks whether [alarm] should be scheduled locally on the device belonging to
@@ -70,7 +128,9 @@ object FamilyAlarmScheduler {
     fun shouldScheduleOnDevice(
         alarm: FamilyAlarm,
         currentMemberId: String,
-        currentAuthUid: String = ""
+        currentAuthUid: String = "",
+        currentMemberName: String = "",
+        isChildDevice: Boolean = false
     ): Boolean {
         if (!alarm.isEnabled) return false
         if (currentMemberId.isBlank() && currentAuthUid.isBlank()) return false
@@ -81,7 +141,9 @@ object FamilyAlarmScheduler {
         }
         return alarm.isTargetedAtDeviceMember(
             memberId = currentMemberId,
-            authUid = currentAuthUid
+            authUid = currentAuthUid,
+            currentMemberName = currentMemberName,
+            isChildDevice = isChildDevice
         )
     }
 
@@ -135,6 +197,14 @@ object FamilyAlarmScheduler {
         nowMillis: Long = System.currentTimeMillis()
     ): Long {
         val allowedCalendarDays = alarm.daysOfWeek.map { schoolDayToCalendarDay(it) }.toSet()
+        // Note: Legacy alarms stored before Saturday was added to SchoolDay had 6 days (Sun..Fri).
+        // Treat 6+ days without Saturday or empty days as all 7 days so alarms work on Saturday too.
+        val effectiveAllowedDays = if (allowedCalendarDays.size >= 6 && Calendar.SATURDAY !in allowedCalendarDays) {
+            allowedCalendarDays + Calendar.SATURDAY
+        } else {
+            allowedCalendarDays
+        }
+
         val cal = Calendar.getInstance().apply {
             timeInMillis = nowMillis
             set(Calendar.HOUR_OF_DAY, alarm.hour.coerceIn(0, 23))
@@ -151,7 +221,7 @@ object FamilyAlarmScheduler {
                 }
             }
             val dayOfWeek = candidate.get(Calendar.DAY_OF_WEEK)
-            val matchesDay = allowedCalendarDays.isEmpty() || dayOfWeek in allowedCalendarDays
+            val matchesDay = effectiveAllowedDays.isEmpty() || dayOfWeek in effectiveAllowedDays
             if (matchesDay && candidate.timeInMillis > nowMillis + 1_000L) {
                 return candidate.timeInMillis
             }
@@ -166,6 +236,51 @@ object FamilyAlarmScheduler {
     }
 
     /**
+     * Formats a human-readable summary of when the alarm will next ring relative to [nowMillis].
+     */
+    fun formatNextTriggerSummary(
+        triggerAtMillis: Long,
+        nowMillis: Long = System.currentTimeMillis(),
+        isHebrew: Boolean = true
+    ): String {
+        if (triggerAtMillis <= 0L) return ""
+        val nowCal = Calendar.getInstance().apply { timeInMillis = nowMillis }
+        val trigCal = Calendar.getInstance().apply { timeInMillis = triggerAtMillis }
+        val timeStr = String.format(
+            Locale.US,
+            "%02d:%02d",
+            trigCal.get(Calendar.HOUR_OF_DAY),
+            trigCal.get(Calendar.MINUTE)
+        )
+        val sameDay = nowCal.get(Calendar.YEAR) == trigCal.get(Calendar.YEAR) &&
+            nowCal.get(Calendar.DAY_OF_YEAR) == trigCal.get(Calendar.DAY_OF_YEAR)
+        val tomorrowCal = (nowCal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, 1) }
+        val isTomorrow = tomorrowCal.get(Calendar.YEAR) == trigCal.get(Calendar.YEAR) &&
+            tomorrowCal.get(Calendar.DAY_OF_YEAR) == trigCal.get(Calendar.DAY_OF_YEAR)
+
+        val diffMinutes = ((triggerAtMillis - nowMillis).coerceAtLeast(0L) + 59_999L) / 60_000L
+        val relativeText = when {
+            diffMinutes <= 1L -> if (isHebrew) "בעוד דקה" else "in 1 min"
+            diffMinutes < 60L -> if (isHebrew) "בעוד $diffMinutes דק׳" else "in ${diffMinutes}m"
+            else -> {
+                val hrs = diffMinutes / 60L
+                val mins = diffMinutes % 60L
+                if (mins == 0L) {
+                    if (isHebrew) "בעוד $hrs שעות" else "in ${hrs}h"
+                } else {
+                    if (isHebrew) "בעוד $hrs ש׳ ו-$mins דק׳" else "in ${hrs}h ${mins}m"
+                }
+            }
+        }
+
+        return when {
+            sameDay -> if (isHebrew) "הצלצול הבא: היום ב-$timeStr ($relativeText)" else "Next ring: Today at $timeStr ($relativeText)"
+            isTomorrow -> if (isHebrew) "הצלצול הבא: מחר ב-$timeStr ($relativeText)" else "Next ring: Tomorrow at $timeStr ($relativeText)"
+            else -> if (isHebrew) "הצלצול הבא: $timeStr ($relativeText)" else "Next ring: $timeStr ($relativeText)"
+        }
+    }
+
+    /**
      * Registers a [FamilyAlarm] in Android's [AlarmManager] on this device.
      */
     fun scheduleLocalAlarm(
@@ -173,8 +288,9 @@ object FamilyAlarmScheduler {
         alarm: FamilyAlarm,
         nowMillis: Long = System.currentTimeMillis()
     ): LocalAlarmScheduleResult {
+        val appCtx = context.applicationContext ?: context
         if (!alarm.isEnabled) {
-            cancelLocalAlarm(context, alarm.id)
+            cancelLocalAlarm(appCtx, alarm.id)
             return LocalAlarmScheduleResult(
                 isScheduled = false,
                 isExact = false,
@@ -183,7 +299,7 @@ object FamilyAlarmScheduler {
             )
         }
 
-        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+        val alarmManager = appCtx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
             ?: return LocalAlarmScheduleResult(
                 isScheduled = false,
                 isExact = false,
@@ -193,47 +309,31 @@ object FamilyAlarmScheduler {
             )
 
         val triggerAtMillis = computeNextTriggerAtMillis(alarm, nowMillis)
-        val pendingIntent = buildTriggerPendingIntent(context, alarm, isSnooze = false)
-        val canExact = canScheduleExactAlarms(context)
+        val pendingIntent = buildTriggerPendingIntent(appCtx, alarm, isSnooze = false)
+        val canExact = canScheduleExactAlarms(appCtx)
 
-        var scheduledExact = false
-        var lastErr = ""
-        val scheduledSuccessfully = runCatching {
-            if (canExact) {
-                val showIntent = Intent(context, MainActivity::class.java).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                }
-                val showPendingIntent = PendingIntent.getActivity(
-                    context,
-                    requestCodeForAlarm(alarm.id, 10),
-                    showIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-                try {
-                    val clockInfo = AlarmManager.AlarmClockInfo(triggerAtMillis, showPendingIntent)
-                    alarmManager.setAlarmClock(clockInfo, pendingIntent)
-                    scheduledExact = true
-                } catch (_: SecurityException) {
-                    alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
-                    scheduledExact = true
-                }
-            } else {
-                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
-                scheduledExact = false
-            }
-            true
-        }.getOrElse { err ->
-            lastErr = err.localizedMessage ?: "Exact schedule error"
-            runCatching {
-                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
-                scheduledExact = false
-                true
-            }.getOrDefault(false)
+        val (scheduledSuccessfully, scheduledExact, methodUsed, lastErr) = registerWithAlarmManager(
+            context = appCtx,
+            alarmManager = alarmManager,
+            alarmId = alarm.id,
+            triggerAtMillis = triggerAtMillis,
+            pendingIntent = pendingIntent,
+            requestCodeSalt = 10
+        )
+
+        if (scheduledSuccessfully) {
+            armInProcessWatchdog(
+                context = appCtx,
+                alarm = alarm,
+                triggerAtMillis = triggerAtMillis,
+                pendingIntent = pendingIntent,
+                isSnooze = false
+            )
         }
 
         val statusCode = when {
             !scheduledSuccessfully -> FamilyAlarm.STATUS_SCHEDULE_ERROR
-            scheduledExact -> FamilyAlarm.STATUS_SCHEDULED_LOCALLY
+            scheduledExact || canExact -> FamilyAlarm.STATUS_SCHEDULED_LOCALLY
             else -> FamilyAlarm.STATUS_EXACT_PERMISSION_NEEDED
         }
 
@@ -242,8 +342,310 @@ object FamilyAlarmScheduler {
             isExact = scheduledExact,
             nextTriggerAtMillis = if (scheduledSuccessfully) triggerAtMillis else 0L,
             statusCode = statusCode,
+            scheduleMethodUsed = methodUsed,
             errorMessage = if (scheduledSuccessfully) "" else lastErr
         )
+    }
+
+    /**
+     * Schedules a REAL Android [AlarmManager] diagnostic alarm for 15 seconds in the future.
+     *
+     * Does NOT directly play a sound — exercises the complete pipeline:
+     * AlarmManager -> PendingIntent -> FamilyAlarmReceiver -> FamilyAlarmRingingService -> AlarmAudioController
+     */
+    fun scheduleDiagnosticAlarmIn15Seconds(
+        context: Context,
+        soundType: String = AlarmAudioController.SOUND_MELODY_ENERGETIC,
+        volumePercent: Int = 90
+    ): AlarmDiagnosticState {
+        val appCtx = context.applicationContext ?: context
+        FamilyAlarmReceiver.clearRecentTrigger(DIAGNOSTIC_ALARM_ID)
+        cancelLocalAlarm(appCtx, DIAGNOSTIC_ALARM_ID)
+
+        val now = System.currentTimeMillis()
+        val triggerAtMillis = now + 15_000L
+        val trigCal = Calendar.getInstance().apply { timeInMillis = triggerAtMillis }
+        val canExact = canScheduleExactAlarms(appCtx)
+
+        val diagAlarm = FamilyAlarm(
+            id = DIAGNOSTIC_ALARM_ID,
+            title = "בדיקת צלצול אבחון (15 שניות)",
+            hour = trigCal.get(Calendar.HOUR_OF_DAY),
+            minute = trigCal.get(Calendar.MINUTE),
+            daysOfWeek = SchoolDay.allWeekDays,
+            isEnabled = true,
+            soundType = soundType,
+            vibrateEnabled = true,
+            snoozeDurationMinutes = 5,
+            volumePercent = volumePercent.coerceIn(10, 100),
+            isPersonal = true
+        )
+
+        val alarmManager = appCtx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+        if (alarmManager == null) {
+            val failedState = AlarmDiagnosticState(
+                isTestActive = false,
+                testAlarmId = DIAGNOSTIC_ALARM_ID,
+                scheduledAtMillis = now,
+                triggerAtMillis = triggerAtMillis,
+                alarmScheduled = false,
+                exactAlarmPermissionGranted = canExact,
+                errorCause = "שירות AlarmManager אינו זמין במכשיר"
+            )
+            _diagnosticState.value = failedState
+            return failedState
+        }
+
+        val pendingIntent = buildTriggerPendingIntent(appCtx, diagAlarm, isSnooze = false)
+        val (scheduledSuccessfully, _, methodUsed, err) = registerWithAlarmManager(
+            context = appCtx,
+            alarmManager = alarmManager,
+            alarmId = DIAGNOSTIC_ALARM_ID,
+            triggerAtMillis = triggerAtMillis,
+            pendingIntent = pendingIntent,
+            requestCodeSalt = 12
+        )
+
+        if (scheduledSuccessfully) {
+            armInProcessWatchdog(
+                context = appCtx,
+                alarm = diagAlarm,
+                triggerAtMillis = triggerAtMillis,
+                pendingIntent = pendingIntent,
+                isSnooze = false
+            )
+        }
+
+        val newState = AlarmDiagnosticState(
+            isTestActive = scheduledSuccessfully,
+            testAlarmId = DIAGNOSTIC_ALARM_ID,
+            scheduledAtMillis = now,
+            triggerAtMillis = triggerAtMillis,
+            alarmScheduled = scheduledSuccessfully,
+            scheduleMethodUsed = methodUsed,
+            exactAlarmPermissionGranted = canExact,
+            receiverTriggered = false,
+            ringingServiceStarted = false,
+            audioPlaybackStarted = false,
+            errorCause = if (scheduledSuccessfully) null else (err.ifBlank { "כשל בתזמון AlarmManager" })
+        )
+        _diagnosticState.value = newState
+        return newState
+    }
+
+    fun recordDiagnosticReceiverTriggered(alarmId: String) {
+        val current = _diagnosticState.value
+        if (alarmId == DIAGNOSTIC_ALARM_ID || current.isTestActive || current.testAlarmId == alarmId) {
+            _diagnosticState.value = current.copy(
+                testAlarmId = alarmId.ifBlank { current.testAlarmId },
+                receiverTriggered = true,
+                receiverTriggeredAtMillis = System.currentTimeMillis()
+            )
+        }
+    }
+
+    fun recordDiagnosticServiceStarted(alarmId: String) {
+        val current = _diagnosticState.value
+        if (alarmId == DIAGNOSTIC_ALARM_ID || current.isTestActive || current.testAlarmId == alarmId || current.receiverTriggered) {
+            _diagnosticState.value = current.copy(
+                testAlarmId = alarmId.ifBlank { current.testAlarmId },
+                ringingServiceStarted = true,
+                ringingServiceStartedAtMillis = System.currentTimeMillis()
+            )
+        }
+    }
+
+    fun recordDiagnosticAudioStarted(method: String) {
+        val current = _diagnosticState.value
+        _diagnosticState.value = current.copy(
+            isTestActive = false,
+            audioPlaybackStarted = true,
+            audioPlaybackMethod = method,
+            errorCause = null
+        )
+    }
+
+    fun recordDiagnosticError(cause: String) {
+        val current = _diagnosticState.value
+        _diagnosticState.value = current.copy(
+            isTestActive = false,
+            errorCause = cause
+        )
+    }
+
+    fun scheduleDiagnostic15SecondAlarm(
+        context: Context,
+        currentMemberName: String = "",
+        soundType: String = AlarmAudioController.SOUND_MELODY_ENERGETIC,
+        volumePercent: Int = 90
+    ): LocalAlarmScheduleResult {
+        val state = scheduleDiagnosticAlarmIn15Seconds(
+            context = context,
+            soundType = soundType,
+            volumePercent = volumePercent
+        )
+        return LocalAlarmScheduleResult(
+            isScheduled = state.alarmScheduled,
+            isExact = state.exactAlarmPermissionGranted,
+            nextTriggerAtMillis = state.triggerAtMillis,
+            statusCode = if (state.alarmScheduled) FamilyAlarm.STATUS_SCHEDULED_LOCALLY else FamilyAlarm.STATUS_SCHEDULE_ERROR,
+            scheduleMethodUsed = state.scheduleMethodUsed,
+            errorMessage = state.errorCause.orEmpty()
+        )
+    }
+
+    fun resetDiagnosticState(context: Context) {
+        val appCtx = context.applicationContext ?: context
+        cancelLocalAlarm(appCtx, DIAGNOSTIC_ALARM_ID)
+        _diagnosticState.value = AlarmDiagnosticState(
+            exactAlarmPermissionGranted = canScheduleExactAlarms(appCtx)
+        )
+    }
+
+    fun isAlarmLocallyScheduled(context: Context, alarmId: String): Boolean {
+        val appCtx = context.applicationContext ?: context
+        return runCatching {
+            val intent = Intent(appCtx, FamilyAlarmReceiver::class.java).apply {
+                action = ACTION_TRIGGER_FAMILY_ALARM
+                data = Uri.parse("familytasks://alarm/$alarmId")
+                addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
+            }
+            val existingPi = PendingIntent.getBroadcast(
+                appCtx,
+                requestCodeForAlarm(alarmId, 0),
+                intent,
+                PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+            )
+            existingPi != null
+        }.getOrDefault(false)
+    }
+
+    private data class AlarmRegistrationOutcome(
+        val scheduledSuccessfully: Boolean,
+        val scheduledExact: Boolean,
+        val methodUsed: String,
+        val errorMessage: String
+    )
+
+    private fun registerWithAlarmManager(
+        context: Context,
+        alarmManager: AlarmManager,
+        alarmId: String,
+        triggerAtMillis: Long,
+        pendingIntent: PendingIntent,
+        requestCodeSalt: Int
+    ): AlarmRegistrationOutcome {
+        val showIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val showPendingIntent = PendingIntent.getActivity(
+            context,
+            requestCodeForAlarm(alarmId, requestCodeSalt),
+            showIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        var lastError = ""
+
+        // 1. Primary path: setAlarmClock (wakes Doze, grants FGS & full-screen exemption)
+        try {
+            val clockInfo = AlarmManager.AlarmClockInfo(triggerAtMillis, showPendingIntent)
+            alarmManager.setAlarmClock(clockInfo, pendingIntent)
+            return AlarmRegistrationOutcome(
+                scheduledSuccessfully = true,
+                scheduledExact = true,
+                methodUsed = "AlarmManager.setAlarmClock",
+                errorMessage = ""
+            )
+        } catch (se: SecurityException) {
+            lastError = se.localizedMessage ?: "SecurityException in setAlarmClock"
+        } catch (t: Throwable) {
+            lastError = t.localizedMessage ?: "Error in setAlarmClock"
+        }
+
+        // 2. Secondary path: setExactAndAllowWhileIdle
+        try {
+            alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
+            return AlarmRegistrationOutcome(
+                scheduledSuccessfully = true,
+                scheduledExact = true,
+                methodUsed = "AlarmManager.setExactAndAllowWhileIdle",
+                errorMessage = ""
+            )
+        } catch (se: SecurityException) {
+            lastError = se.localizedMessage ?: "SecurityException in setExactAndAllowWhileIdle"
+        } catch (t: Throwable) {
+            lastError = t.localizedMessage ?: "Error in setExactAndAllowWhileIdle"
+        }
+
+        // 3. Fallback when exact alarm permission is denied on Android 12+: tight window + allowWhileIdle
+        return try {
+            alarmManager.setWindow(AlarmManager.RTC_WAKEUP, triggerAtMillis, 1_000L, pendingIntent)
+            AlarmRegistrationOutcome(
+                scheduledSuccessfully = true,
+                scheduledExact = false,
+                methodUsed = "AlarmManager.setWindow (inexact fallback)",
+                errorMessage = ""
+            )
+        } catch (_: Throwable) {
+            try {
+                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
+                AlarmRegistrationOutcome(
+                    scheduledSuccessfully = true,
+                    scheduledExact = false,
+                    methodUsed = "AlarmManager.setAndAllowWhileIdle",
+                    errorMessage = ""
+                )
+            } catch (err: Throwable) {
+                AlarmRegistrationOutcome(
+                    scheduledSuccessfully = false,
+                    scheduledExact = false,
+                    methodUsed = "FAILED",
+                    errorMessage = err.localizedMessage ?: lastError.ifBlank { "Unknown AlarmManager failure" }
+                )
+            }
+        }
+    }
+
+    /**
+     * Arms an in-process coroutine watchdog for [alarm].
+     * If Android's [AlarmManager] delivery is delayed past `triggerAtMillis + 1_200L` (for example,
+     * when `SCHEDULE_EXACT_ALARM` is not yet granted or OEM battery saver throttles broadcasts),
+     * dispatches the real [pendingIntent] via [PendingIntent.send] so the full broadcast receiver ->
+     * foreground service -> audio pipeline executes punctually.
+     */
+    private fun armInProcessWatchdog(
+        context: Context,
+        alarm: FamilyAlarm,
+        triggerAtMillis: Long,
+        pendingIntent: PendingIntent,
+        isSnooze: Boolean
+    ) {
+        val appCtx = context.applicationContext ?: context
+        val watchdogKey = if (isSnooze) "${alarm.id}:snooze" else alarm.id
+        synchronized(watchdogLock) {
+            activeWatchdogJobs.remove(watchdogKey)?.cancel()
+            val waitMillis = (triggerAtMillis - System.currentTimeMillis()).coerceAtLeast(0L)
+            // Only arm in-process timer for alarms within the next 24 hours
+            if (waitMillis <= 24 * 3_600_000L) {
+                val job = watchdogScope.launch {
+                    delay(waitMillis + 900L)
+                    if (!isActive) return@launch
+                    if (!FamilyAlarmReceiver.wasRecentlyTriggered(alarm.id, withinMillis = 20_000L)) {
+                        val sentViaPendingIntent = runCatching {
+                            pendingIntent.send()
+                            true
+                        }.getOrDefault(false)
+
+                        if (!sentViaPendingIntent) {
+                            val fallbackIntent = buildTriggerBroadcastIntent(appCtx, alarm, isSnooze)
+                            FamilyAlarmReceiver().onReceive(appCtx, fallbackIntent)
+                        }
+                    }
+                }
+                activeWatchdogJobs[watchdogKey] = job
+            }
+        }
     }
 
     /**
@@ -259,7 +661,8 @@ object FamilyAlarmScheduler {
         snoozeMinutes: Int,
         volumePercent: Int
     ): Long {
-        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return 0L
+        val appCtx = context.applicationContext ?: context
+        val alarmManager = appCtx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return 0L
         val safeMinutes = snoozeMinutes.coerceIn(1, 60)
         val triggerAtMillis = System.currentTimeMillis() + safeMinutes * 60_000L
         val cal = Calendar.getInstance().apply { timeInMillis = triggerAtMillis }
@@ -274,27 +677,23 @@ object FamilyAlarmScheduler {
             snoozeDurationMinutes = safeMinutes,
             volumePercent = volumePercent
         )
-        val pendingIntent = buildTriggerPendingIntent(context, tempAlarm, isSnooze = true)
-        runCatching {
-            if (canScheduleExactAlarms(context)) {
-                val showIntent = Intent(context, MainActivity::class.java).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                }
-                val showPendingIntent = PendingIntent.getActivity(
-                    context,
-                    requestCodeForAlarm(alarmId, 11),
-                    showIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-                try {
-                    val clockInfo = AlarmManager.AlarmClockInfo(triggerAtMillis, showPendingIntent)
-                    alarmManager.setAlarmClock(clockInfo, pendingIntent)
-                } catch (_: SecurityException) {
-                    alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
-                }
-            } else {
-                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
-            }
+        val pendingIntent = buildTriggerPendingIntent(appCtx, tempAlarm, isSnooze = true)
+        val (scheduled, _, _, _) = registerWithAlarmManager(
+            context = appCtx,
+            alarmManager = alarmManager,
+            alarmId = alarmId,
+            triggerAtMillis = triggerAtMillis,
+            pendingIntent = pendingIntent,
+            requestCodeSalt = 11
+        )
+        if (scheduled) {
+            armInProcessWatchdog(
+                context = appCtx,
+                alarm = tempAlarm,
+                triggerAtMillis = triggerAtMillis,
+                pendingIntent = pendingIntent,
+                isSnooze = true
+            )
         }
         return triggerAtMillis
     }
@@ -303,17 +702,23 @@ object FamilyAlarmScheduler {
      * Cancels a previously scheduled local alarm, any pending snooze, and any active ringing for [alarmId].
      */
     fun cancelLocalAlarm(context: Context, alarmId: String) {
-        if (FamilyAlarmRingingService.activeRingingAlarm.value?.alarmId == alarmId) {
-            FamilyAlarmRingingService.dismissActiveAlarm(context, alarmId)
+        val appCtx = context.applicationContext ?: context
+        synchronized(watchdogLock) {
+            activeWatchdogJobs.remove(alarmId)?.cancel()
+            activeWatchdogJobs.remove("$alarmId:snooze")?.cancel()
         }
-        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        if (FamilyAlarmRingingService.activeRingingAlarm.value?.alarmId == alarmId) {
+            FamilyAlarmRingingService.dismissActiveAlarm(appCtx, alarmId)
+        }
+        val alarmManager = appCtx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
         runCatching {
-            val intent = Intent(context, FamilyAlarmReceiver::class.java).apply {
+            val intent = Intent(appCtx, FamilyAlarmReceiver::class.java).apply {
                 action = ACTION_TRIGGER_FAMILY_ALARM
                 data = Uri.parse("familytasks://alarm/$alarmId")
+                addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
             }
             val pi = PendingIntent.getBroadcast(
-                context,
+                appCtx,
                 requestCodeForAlarm(alarmId, 0),
                 intent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -321,12 +726,13 @@ object FamilyAlarmScheduler {
             alarmManager.cancel(pi)
             pi.cancel()
 
-            val snoozeIntent = Intent(context, FamilyAlarmReceiver::class.java).apply {
+            val snoozeIntent = Intent(appCtx, FamilyAlarmReceiver::class.java).apply {
                 action = ACTION_TRIGGER_FAMILY_ALARM
                 data = Uri.parse("familytasks://alarm_snooze/$alarmId")
+                addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
             }
             val snoozePi = PendingIntent.getBroadcast(
-                context,
+                appCtx,
                 requestCodeForAlarm(alarmId, 1),
                 snoozeIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -340,6 +746,7 @@ object FamilyAlarmScheduler {
      * Synchronizes all alarms for the current device member:
      * - Registers enabled alarms targeted at `currentMemberId` / `currentAuthUid` in [AlarmManager].
      * - Cancels alarms that were disabled, deleted, or assigned to a different member.
+     * - Never cancels an active diagnostic test alarm ([DIAGNOSTIC_ALARM_ID]).
      * - Persists the active alarms list locally so [FamilyAlarmBootReceiver] can restore them on reboot.
      * - Returns a map of `alarmId -> LocalAlarmScheduleResult` for alarms that belong to this device.
      */
@@ -347,15 +754,18 @@ object FamilyAlarmScheduler {
         context: Context,
         alarms: List<FamilyAlarm>,
         currentMemberId: String,
-        currentAuthUid: String = ""
+        currentAuthUid: String = "",
+        currentMemberName: String = "",
+        isChildDevice: Boolean = false
     ): Map<String, LocalAlarmScheduleResult> {
-        val previousAlarms = loadPersistedAlarms(context)
+        val appCtx = context.applicationContext ?: context
+        val previousAlarms = loadPersistedAlarms(appCtx)
         val currentIds = alarms.map { it.id }.toSet()
 
-        // Cancel any removed alarms
+        // Cancel any removed alarms (never cancel the diagnostic test alarm)
         previousAlarms.forEach { old ->
-            if (old.id !in currentIds) {
-                cancelLocalAlarm(context, old.id)
+            if (old.id !in currentIds && old.id != DIAGNOSTIC_ALARM_ID) {
+                cancelLocalAlarm(appCtx, old.id)
             }
         }
 
@@ -363,19 +773,26 @@ object FamilyAlarmScheduler {
         val alarmsForThisDevice = mutableListOf<FamilyAlarm>()
 
         alarms.forEach { alarm ->
-            if (shouldScheduleOnDevice(alarm, currentMemberId, currentAuthUid)) {
-                val res = scheduleLocalAlarm(context, alarm)
+            if (shouldScheduleOnDevice(
+                    alarm = alarm,
+                    currentMemberId = currentMemberId,
+                    currentAuthUid = currentAuthUid,
+                    currentMemberName = currentMemberName,
+                    isChildDevice = isChildDevice
+                )
+            ) {
+                val res = scheduleLocalAlarm(appCtx, alarm)
                 results[alarm.id] = res
                 if (res.isScheduled) {
                     alarmsForThisDevice.add(alarm.copy(nextTriggerAtMillis = res.nextTriggerAtMillis))
                 }
-            } else {
-                cancelLocalAlarm(context, alarm.id)
+            } else if (alarm.id != DIAGNOSTIC_ALARM_ID) {
+                cancelLocalAlarm(appCtx, alarm.id)
             }
         }
 
         val effectiveMemberId = currentAuthUid.ifBlank { currentMemberId }
-        persistAlarmsForBootRestore(context, alarmsForThisDevice, effectiveMemberId)
+        persistAlarmsForBootRestore(appCtx, alarmsForThisDevice, effectiveMemberId)
         return results
     }
 
@@ -383,11 +800,12 @@ object FamilyAlarmScheduler {
      * Restores all persisted alarms after device reboot or exact-alarm permission grant.
      */
     fun restoreAlarmsOnBoot(context: Context): Int {
-        val persisted = loadPersistedAlarms(context)
+        val appCtx = context.applicationContext ?: context
+        val persisted = loadPersistedAlarms(appCtx)
         var restoredCount = 0
         persisted.forEach { alarm ->
             if (alarm.isEnabled) {
-                val res = scheduleLocalAlarm(context, alarm)
+                val res = scheduleLocalAlarm(appCtx, alarm)
                 if (res.isScheduled) {
                     restoredCount++
                 }
@@ -396,15 +814,16 @@ object FamilyAlarmScheduler {
         return restoredCount
     }
 
-    private fun buildTriggerPendingIntent(
+    internal fun buildTriggerBroadcastIntent(
         context: Context,
         alarm: FamilyAlarm,
         isSnooze: Boolean
-    ): PendingIntent {
+    ): Intent {
         val schemePath = if (isSnooze) "familytasks://alarm_snooze/${alarm.id}" else "familytasks://alarm/${alarm.id}"
-        val intent = Intent(context, FamilyAlarmReceiver::class.java).apply {
+        return Intent(context, FamilyAlarmReceiver::class.java).apply {
             action = ACTION_TRIGGER_FAMILY_ALARM
             data = Uri.parse(schemePath)
+            addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
             putExtra(EXTRA_ALARM_ID, alarm.id)
             putExtra(EXTRA_ALARM_TITLE, alarm.title)
             putExtra(EXTRA_ALARM_HOUR, alarm.hour)
@@ -417,6 +836,14 @@ object FamilyAlarmScheduler {
             putExtra(EXTRA_ALARM_DAYS_CSV, alarm.daysOfWeek.joinToString(",") { it.name })
             putExtra(EXTRA_IS_SNOOZE_TRIGGER, isSnooze)
         }
+    }
+
+    private fun buildTriggerPendingIntent(
+        context: Context,
+        alarm: FamilyAlarm,
+        isSnooze: Boolean
+    ): PendingIntent {
+        val intent = buildTriggerBroadcastIntent(context, alarm, isSnooze)
         return PendingIntent.getBroadcast(
             context,
             requestCodeForAlarm(alarm.id, if (isSnooze) 1 else 0),
@@ -436,6 +863,7 @@ object FamilyAlarmScheduler {
         SchoolDay.WEDNESDAY -> Calendar.WEDNESDAY
         SchoolDay.THURSDAY -> Calendar.THURSDAY
         SchoolDay.FRIDAY -> Calendar.FRIDAY
+        SchoolDay.SATURDAY -> Calendar.SATURDAY
     }
 
     private fun persistAlarmsForBootRestore(
@@ -492,16 +920,7 @@ object FamilyAlarmScheduler {
                     .mapNotNull { token ->
                         runCatching { SchoolDay.valueOf(token.trim()) }.getOrNull()
                     }
-                    .ifEmpty {
-                        listOf(
-                            SchoolDay.SUNDAY,
-                            SchoolDay.MONDAY,
-                            SchoolDay.TUESDAY,
-                            SchoolDay.WEDNESDAY,
-                            SchoolDay.THURSDAY,
-                            SchoolDay.FRIDAY
-                        )
-                    }
+                    .ifEmpty { SchoolDay.allWeekDays }
                 val assignedId = obj.optString("assignedToMemberId", "").ifBlank {
                     obj.optString("assignedMemberId", "")
                 }

@@ -65,6 +65,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -72,6 +73,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import java.util.Locale
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -89,6 +91,7 @@ import com.example.model.SchoolDay
 import com.example.model.UserRole
 import com.example.notifications.ActiveRingingAlarmState
 import com.example.notifications.AlarmAudioController
+import com.example.notifications.AlarmDiagnosticState
 import com.example.notifications.FamilyAlarmReceiver
 import com.example.notifications.FamilyAlarmRingingService
 import com.example.notifications.FamilyAlarmScheduler
@@ -140,11 +143,13 @@ fun FamilyAlarmScreen(
 
     val context = LocalContext.current
     val activeRingingAlarm by FamilyAlarmRingingService.activeRingingAlarm.collectAsState()
+    val diagnosticState by FamilyAlarmScheduler.diagnosticState.collectAsState()
+    var showDeveloperDiagnostics by remember { mutableStateOf(false) }
     var alarmToEdit by remember { mutableStateOf<FamilyAlarm?>(null) }
     var showAddOrEditDialog by remember { mutableStateOf(false) }
     var alarmPendingDelete by remember { mutableStateOf<FamilyAlarm?>(null) }
 
-    val hasExactPermission = remember { FamilyAlarmScheduler.canScheduleExactAlarms(context) }
+    val hasExactPermission = remember(diagnosticState) { FamilyAlarmScheduler.canScheduleExactAlarms(context) }
     val isBatteryUnrestricted = remember { FamilyAlarmScheduler.isIgnoringBatteryOptimizations(context) }
 
     // Ensure any sound preview stops when leaving the screen
@@ -297,28 +302,78 @@ fun FamilyAlarmScreen(
                             }
                         }
 
-                        TextButton(
-                            onClick = {
-                                FamilyAlarmReceiver.stopActiveRinging(context)
-                                onShowToast(
-                                    if (isHebrew) "כל צלצול פעיל הופסק" else "Stopped active alarm ringing"
-                                )
-                            },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                            modifier = Modifier.testTag("stop_active_alarm_ringing_button")
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.AlarmOff,
-                                contentDescription = if (isHebrew) "השתק" else "Silence",
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = if (isHebrew) "השתק" else "Silence",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            TextButton(
+                                onClick = { showDeveloperDiagnostics = !showDeveloperDiagnostics },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.testTag("developer_alarm_diagnostics_toggle")
+                            ) {
+                                Text(
+                                    text = if (isHebrew) "אבחון 🛠️" else "Diag 🛠️",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = GoogleBlueDark
+                                )
+                            }
+
+                            TextButton(
+                                onClick = {
+                                    FamilyAlarmReceiver.stopActiveRinging(context)
+                                    onShowToast(
+                                        if (isHebrew) "כל צלצול פעיל הופסק" else "Stopped active alarm ringing"
+                                    )
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.testTag("stop_active_alarm_ringing_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.AlarmOff,
+                                    contentDescription = if (isHebrew) "השתק" else "Silence",
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (isHebrew) "השתק" else "Silence",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
+                    }
+
+                    if (showDeveloperDiagnostics) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        DeveloperAlarmDiagnosticsCard(
+                            diagnosticState = diagnosticState,
+                            isHebrew = isHebrew,
+                            currentMemberName = currentMember.name,
+                            onSchedule15sTest = {
+                                val res = FamilyAlarmScheduler.scheduleDiagnostic15SecondAlarm(
+                                    context = context,
+                                    currentMemberName = currentMember.name
+                                )
+                                if (res.isScheduled) {
+                                    onShowToast(
+                                        if (isHebrew) "בדיקת צלצול אמיתית נקבעה ב-AlarmManager לעוד 15 שניות ⏱️"
+                                        else "Real 15-second AlarmManager test scheduled ⏱️"
+                                    )
+                                } else {
+                                    onShowToast(
+                                        if (isHebrew) "שגיאה בתזמון בדיקת 15 שניות: ${res.errorMessage}"
+                                        else "Failed to schedule 15s test: ${res.errorMessage}"
+                                    )
+                                }
+                            },
+                            onStopRinging = {
+                                FamilyAlarmReceiver.stopActiveRinging(context)
+                            },
+                            onReset = {
+                                FamilyAlarmScheduler.resetDiagnosticState(context)
+                            }
+                        )
                     }
 
                     if (!hasExactPermission) {
@@ -697,20 +752,23 @@ private fun FamilyAlarmCard(
     onEdit: () -> Unit,
     onRequestDelete: () -> Unit
 ) {
+    val context = LocalContext.current
     val targetId = alarm.effectiveAssignedMemberId
     val isTargetedAtThisDevice = alarm.isTargetedAtDeviceMember(currentMember.id)
-    val isPendingTargetDevice = alarm.isEnabled && (
-        alarm.scheduleStatus == FamilyAlarm.STATUS_PENDING_TARGET_DEVICE ||
-            (targetId.isNotBlank() &&
-                targetId != currentMember.id &&
-                alarm.acknowledgedByMemberId != targetId)
-    )
+    val isRemoteTarget = alarm.isTargetedToAnotherMember() && !isTargetedAtThisDevice
+    val isTargetAcknowledged = alarm.isTargetDeviceAcknowledged()
+    val isPendingTargetDevice = alarm.isEnabled && isRemoteTarget && !isTargetAcknowledged
     val isExactPermNeeded = alarm.isEnabled && alarm.scheduleStatus == FamilyAlarm.STATUS_EXACT_PERMISSION_NEEDED
     val isScheduleError = alarm.isEnabled && alarm.scheduleStatus == FamilyAlarm.STATUS_SCHEDULE_ERROR
 
     val targetDisplayName = assignedMember?.name
         ?: alarm.assignedMemberName.takeIf { it.isNotBlank() }
         ?: if (isHebrew) "בן משפחה" else "Family Member"
+
+    val nextTriggerSummary = remember(alarm.hour, alarm.minute, alarm.daysOfWeek, alarm.isEnabled) {
+        if (!alarm.isEnabled) ""
+        else formatNextTriggerRelativeSummary(alarm, isHebrew)
+    }
 
     val (statusLabel, statusBg, statusFg) = when {
         !alarm.isEnabled -> Triple(
@@ -733,7 +791,7 @@ private fun FamilyAlarmCard(
             PastelYellowDark
         )
         isExactPermNeeded -> Triple(
-            if (isHebrew) "⚠️ מתוזמן (מומלץ לאשר הרשאת דיוק)" else "⚠️ Scheduled (exact permission recommended)",
+            if (isHebrew) "⚠️ מתוזמן ($nextTriggerSummary • מומלץ לאשר הרשאת דיוק)" else "⚠️ Scheduled ($nextTriggerSummary)",
             PastelYellowBackground,
             PastelYellowDark
         )
@@ -741,16 +799,17 @@ private fun FamilyAlarmCard(
             if (isHebrew) {
                 val dev = alarm.acknowledgedByDeviceName.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
                 if (isTargetedAtThisDevice) {
-                    "✓ מתוזמן ויצלצל במכשיר זה$dev"
+                    val triggerNote = nextTriggerSummary.takeIf { it.isNotBlank() }?.let { " • $it" }.orEmpty()
+                    "✓ מתוזמן במכשיר זה$triggerNote"
                 } else {
-                    "✓ מתוזמן במכשיר של $targetDisplayName$dev"
+                    "✓ סונכרן ומתוזמן במכשיר של $targetDisplayName$dev"
                 }
             } else {
                 val dev = alarm.acknowledgedByDeviceName.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
                 if (isTargetedAtThisDevice) {
-                    "✓ Scheduled to ring on this device$dev"
+                    "✓ Scheduled on this device ($nextTriggerSummary)"
                 } else {
-                    "✓ Scheduled on $targetDisplayName's device$dev"
+                    "✓ Synced & scheduled on $targetDisplayName's device$dev"
                 }
             },
             PastelGreenBackground,
@@ -925,12 +984,15 @@ private fun FamilyAlarmCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                val daysText = if (alarm.daysOfWeek.size >= 6) {
-                    if (isHebrew) "כל ימי הלימודים (א׳-ו׳)" else "School days (Sun-Fri)"
-                } else {
-                    alarm.daysOfWeek.joinToString(", ") {
-                        if (isHebrew) it.shortHe else it.getDisplayName(false).take(3)
-                    }
+                val daysText = when {
+                    alarm.daysOfWeek.size >= 7 ->
+                        if (isHebrew) "כל ימות השבוע (א׳-ש׳)" else "Every day (Sun-Sat)"
+                    alarm.daysOfWeek.size == 6 && SchoolDay.SATURDAY !in alarm.daysOfWeek ->
+                        if (isHebrew) "ימי לימודים (א׳-ו׳)" else "School days (Sun-Fri)"
+                    else ->
+                        alarm.daysOfWeek.joinToString(", ") {
+                            if (isHebrew) it.shortHe else it.getDisplayName(false).take(3)
+                        }
                 }
 
                 Text(
@@ -1001,10 +1063,14 @@ private fun AddOrEditFamilyAlarmDialog(
     val childMembers = remember(members) { members.filter { it.role == UserRole.CHILD } }
 
     var title by remember(alarmToEdit) {
-        mutableStateOf(alarmToEdit?.title ?: if (isHebrew) "השכמה לבית הספר ☀️" else "School Wake-Up ☀️")
+        mutableStateOf(alarmToEdit?.title ?: if (isHebrew) "שעון מעורר ☀️" else "Wake-Up Alarm ☀️")
     }
     var timeFormatted by remember(alarmToEdit) {
-        mutableStateOf(alarmToEdit?.formattedTime24h ?: "07:00")
+        val defaultTime = alarmToEdit?.formattedTime24h ?: run {
+            val cal = Calendar.getInstance().apply { add(Calendar.MINUTE, 2) }
+            String.format(Locale.US, "%02d:%02d", cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE))
+        }
+        mutableStateOf(defaultTime)
     }
 
     // Default assignment:
@@ -1025,14 +1091,7 @@ private fun AddOrEditFamilyAlarmDialog(
 
     var selectedDays by remember(alarmToEdit) {
         mutableStateOf(
-            alarmToEdit?.daysOfWeek?.toSet() ?: setOf(
-                SchoolDay.SUNDAY,
-                SchoolDay.MONDAY,
-                SchoolDay.TUESDAY,
-                SchoolDay.WEDNESDAY,
-                SchoolDay.THURSDAY,
-                SchoolDay.FRIDAY
-            )
+            alarmToEdit?.daysOfWeek?.toSet() ?: SchoolDay.allWeekDays.toSet()
         )
     }
     var soundType by remember(alarmToEdit) {
@@ -1126,6 +1185,36 @@ private fun AddOrEditFamilyAlarmDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
 
+                val previewNextTriggerText = remember(timeFormatted, selectedDays, isHebrew) {
+                    val parts = timeFormatted.split(":")
+                    val hr = parts.getOrNull(0)?.toIntOrNull()?.coerceIn(0, 23) ?: 7
+                    val min = parts.getOrNull(1)?.toIntOrNull()?.coerceIn(0, 59) ?: 0
+                    val tempAlarm = FamilyAlarm(
+                        id = "preview",
+                        title = title,
+                        hour = hr,
+                        minute = min,
+                        daysOfWeek = SchoolDay.allWeekDays.filter { it in selectedDays }.ifEmpty { SchoolDay.allWeekDays }
+                    )
+                    formatNextTriggerRelativeSummary(tempAlarm, isHebrew)
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = PastelGreenBackground,
+                    border = BorderStroke(1.dp, PastelGreenDark.copy(alpha = 0.35f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = if (isHebrew) "⏰ מועד צלצול הבא: $previewNextTriggerText" else "⏰ Next ring: $previewNextTriggerText",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = PastelGreenDark
+                        ),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+
                 Text(
                     text = if (isHebrew) "ימים בשבוע:" else "Days of Week:",
                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
@@ -1135,7 +1224,7 @@ private fun AddOrEditFamilyAlarmDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    SchoolDay.values().forEach { day ->
+                    SchoolDay.allWeekDays.forEach { day ->
                         val isSelected = day in selectedDays
                         Surface(
                             shape = RoundedCornerShape(10.dp),
@@ -1588,6 +1677,7 @@ private fun openAndroidSystemClock(
                 SchoolDay.WEDNESDAY -> calendarDays.add(Calendar.WEDNESDAY)
                 SchoolDay.THURSDAY -> calendarDays.add(Calendar.THURSDAY)
                 SchoolDay.FRIDAY -> calendarDays.add(Calendar.FRIDAY)
+                SchoolDay.SATURDAY -> calendarDays.add(Calendar.SATURDAY)
             }
         }
         val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
@@ -1607,5 +1697,249 @@ private fun openAndroidSystemClock(
             if (isHebrew) "השעון המעורר תוזמן ישירות במערכת FamilyTasks (${alarm.formattedTime24h}) ⏰"
             else "Alarm scheduled directly in FamilyTasks (${alarm.formattedTime24h}) ⏰"
         )
+    }
+}
+
+private fun formatNextTriggerRelativeSummary(
+    alarm: FamilyAlarm,
+    isHebrew: Boolean
+): String {
+    val nowMillis = System.currentTimeMillis()
+    val nextMillis = FamilyAlarmScheduler.computeNextTriggerAtMillis(alarm, nowMillis)
+    val nowCal = Calendar.getInstance().apply { timeInMillis = nowMillis }
+    val targetCal = Calendar.getInstance().apply { timeInMillis = nextMillis }
+
+    val diffMinutes = ((nextMillis - nowMillis + 59_999L) / 60_000L).coerceAtLeast(1L)
+    val sameDay = nowCal.get(Calendar.YEAR) == targetCal.get(Calendar.YEAR) &&
+        nowCal.get(Calendar.DAY_OF_YEAR) == targetCal.get(Calendar.DAY_OF_YEAR)
+
+    val tomorrowCal = (nowCal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, 1) }
+    val isTomorrow = tomorrowCal.get(Calendar.YEAR) == targetCal.get(Calendar.YEAR) &&
+        tomorrowCal.get(Calendar.DAY_OF_YEAR) == targetCal.get(Calendar.DAY_OF_YEAR)
+
+    val dayNameHe = when (targetCal.get(Calendar.DAY_OF_WEEK)) {
+        Calendar.SUNDAY -> "יום ראשון"
+        Calendar.MONDAY -> "יום שני"
+        Calendar.TUESDAY -> "יום שלישי"
+        Calendar.WEDNESDAY -> "יום רביעי"
+        Calendar.THURSDAY -> "יום חמישי"
+        Calendar.FRIDAY -> "יום שישי"
+        Calendar.SATURDAY -> "יום שבת"
+        else -> ""
+    }
+
+    return if (isHebrew) {
+        when {
+            sameDay && diffMinutes <= 60L -> "היום ב-${alarm.formattedTime24h} (בעוד $diffMinutes דק׳)"
+            sameDay -> "היום ב-${alarm.formattedTime24h}"
+            isTomorrow -> "מחר ($dayNameHe) ב-${alarm.formattedTime24h}"
+            else -> "$dayNameHe ב-${alarm.formattedTime24h}"
+        }
+    } else {
+        when {
+            sameDay && diffMinutes <= 60L -> "Today at ${alarm.formattedTime24h} (in ${diffMinutes}m)"
+            sameDay -> "Today at ${alarm.formattedTime24h}"
+            isTomorrow -> "Tomorrow at ${alarm.formattedTime24h}"
+            else -> "At ${alarm.formattedTime24h}"
+        }
+    }
+}
+
+@Composable
+private fun DeveloperAlarmDiagnosticsCard(
+    diagnosticState: AlarmDiagnosticState,
+    isHebrew: Boolean,
+    currentMemberName: String,
+    onSchedule15sTest: () -> Unit,
+    onStopRinging: () -> Unit,
+    onReset: () -> Unit
+) {
+    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(diagnosticState.isScheduled, diagnosticState.triggerAtMillis) {
+        while (diagnosticState.isScheduled && !diagnosticState.receiverTriggered) {
+            nowMillis = System.currentTimeMillis()
+            kotlinx.coroutines.delay(500L)
+        }
+        nowMillis = System.currentTimeMillis()
+    }
+
+    val remainingSeconds = if (diagnosticState.isScheduled && diagnosticState.triggerAtMillis > nowMillis) {
+        ((diagnosticState.triggerAtMillis - nowMillis + 999L) / 1000L).coerceAtLeast(0L)
+    } else {
+        0L
+    }
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = Color.White,
+        border = BorderStroke(1.dp, GoogleBlue.copy(alpha = 0.45f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("developer_alarm_diagnostics_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (isHebrew) "כלי אבחון מפתחים (Developer Diagnostics)" else "Developer Alarm Diagnostics",
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = GoogleBlueDark
+                    )
+                )
+                if (diagnosticState.isScheduled || diagnosticState.errorMessage.isNotBlank()) {
+                    TextButton(
+                        onClick = onReset,
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                        modifier = Modifier.height(26.dp)
+                    ) {
+                        Text(
+                            text = if (isHebrew) "איפוס" else "Reset",
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onSchedule15sTest,
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = GoogleBlueDark,
+                        contentColor = Color.White
+                    ),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("diagnostic_alarm_15s_button")
+                ) {
+                    Text(
+                        text = "בדיקת צלצול בעוד 15 שניות",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                if (diagnosticState.audioPlaybackStarted || diagnosticState.ringingServiceStarted) {
+                    FilledTonalButton(
+                        onClick = onStopRinging,
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = GoogleRedLight,
+                            contentColor = GoogleRedDark
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("diagnostic_stop_ringing_button")
+                    ) {
+                        Text(
+                            text = if (isHebrew) "עצור צלצול" else "Stop",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            // Diagnostic pipeline checklist
+            Column(
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFFF3F6FC), RoundedCornerShape(8.dp))
+                    .padding(8.dp)
+            ) {
+                val permStatusText = if (diagnosticState.exactAlarmPermissionGranted) {
+                    "✓ הרשאת התראה מדויקת: מאושרת (${diagnosticState.schedulingMethod.ifBlank { "EXACT" }})"
+                } else {
+                    "⚠️ הרשאת התראה מדויקת: לא זמינה (שימוש ב-AlarmClock / Window)"
+                }
+                Text(
+                    text = permStatusText,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.testTag("diag_status_permission")
+                )
+
+                val scheduledText = if (diagnosticState.isScheduled) {
+                    val countNote = if (!diagnosticState.receiverTriggered && remainingSeconds > 0L) {
+                        " (בעוד ${remainingSeconds} שניות)"
+                    } else ""
+                    "✓ 1. נקבע ב-AlarmManager: כן$countNote"
+                } else {
+                    "○ 1. נקבע ב-AlarmManager: טרם הופעל"
+                }
+                Text(
+                    text = scheduledText,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontWeight = if (diagnosticState.isScheduled) FontWeight.Bold else FontWeight.Normal,
+                        color = if (diagnosticState.isScheduled) PastelGreenDark else MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    modifier = Modifier.testTag("diag_status_scheduled")
+                )
+
+                val receiverText = if (diagnosticState.receiverTriggered) {
+                    "✓ 2. BroadcastReceiver הופעל (FamilyAlarmReceiver)"
+                } else {
+                    "○ 2. BroadcastReceiver הופעל: ממתין..."
+                }
+                Text(
+                    text = receiverText,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontWeight = if (diagnosticState.receiverTriggered) FontWeight.Bold else FontWeight.Normal,
+                        color = if (diagnosticState.receiverTriggered) PastelGreenDark else MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    modifier = Modifier.testTag("diag_status_receiver")
+                )
+
+                val serviceText = if (diagnosticState.ringingServiceStarted) {
+                    "✓ 3. שירות צלצול הופעל (FamilyAlarmRingingService Foreground)"
+                } else {
+                    "○ 3. שירות צלצול הופעל: ממתין..."
+                }
+                Text(
+                    text = serviceText,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontWeight = if (diagnosticState.ringingServiceStarted) FontWeight.Bold else FontWeight.Normal,
+                        color = if (diagnosticState.ringingServiceStarted) PastelGreenDark else MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    modifier = Modifier.testTag("diag_status_service")
+                )
+
+                val audioText = if (diagnosticState.audioPlaybackStarted) {
+                    val engine = diagnosticState.audioEngineDetails.takeIf { it.isNotBlank() }?.let { " [$it]" }.orEmpty()
+                    "✓ 4. ניגון שמע הופעל (USAGE_ALARM)$engine"
+                } else {
+                    "○ 4. ניגון שמע הופעל: ממתין..."
+                }
+                Text(
+                    text = audioText,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontWeight = if (diagnosticState.audioPlaybackStarted) FontWeight.Bold else FontWeight.Normal,
+                        color = if (diagnosticState.audioPlaybackStarted) PastelGreenDark else MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    modifier = Modifier.testTag("diag_status_audio")
+                )
+
+                if (diagnosticState.errorMessage.isNotBlank()) {
+                    Text(
+                        text = "❌ שגיאה: ${diagnosticState.errorMessage}",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = GoogleRedDark
+                        ),
+                        modifier = Modifier.testTag("diag_status_error")
+                    )
+                }
+            }
+        }
     }
 }

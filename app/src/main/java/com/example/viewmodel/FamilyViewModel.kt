@@ -27,6 +27,10 @@ class FamilyViewModel(
     val authManager: FirebaseAuthManager = FirebaseAuthManager()
 ) : ViewModel() {
 
+    fun attachApplicationContext(context: Context) {
+        repository.attachApplicationContext(context)
+    }
+
     // Core data streams from Repository
     val familyName: StateFlow<String> = repository.familyName
     val members: StateFlow<List<FamilyMember>> = repository.members

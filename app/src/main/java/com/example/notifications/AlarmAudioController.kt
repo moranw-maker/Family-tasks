@@ -12,6 +12,7 @@ import android.media.Ringtone
 import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -20,7 +21,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,7 +28,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.sin
 
@@ -54,10 +57,10 @@ data class AudioPreviewState(
  * Handles:
  * 1. Immediate in-dialog sound & volume preview (with automatic stop on screen exit or timeout).
  * 2. Continuous foreground alarm ringing with `AudioAttributes.USAGE_ALARM`, audio focus,
- *    volume scaling, custom URI local caching, and safe fallback so an alarm NEVER fails silently.
+ *    volume scaling, custom URI local caching, and multi-layer fallback so an alarm NEVER fails silently.
  * 3. Built-in synthesized melodies (`MELODY_ENERGETIC`, `MELODY_GENTLE`, `MELODY_CLASSIC`)
- *    rendered via PCM `AudioTrack` on the `USAGE_ALARM` stream so they sound identical on every
- *    parent and child device without external file dependencies.
+ *    rendered into standard 16-bit PCM RIFF `.wav` files played via `MediaPlayer` (`USAGE_ALARM`)
+ *    and backed by streaming `AudioTrack(MODE_STREAM)` + `RingtoneManager`.
  */
 object AlarmAudioController {
 
@@ -122,6 +125,8 @@ object AlarmAudioController {
     private var previewRingtone: Ringtone? = null
     private var previewAudioTrack: AudioTrack? = null
     private var previewFocusRequest: AudioFocusRequest? = null
+    @Volatile
+    private var previewStreamVolumeScalar: Float = 0.85f
 
     private var alarmJob: Job? = null
     private var alarmMediaPlayer: MediaPlayer? = null
@@ -129,6 +134,8 @@ object AlarmAudioController {
     private var alarmAudioTrack: AudioTrack? = null
     private var alarmVibrator: Vibrator? = null
     private var alarmFocusRequest: AudioFocusRequest? = null
+    @Volatile
+    private var alarmStreamVolumeScalar: Float = 0.85f
 
     private val _previewState = MutableStateFlow(AudioPreviewState())
     val previewState: StateFlow<AudioPreviewState> = _previewState.asStateFlow()
@@ -181,7 +188,6 @@ object AlarmAudioController {
 
             Pair(Uri.fromFile(destFile).toString(), displayName)
         }.recoverCatching {
-            // If copying fails but direct URI is readable, verify readability and use sourceUri
             context.contentResolver.openAssetFileDescriptor(sourceUri, "r")?.use {
                 // Readable directly
             } ?: throw IllegalStateException("קובץ השמע שנבחר אינו נגיש לקריאה")
@@ -217,11 +223,12 @@ object AlarmAudioController {
         volumePercent: Int,
         durationMillis: Long = 7_000L
     ) {
-        val appCtx = context.applicationContext
+        val appCtx = context.applicationContext ?: context
         stopPreview(appCtx)
 
         val clampedVolume = volumePercent.coerceIn(10, 100)
         val volumeScalar = (clampedVolume / 100f).coerceIn(0.05f, 1.0f)
+        previewStreamVolumeScalar = volumeScalar
 
         requestAlarmAudioFocus(appCtx, isPreview = true)
         applyDeviceAlarmStreamVolume(appCtx, clampedVolume)
@@ -254,18 +261,20 @@ object AlarmAudioController {
                 return
             }
         } else if (isBuiltInMelody(soundType)) {
-            startSynthesizedMelodyLoop(
+            val startedWav = startBuiltInMelodyWavMediaPlayer(
+                context = appCtx,
                 soundType = soundType,
                 volumeScalar = volumeScalar,
-                isPreview = true,
-                maxDurationMillis = durationMillis
+                isPreview = true
             )
-            _previewState.value = AudioPreviewState(
-                isPlaying = true,
-                activeSoundType = soundType,
-                activeVolumePercent = clampedVolume
-            )
-            return
+            if (!startedWav) {
+                startSynthesizedMelodyStreamingLoop(
+                    soundType = soundType,
+                    volumeScalar = volumeScalar,
+                    isPreview = true,
+                    maxDurationMillis = durationMillis
+                )
+            }
         } else {
             val sysUri = resolveSystemToneUri(appCtx, soundType)
             val startedMedia = sysUri != null && startMediaPlayerInternal(
@@ -277,13 +286,20 @@ object AlarmAudioController {
             if (!startedMedia) {
                 val startedRingtone = sysUri != null && startRingtoneInternal(appCtx, sysUri, volumeScalar, isPreview = true)
                 if (!startedRingtone) {
-                    // Fallback to synthesized classic melody so preview is always audible
-                    startSynthesizedMelodyLoop(
+                    val startedWav = startBuiltInMelodyWavMediaPlayer(
+                        context = appCtx,
                         soundType = SOUND_MELODY_CLASSIC,
                         volumeScalar = volumeScalar,
-                        isPreview = true,
-                        maxDurationMillis = durationMillis
+                        isPreview = true
                     )
+                    if (!startedWav) {
+                        startSynthesizedMelodyStreamingLoop(
+                            soundType = SOUND_MELODY_CLASSIC,
+                            volumeScalar = volumeScalar,
+                            isPreview = true,
+                            maxDurationMillis = durationMillis
+                        )
+                    }
                 }
             }
         }
@@ -295,6 +311,7 @@ object AlarmAudioController {
         )
 
         synchronized(lock) {
+            previewJob?.cancel()
             previewJob = scope.launch {
                 delay(durationMillis)
                 stopPreview(appCtx)
@@ -308,6 +325,7 @@ object AlarmAudioController {
     fun updateActivePreviewVolume(context: Context, volumePercent: Int) {
         val clamped = volumePercent.coerceIn(10, 100)
         val scalar = (clamped / 100f).coerceIn(0.05f, 1.0f)
+        previewStreamVolumeScalar = scalar
         synchronized(lock) {
             runCatching { previewMediaPlayer?.setVolume(scalar, scalar) }
             runCatching {
@@ -318,7 +336,7 @@ object AlarmAudioController {
             runCatching { previewAudioTrack?.setVolume(scalar) }
         }
         if (_previewState.value.isPlaying) {
-            applyDeviceAlarmStreamVolume(context.applicationContext, clamped)
+            applyDeviceAlarmStreamVolume(context.applicationContext ?: context, clamped)
             _previewState.value = _previewState.value.copy(activeVolumePercent = clamped)
         }
     }
@@ -355,7 +373,7 @@ object AlarmAudioController {
             previewAudioTrack = null
 
             if (context != null) {
-                abandonAlarmAudioFocus(context.applicationContext, isPreview = true)
+                abandonAlarmAudioFocus(context.applicationContext ?: context, isPreview = true)
             }
         }
         _previewState.value = AudioPreviewState(isPlaying = false)
@@ -363,8 +381,12 @@ object AlarmAudioController {
 
     /**
      * Starts continuous alarm playback + optional vibration for an active alarm trigger.
-     * Guaranteed not to fail silently: if a custom URI or system tone is unavailable,
-     * automatically falls back to default system alarm tone and then to synthesized PCM alarm audio.
+     * Guaranteed not to fail silently:
+     * 1. Tries requested sound (Custom URI / Built-in WAV melody via MediaPlayer / System tone via MediaPlayer or Ringtone).
+     * 2. Falls back to built-in WAV melody via MediaPlayer (`USAGE_ALARM`).
+     * 3. Falls back to default system alarm Ringtone (`USAGE_ALARM`).
+     * 4. Falls back to `AudioTrack(MODE_STREAM)` PCM streaming loop (`USAGE_ALARM`).
+     * Records the exact playback method or error in [FamilyAlarmScheduler] diagnostics.
      */
     fun startAlarmRinging(
         context: Context,
@@ -372,74 +394,98 @@ object AlarmAudioController {
         customSoundUri: String,
         volumePercent: Int,
         vibrateEnabled: Boolean
-    ) {
-        val appCtx = context.applicationContext
+    ): Boolean {
+        val appCtx = context.applicationContext ?: context
         stopPreview(appCtx)
         stopAlarmRinging(appCtx)
 
         val clampedVolume = volumePercent.coerceIn(10, 100)
         val volumeScalar = (clampedVolume / 100f).coerceIn(0.1f, 1.0f)
+        alarmStreamVolumeScalar = volumeScalar
 
         requestAlarmAudioFocus(appCtx, isPreview = false)
         applyDeviceAlarmStreamVolume(appCtx, clampedVolume)
 
         var playbackStarted = false
+        var activeMethod = ""
 
+        // 1. Custom URI if selected
         if (soundType == SOUND_CUSTOM_URI && customSoundUri.isNotBlank()) {
-            playbackStarted = startMediaPlayerInternal(
-                context = appCtx,
-                uri = Uri.parse(customSoundUri),
-                volumeScalar = volumeScalar,
-                isPreview = false
-            )
+            if (startMediaPlayerInternal(appCtx, Uri.parse(customSoundUri), volumeScalar, isPreview = false)) {
+                playbackStarted = true
+                activeMethod = "MediaPlayer (Custom Audio • USAGE_ALARM)"
+            }
         }
 
+        // 2. Built-in melody via generated RIFF WAV + MediaPlayer (USAGE_ALARM)
         if (!playbackStarted && isBuiltInMelody(soundType)) {
-            startSynthesizedMelodyLoop(
-                soundType = soundType,
-                volumeScalar = volumeScalar,
-                isPreview = false,
-                maxDurationMillis = 5 * 60_000L
-            )
-            playbackStarted = true
+            if (startBuiltInMelodyWavMediaPlayer(appCtx, soundType, volumeScalar, isPreview = false)) {
+                playbackStarted = true
+                activeMethod = "MediaPlayer WAV ($soundType • USAGE_ALARM)"
+            }
         }
 
-        if (!playbackStarted) {
+        // 3. System Alarm / Notification / Ringtone URI via MediaPlayer or Ringtone
+        if (!playbackStarted && !isBuiltInMelody(soundType)) {
             val sysUri = resolveSystemToneUri(appCtx, soundType)
                 ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
                 ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
             if (sysUri != null) {
-                playbackStarted = startMediaPlayerInternal(
-                    context = appCtx,
-                    uri = sysUri,
-                    volumeScalar = volumeScalar,
-                    isPreview = false
-                )
-                if (!playbackStarted) {
-                    playbackStarted = startRingtoneInternal(
-                        context = appCtx,
-                        uri = sysUri,
-                        volumeScalar = volumeScalar,
-                        isPreview = false
-                    )
+                if (startMediaPlayerInternal(appCtx, sysUri, volumeScalar, isPreview = false)) {
+                    playbackStarted = true
+                    activeMethod = "MediaPlayer (System Tone • USAGE_ALARM)"
+                } else if (startRingtoneInternal(appCtx, sysUri, volumeScalar, isPreview = false)) {
+                    playbackStarted = true
+                    activeMethod = "RingtoneManager (System Tone • USAGE_ALARM)"
                 }
             }
         }
 
-        // Ultimate safety fallback: synthesized alarm melody on USAGE_ALARM
+        // 4. Fallback A: Built-in WAV melody via MediaPlayer
         if (!playbackStarted) {
-            startSynthesizedMelodyLoop(
-                soundType = SOUND_MELODY_ENERGETIC,
+            val fallbackMelody = if (isBuiltInMelody(soundType)) soundType else SOUND_MELODY_ENERGETIC
+            if (startBuiltInMelodyWavMediaPlayer(appCtx, fallbackMelody, volumeScalar, isPreview = false)) {
+                playbackStarted = true
+                activeMethod = "MediaPlayer WAV Fallback ($fallbackMelody • USAGE_ALARM)"
+            }
+        }
+
+        // 5. Fallback B: System default alarm via RingtoneManager
+        if (!playbackStarted) {
+            val defaultAlarmUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            if (defaultAlarmUri != null && startRingtoneInternal(appCtx, defaultAlarmUri, volumeScalar, isPreview = false)) {
+                playbackStarted = true
+                activeMethod = "RingtoneManager Default Alarm (USAGE_ALARM)"
+            }
+        }
+
+        // 6. Ultimate Fallback C: Streaming PCM AudioTrack (MODE_STREAM) on USAGE_ALARM
+        if (!playbackStarted) {
+            val fallbackMelody = if (isBuiltInMelody(soundType)) soundType else SOUND_MELODY_ENERGETIC
+            startSynthesizedMelodyStreamingLoop(
+                soundType = fallbackMelody,
                 volumeScalar = volumeScalar,
                 isPreview = false,
                 maxDurationMillis = 5 * 60_000L
             )
+            playbackStarted = true
+            activeMethod = "AudioTrack PCM Stream ($fallbackMelody • USAGE_ALARM)"
         }
 
         if (vibrateEnabled) {
             startContinuousVibration(appCtx)
         }
+
+        if (playbackStarted) {
+            FamilyAlarmScheduler.recordDiagnosticAudioStarted(activeMethod)
+        } else {
+            FamilyAlarmScheduler.recordDiagnosticError("כל שיטות ניגון השמע נכשלו (MediaPlayer / Ringtone / AudioTrack)")
+        }
+
+        return playbackStarted
     }
 
     fun stopAlarmRinging(context: Context? = null) {
@@ -473,7 +519,7 @@ object AlarmAudioController {
             alarmVibrator = null
 
             if (context != null) {
-                abandonAlarmAudioFocus(context.applicationContext, isPreview = false)
+                abandonAlarmAudioFocus(context.applicationContext ?: context, isPreview = false)
             }
         }
     }
@@ -515,7 +561,46 @@ object AlarmAudioController {
         return runCatching {
             val mp = MediaPlayer()
             mp.setAudioAttributes(buildAlarmAudioAttributes())
+            if (!isPreview) {
+                runCatching { mp.setWakeMode(context, PowerManager.PARTIAL_WAKE_LOCK) }
+            }
             mp.setDataSource(context, uri)
+            mp.isLooping = true
+            mp.setVolume(volumeScalar, volumeScalar)
+            mp.prepare()
+            mp.start()
+            synchronized(lock) {
+                if (isPreview) {
+                    previewMediaPlayer = mp
+                } else {
+                    alarmMediaPlayer = mp
+                }
+            }
+            true
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Generates a standard 16-bit PCM RIFF `.wav` file for [soundType] and plays it with
+     * Android's native [MediaPlayer] on [AudioAttributes.USAGE_ALARM].
+     */
+    private fun startBuiltInMelodyWavMediaPlayer(
+        context: Context,
+        soundType: String,
+        volumeScalar: Float,
+        isPreview: Boolean
+    ): Boolean {
+        return runCatching {
+            val wavFile = ensureSynthesizedWavFile(context, soundType)
+            if (!wavFile.exists() || wavFile.length() <= 44L) return false
+            val mp = MediaPlayer()
+            mp.setAudioAttributes(buildAlarmAudioAttributes())
+            if (!isPreview) {
+                runCatching { mp.setWakeMode(context, PowerManager.PARTIAL_WAKE_LOCK) }
+            }
+            FileInputStream(wavFile).use { fis ->
+                mp.setDataSource(fis.fd)
+            }
             mp.isLooping = true
             mp.setVolume(volumeScalar, volumeScalar)
             mp.prepare()
@@ -557,52 +642,103 @@ object AlarmAudioController {
     }
 
     /**
-     * Synthesizes a clean musical alarm melody into a PCM 16-bit buffer and loops it on
-     * `AudioAttributes.USAGE_ALARM`. Works reliably on every Android phone and emulator.
+     * Creates (or reuses) a valid 44-byte header 16-bit PCM `.wav` file in `cacheDir/alarm_wavs/`
+     * containing the synthesized melody for [soundType].
      */
-    private fun startSynthesizedMelodyLoop(
+    private fun ensureSynthesizedWavFile(context: Context, soundType: String): File {
+        val sampleRate = 24000
+        val notes = getMelodyNotes(soundType)
+        val pcmSamples = synthesizeMelodyPcm(sampleRate, notes)
+        val dir = File(context.cacheDir, "alarm_wavs").apply { mkdirs() }
+        val file = File(dir, "family_alarm_${soundType.lowercase()}.wav")
+        val expectedLength = 44L + pcmSamples.size * 2L
+        if (file.exists() && file.length() == expectedLength) {
+            return file
+        }
+
+        val dataSize = pcmSamples.size * 2
+        val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN).apply {
+            put("RIFF".toByteArray(Charsets.US_ASCII))
+            putInt(36 + dataSize)
+            put("WAVE".toByteArray(Charsets.US_ASCII))
+            put("fmt ".toByteArray(Charsets.US_ASCII))
+            putInt(16) // PCM chunk size
+            putShort(1.toShort()) // AudioFormat = 1 (PCM)
+            putShort(1.toShort()) // NumChannels = 1 (Mono)
+            putInt(sampleRate)
+            putInt(sampleRate * 2) // ByteRate
+            putShort(2.toShort()) // BlockAlign
+            putShort(16.toShort()) // BitsPerSample
+            put("data".toByteArray(Charsets.US_ASCII))
+            putInt(dataSize)
+        }.array()
+
+        val pcmBytes = ByteBuffer.allocate(dataSize).order(ByteOrder.LITTLE_ENDIAN).apply {
+            for (sample in pcmSamples) {
+                putShort(sample)
+            }
+        }.array()
+
+        FileOutputStream(file).use { fos ->
+            fos.write(header)
+            fos.write(pcmBytes)
+            fos.flush()
+        }
+        return file
+    }
+
+    private fun getMelodyNotes(soundType: String): List<Pair<Double, Int>> = when (soundType) {
+        SOUND_MELODY_ENERGETIC -> listOf(
+            // Upbeat C-major / G-major morning fanfare (freq Hz, duration ms)
+            523.25 to 180, // C5
+            659.25 to 180, // E5
+            783.99 to 180, // G5
+            1046.50 to 320, // C6
+            0.0 to 100,
+            783.99 to 160, // G5
+            1046.50 to 400, // C6
+            0.0 to 360
+        )
+        SOUND_MELODY_GENTLE -> listOf(
+            // Warm pentatonic sunrise chimes
+            440.00 to 280, // A4
+            554.37 to 280, // C#5
+            659.25 to 340, // E5
+            880.00 to 460, // A5
+            0.0 to 240,
+            659.25 to 280, // E5
+            554.37 to 420, // C#5
+            0.0 to 400
+        )
+        else -> listOf(
+            // Classic crisp dual-beep digital alarm
+            880.00 to 140,
+            0.0 to 70,
+            880.00 to 140,
+            0.0 to 70,
+            1174.66 to 180,
+            0.0 to 450
+        )
+    }
+
+    /**
+     * Streams a synthesized PCM 16-bit melody buffer using [AudioTrack.MODE_STREAM] on
+     * `AudioAttributes.USAGE_ALARM` (never uses `MODE_STATIC` / `setLoopPoints`).
+     */
+    private fun startSynthesizedMelodyStreamingLoop(
         soundType: String,
         volumeScalar: Float,
         isPreview: Boolean,
         maxDurationMillis: Long
     ) {
         val sampleRate = 24000
-        val patternNotes: List<Pair<Double, Int>> = when (soundType) {
-            SOUND_MELODY_ENERGETIC -> listOf(
-                // Upbeat C-major / G-major morning fanfare (freq Hz, duration ms)
-                523.25 to 180, // C5
-                659.25 to 180, // E5
-                783.99 to 180, // G5
-                1046.50 to 320, // C6
-                0.0 to 100,
-                783.99 to 160, // G5
-                1046.50 to 400, // C6
-                0.0 to 360
-            )
-            SOUND_MELODY_GENTLE -> listOf(
-                // Warm pentatonic sunrise chimes
-                440.00 to 280, // A4
-                554.37 to 280, // C#5
-                659.25 to 340, // E5
-                880.00 to 460, // A5
-                0.0 to 240,
-                659.25 to 280, // E5
-                554.37 to 420, // C#5
-                0.0 to 400
-            )
-            else -> listOf(
-                // Classic crisp dual-beep digital alarm
-                880.00 to 140,
-                0.0 to 70,
-                880.00 to 140,
-                0.0 to 70,
-                1174.66 to 180,
-                0.0 to 450
-            )
-        }
-
+        val patternNotes = getMelodyNotes(soundType)
         val pcmSamples = synthesizeMelodyPcm(sampleRate, patternNotes)
-        val byteCount = pcmSamples.size * 2
+        val minBufBytes = AudioTrack.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        ).coerceAtLeast(4096)
 
         val job = scope.launch {
             val track = runCatching {
@@ -615,12 +751,8 @@ object AlarmAudioController {
                             .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                             .build()
                     )
-                    .setBufferSizeInBytes(maxOf(byteCount, AudioTrack.getMinBufferSize(
-                        sampleRate,
-                        AudioFormat.CHANNEL_OUT_MONO,
-                        AudioFormat.ENCODING_PCM_16BIT
-                    )))
-                    .setTransferMode(AudioTrack.MODE_STATIC)
+                    .setBufferSizeInBytes(minBufBytes * 2)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
                     .build()
             }.getOrNull() ?: return@launch
 
@@ -633,15 +765,25 @@ object AlarmAudioController {
             }
 
             runCatching {
-                track.write(pcmSamples, 0, pcmSamples.size)
-                track.setLoopPoints(0, pcmSamples.size, -1)
                 track.setVolume(volumeScalar)
                 track.play()
             }
 
             val startMillis = System.currentTimeMillis()
+            val chunkSize = 2048
             while (isActive && (System.currentTimeMillis() - startMillis) < maxDurationMillis) {
-                delay(250L)
+                var offset = 0
+                while (isActive && offset < pcmSamples.size && (System.currentTimeMillis() - startMillis) < maxDurationMillis) {
+                    val count = minOf(chunkSize, pcmSamples.size - offset)
+                    val written = runCatching {
+                        track.write(pcmSamples, offset, count)
+                    }.getOrDefault(-1)
+                    if (written <= 0) {
+                        delay(50L)
+                        break
+                    }
+                    offset += written
+                }
             }
 
             if (isPreview) {
@@ -680,9 +822,8 @@ object AlarmAudioController {
                         else -> 1.0
                     }.coerceIn(0.0, 1.0)
                     val t = i.toDouble() / sampleRate
-                    // Fundamental + soft octave overtone for rich bell-like clarity
                     val wave = 0.78 * sin(2.0 * PI * freq * t) + 0.22 * sin(2.0 * PI * (freq * 2.0) * t)
-                    val sample = (wave * envelope * 22000.0).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                    val sample = (wave * envelope * 24000.0).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
                     buffer[cursor++] = sample.toShort()
                 }
             }

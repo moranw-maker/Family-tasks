@@ -51,6 +51,10 @@ fun FamilyTasksApp(
     viewModel: FamilyViewModel = viewModel()
 ) {
     val context = LocalContext.current
+    remember(context) {
+        viewModel.attachApplicationContext(context)
+        true
+    }
 
     // Collect States
     val familyName by viewModel.familyName.collectAsStateWithLifecycle()

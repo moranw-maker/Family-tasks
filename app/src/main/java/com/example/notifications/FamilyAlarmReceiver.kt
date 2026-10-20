@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.PowerManager
 import com.example.model.FamilyAlarm
 import com.example.model.SchoolDay
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * BroadcastReceiver that handles exact/inexact local alarm triggers from [FamilyAlarmScheduler]
@@ -17,6 +18,20 @@ import com.example.model.SchoolDay
 class FamilyAlarmReceiver : BroadcastReceiver() {
 
     companion object {
+        private val recentTriggerMap = ConcurrentHashMap<String, Long>()
+
+        fun wasRecentlyTriggered(alarmId: String, withinMillis: Long = 20_000L): Boolean {
+            if (alarmId.isBlank()) return false
+            val last = recentTriggerMap[alarmId] ?: return false
+            return (System.currentTimeMillis() - last) in 0..withinMillis
+        }
+
+        fun clearRecentTrigger(alarmId: String) {
+            if (alarmId.isNotBlank()) {
+                recentTriggerMap.remove(alarmId)
+            }
+        }
+
         fun stopActiveRinging(context: Context? = null) {
             if (context != null) {
                 FamilyAlarmRingingService.dismissActiveAlarm(context)
@@ -34,10 +49,12 @@ class FamilyAlarmReceiver : BroadcastReceiver() {
 
         when (action) {
             FamilyAlarmScheduler.ACTION_DISMISS_FAMILY_ALARM -> {
+                clearRecentTrigger(rawAlarmId)
                 FamilyAlarmRingingService.dismissActiveAlarm(context, rawAlarmId)
             }
 
             FamilyAlarmScheduler.ACTION_SNOOZE_FAMILY_ALARM -> {
+                clearRecentTrigger(rawAlarmId)
                 val persisted = FamilyAlarmScheduler.loadPersistedAlarms(context)
                     .find { it.id == rawAlarmId }
                 val title = intent.getStringExtra(FamilyAlarmScheduler.EXTRA_ALARM_TITLE)
@@ -80,6 +97,16 @@ class FamilyAlarmReceiver : BroadcastReceiver() {
                     .find { it.id == rawAlarmId }
 
                 val alarmId = rawAlarmId.ifBlank { persisted?.id ?: "alarm_default" }
+
+                // Deduplicate if both AlarmManager and in-process watchdog fire within 15s while already ringing
+                val currentlyRinging = FamilyAlarmRingingService.activeRingingAlarm.value?.alarmId == alarmId
+                if (currentlyRinging && wasRecentlyTriggered(alarmId, withinMillis = 15_000L)) {
+                    FamilyAlarmScheduler.recordDiagnosticReceiverTriggered(alarmId)
+                    return
+                }
+                recentTriggerMap[alarmId] = System.currentTimeMillis()
+                FamilyAlarmScheduler.recordDiagnosticReceiverTriggered(alarmId)
+
                 val title = intent.getStringExtra(FamilyAlarmScheduler.EXTRA_ALARM_TITLE)
                     ?.takeIf { it.isNotBlank() }
                     ?: persisted?.title
@@ -129,8 +156,8 @@ class FamilyAlarmReceiver : BroadcastReceiver() {
                     volumePercent = volumePercent
                 )
 
-                // Reschedule the next recurring day's occurrence automatically
-                if (!isSnooze && alarmId.isNotBlank()) {
+                // Reschedule the next recurring day's occurrence automatically (except one-shot 15s diagnostic test)
+                if (!isSnooze && alarmId.isNotBlank() && alarmId != FamilyAlarmScheduler.DIAGNOSTIC_ALARM_ID) {
                     val days = daysCsv.split(",")
                         .mapNotNull { token ->
                             runCatching { SchoolDay.valueOf(token.trim()) }.getOrNull()
@@ -171,7 +198,7 @@ class FamilyAlarmReceiver : BroadcastReceiver() {
                 "FamilyTasks:AlarmReceiverHandoffWakeLock"
             ).apply {
                 setReferenceCounted(false)
-                acquire(10_000L)
+                acquire(15_000L)
             }
         }
     }

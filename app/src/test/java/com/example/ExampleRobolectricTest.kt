@@ -1259,9 +1259,11 @@ class ExampleRobolectricTest {
         // Cancel local alarm
         com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(context, savedOnParentDevice.id)
 
-        // 3. Verify Friday is supported in SchoolDay for the 6-day Israeli school week (Sunday-Friday)
-        assertEquals(6, com.example.model.SchoolDay.entries.size)
-        assertTrue(com.example.model.SchoolDay.entries.contains(com.example.model.SchoolDay.FRIDAY))
+        // 3. Verify Friday is supported in SchoolDay.schoolDays (6-day school week) and Saturday in SchoolDay.allWeekDays (7-day alarms)
+        assertEquals(6, com.example.model.SchoolDay.schoolDays.size)
+        assertEquals(7, com.example.model.SchoolDay.allWeekDays.size)
+        assertTrue(com.example.model.SchoolDay.schoolDays.contains(com.example.model.SchoolDay.FRIDAY))
+        assertTrue(com.example.model.SchoolDay.allWeekDays.contains(com.example.model.SchoolDay.SATURDAY))
 
         // 4. Verify bounded Firestore thumbnail respects Firestore document size limits (< 150KB Base64)
         val sampleImgBytes = com.example.files.FamilyFileManagerHelper.generateSampleImageBytes("תמונה_משפחתית.jpg", "אבא")
@@ -1413,6 +1415,130 @@ class ExampleRobolectricTest {
         com.example.notifications.FamilyAlarmRingingService.dismissActiveAlarm(context, parentOwnAlarm.id)
         com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(context, parentOwnAlarm.id)
         com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(context, parentForChildAlarm.id)
+    }
+
+    @Test
+    fun `test default viewmodel repository context attachment 15s diagnostic alarm and saturday alarm scheduling`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Instantiate FamilyRepository() with default no-arg constructor (context = null, matching FamilyViewModel())
+        //    and attachApplicationContext(context). Verify local alarms actually register in Android AlarmManager!
+        val repository = FamilyRepository()
+        repository.attachApplicationContext(context)
+
+        val childMember = repository.members.value.first { it.id == "m_kid1" }
+        repository.switchCurrentMember(childMember)
+
+        val childLocalAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_child_local_real_am",
+            title = "שעון מקומי של הילד",
+            hour = 8,
+            minute = 15,
+            assignedMemberId = childMember.id,
+            assignedToMemberId = childMember.id,
+            assignedMemberName = childMember.name,
+            createdByMemberId = childMember.id,
+            createdByMemberName = childMember.name,
+            createdByRole = "CHILD",
+            isPersonal = true,
+            daysOfWeek = com.example.model.SchoolDay.allWeekDays
+        )
+        assertTrue(repository.addOrUpdateFamilyAlarm(childLocalAlarm))
+        assertTrue(
+            "Local alarm created via default FamilyRepository() MUST register a real PendingIntent in Android AlarmManager",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, childLocalAlarm.id)
+        )
+        val savedChildAlarm = repository.familyAlarms.value.first { it.id == childLocalAlarm.id }
+        assertFalse(
+            "Personal child alarm must NEVER be treated as targeted to another member",
+            savedChildAlarm.isTargetedToAnotherMember()
+        )
+        assertNotEquals(
+            "Personal child alarm must NEVER show PENDING_TARGET_DEVICE",
+            com.example.model.FamilyAlarm.STATUS_PENDING_TARGET_DEVICE,
+            savedChildAlarm.scheduleStatus
+        )
+
+        // 2. Verify Saturday alarm scheduling calculates same-day trigger when scheduled on a Saturday
+        val satCal = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.DAY_OF_WEEK, java.util.Calendar.SATURDAY)
+            set(java.util.Calendar.HOUR_OF_DAY, 10)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val satAlarm = childLocalAlarm.copy(
+            hour = 10,
+            minute = 5,
+            daysOfWeek = com.example.model.SchoolDay.allWeekDays
+        )
+        val nextSatTrigger = com.example.notifications.FamilyAlarmScheduler.computeNextTriggerAtMillis(
+            alarm = satAlarm,
+            nowMillis = satCal.timeInMillis
+        )
+        assertEquals(
+            "Alarm created on Saturday at 10:00 for 10:05 must trigger 5 minutes later on Saturday, not roll over to Sunday",
+            5 * 60_000L,
+            nextSatTrigger - satCal.timeInMillis
+        )
+
+        // 3. Test Real 15-Second Developer Diagnostic Alarm Chain:
+        //    AlarmManager -> PendingIntent -> FamilyAlarmReceiver -> FamilyAlarmRingingService -> AlarmAudioController
+        com.example.notifications.FamilyAlarmScheduler.resetDiagnosticState(context)
+        val diagScheduleRes = com.example.notifications.FamilyAlarmScheduler.scheduleDiagnostic15SecondAlarm(
+            context = context,
+            currentMemberName = childMember.name
+        )
+        assertTrue("15-second diagnostic alarm must be scheduled in AlarmManager", diagScheduleRes.isScheduled)
+        assertTrue(
+            "Diagnostic state must report isScheduled = true",
+            com.example.notifications.FamilyAlarmScheduler.diagnosticState.value.isScheduled
+        )
+        assertTrue(
+            "Diagnostic PendingIntent must exist in AlarmManager",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(
+                context,
+                com.example.notifications.FamilyAlarmScheduler.DIAGNOSTIC_15S_ALARM_ID
+            )
+        )
+
+        // Simulate AlarmManager firing the PendingIntent to FamilyAlarmReceiver
+        val diagReceiverIntent = android.content.Intent(context, com.example.notifications.FamilyAlarmReceiver::class.java).apply {
+            action = com.example.notifications.FamilyAlarmScheduler.ACTION_TRIGGER_FAMILY_ALARM
+            putExtra(
+                com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_ID,
+                com.example.notifications.FamilyAlarmScheduler.DIAGNOSTIC_15S_ALARM_ID
+            )
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_TITLE, "בדיקת צלצול (15 שניות) 🔔")
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_HOUR, 10)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_MINUTE, 5)
+            putExtra(
+                com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_SOUND_TYPE,
+                com.example.notifications.AlarmAudioController.SOUND_MELODY_ENERGETIC
+            )
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_VOLUME_PERCENT, 90)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_IS_DIAGNOSTIC_TEST, true)
+        }
+        com.example.notifications.FamilyAlarmReceiver().onReceive(context, diagReceiverIntent)
+
+        // Start service directly in Robolectric to verify onStartCommand execution and audio start
+        val serviceIntent = android.content.Intent(context, com.example.notifications.FamilyAlarmRingingService::class.java).apply {
+            action = com.example.notifications.FamilyAlarmRingingService.ACTION_START_RINGING
+            putExtras(diagReceiverIntent)
+        }
+        org.robolectric.Robolectric.buildService(
+            com.example.notifications.FamilyAlarmRingingService::class.java,
+            serviceIntent
+        ).create().startCommand(0, 1)
+
+        val diagAfterTrigger = com.example.notifications.FamilyAlarmScheduler.diagnosticState.value
+        assertTrue("Diagnostic state must record receiverTriggered = true", diagAfterTrigger.receiverTriggered)
+        assertTrue("Diagnostic state must record ringingServiceStarted = true", diagAfterTrigger.ringingServiceStarted)
+        assertTrue("Diagnostic state must record audioPlaybackStarted = true", diagAfterTrigger.audioPlaybackStarted)
+        assertTrue("Diagnostic errorMessage must be empty", diagAfterTrigger.errorMessage.isBlank())
+
+        com.example.notifications.FamilyAlarmReceiver.stopActiveRinging(context)
+        com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(context, childLocalAlarm.id)
     }
 }
 

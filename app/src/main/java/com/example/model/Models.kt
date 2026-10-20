@@ -577,10 +577,16 @@ enum class SchoolDay(
     TUESDAY(2, "יום שלישי", "ג'", "Tuesday", "Tue"),
     WEDNESDAY(3, "יום רביעי", "ד'", "Wednesday", "Wed"),
     THURSDAY(4, "יום חמישי", "ה'", "Thursday", "Thu"),
-    FRIDAY(5, "יום שישי", "ו'", "Friday", "Fri");
+    FRIDAY(5, "יום שישי", "ו'", "Friday", "Fri"),
+    SATURDAY(6, "יום שבת", "ש'", "Saturday", "Sat");
 
     fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) nameHe else nameEn
     fun getShortName(isHebrew: Boolean): String = if (isHebrew) shortHe else shortEn
+
+    companion object {
+        val schoolDays: List<SchoolDay> = listOf(SUNDAY, MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY)
+        val allWeekDays: List<SchoolDay> = listOf(SUNDAY, MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY)
+    }
 }
 
 data class SchedulePeriod(
@@ -881,14 +887,7 @@ data class FamilyAlarm(
     val assignedMemberId: String = "",
     val assignedToMemberId: String = assignedMemberId,
     val assignedMemberName: String = "",
-    val daysOfWeek: List<SchoolDay> = listOf(
-        SchoolDay.SUNDAY,
-        SchoolDay.MONDAY,
-        SchoolDay.TUESDAY,
-        SchoolDay.WEDNESDAY,
-        SchoolDay.THURSDAY,
-        SchoolDay.FRIDAY
-    ),
+    val daysOfWeek: List<SchoolDay> = SchoolDay.allWeekDays,
     val isEnabled: Boolean = true,
     val ringtoneEmoji: String = "⏰",
     val createdAtMillis: Long = System.currentTimeMillis(),
@@ -896,13 +895,13 @@ data class FamilyAlarm(
     val createdByMemberName: String = "",
     val createdByRole: String = "", // "PARENT" or "CHILD"
     val isPersonal: Boolean = false,
-    val soundType: String = "SYSTEM_ALARM", // SYSTEM_ALARM, SYSTEM_NOTIFICATION, SYSTEM_RINGTONE, MELODY_CLASSIC, MELODY_GENTLE, MELODY_ENERGETIC, CUSTOM_URI
+    val soundType: String = "MELODY_ENERGETIC", // SYSTEM_ALARM, SYSTEM_NOTIFICATION, SYSTEM_RINGTONE, MELODY_CLASSIC, MELODY_GENTLE, MELODY_ENERGETIC, CUSTOM_URI
     val customSoundUri: String = "",
     val customSoundTitle: String = "",
     val vibrateEnabled: Boolean = true,
     val snoozeDurationMinutes: Int = 5,
     val volumePercent: Int = 85,
-    val scheduleStatus: String = STATUS_PENDING_TARGET_DEVICE, // SCHEDULED_LOCALLY, PENDING_TARGET_DEVICE, EXACT_PERMISSION_NEEDED, SCHEDULE_ERROR, DISABLED
+    val scheduleStatus: String = STATUS_SCHEDULED_LOCALLY, // SCHEDULED_LOCALLY, PENDING_TARGET_DEVICE, EXACT_PERMISSION_NEEDED, SCHEDULE_ERROR, DISABLED
     val acknowledgedByMemberId: String = "",
     val acknowledgedByDeviceName: String = "",
     val acknowledgedAtMillis: Long = 0L,
@@ -928,9 +927,27 @@ data class FamilyAlarm(
 
     val isConfirmedOnTargetDevice: Boolean
         get() = isEnabled && (
-            scheduleStatus == STATUS_SCHEDULED_LOCALLY &&
-                (effectiveAssignedMemberId.isBlank() || acknowledgedByMemberId == effectiveAssignedMemberId)
+            (scheduleStatus == STATUS_SCHEDULED_LOCALLY || scheduleStatus == STATUS_EXACT_PERMISSION_NEEDED) &&
+                (isPersonal ||
+                    effectiveAssignedMemberId.isBlank() ||
+                    effectiveAssignedMemberId == createdByMemberId ||
+                    acknowledgedByMemberId.isNotBlank())
         )
+
+    fun isTargetedToAnotherMember(): Boolean {
+        val targetId = effectiveAssignedMemberId
+        if (targetId.isBlank() || isPersonal) return false
+        if (createdByMemberId.isNotBlank() && targetId == createdByMemberId) return false
+        return true
+    }
+
+    fun isTargetDeviceAcknowledged(): Boolean {
+        if (!isTargetedToAnotherMember()) return true
+        return isConfirmedOnTargetDevice &&
+            scheduleStatus != STATUS_PENDING_TARGET_DEVICE &&
+            acknowledgedByMemberId.isNotBlank() &&
+            acknowledgedByMemberId != createdByMemberId
+    }
 
     /**
      * Checks whether [member] (or [authUid]) has permission to edit, enable/disable, or delete this alarm:
@@ -951,7 +968,9 @@ data class FamilyAlarm(
 
         val isCreatedByThisChild = createdByMemberId in candidateIds
         val targetId = effectiveAssignedMemberId
-        val isAssignedToThisChild = targetId.isNotBlank() && targetId in candidateIds
+        val isAssignedToThisChild = targetId.isBlank() ||
+            targetId in candidateIds ||
+            (assignedMemberName.isNotBlank() && assignedMemberName.trim().equals(member.name.trim(), ignoreCase = true))
         return isCreatedByThisChild && isAssignedToThisChild
     }
 
@@ -964,19 +983,50 @@ data class FamilyAlarm(
      * - Child-created alarm for self -> rings ONLY on that child's device.
      * - Parent-created alarm for self -> rings ONLY on that parent's device.
      */
-    fun isTargetedAtDeviceMember(memberId: String, authUid: String = ""): Boolean {
+    fun isTargetedAtDeviceMember(
+        memberId: String,
+        authUid: String = "",
+        currentMemberName: String = "",
+        isChildDevice: Boolean = false
+    ): Boolean {
         val candidateIds = buildSet {
             if (memberId.isNotBlank()) add(memberId)
             if (authUid.isNotBlank()) add(authUid)
         }
         if (candidateIds.isEmpty()) return false
         val targetId = effectiveAssignedMemberId
-        return if (targetId.isNotBlank()) {
-            targetId in candidateIds
-        } else {
-            // Legacy alarm without explicit target: ring only on creator's device if known
-            createdByMemberId.isNotBlank() && createdByMemberId in candidateIds
+
+        // 1. Direct ID or Auth UID match on target
+        if (targetId.isNotBlank() && targetId in candidateIds) {
+            return true
         }
+
+        // 2. Personal alarm created by this device's user for themselves
+        if (createdByMemberId.isNotBlank() && createdByMemberId in candidateIds) {
+            if (isPersonal || targetId.isBlank() || targetId == createdByMemberId) {
+                return true
+            }
+        }
+
+        // 3. Child device matching a parent-created alarm assigned to this child
+        //    (handles cases where parent selected a child profile before UID migration or matched by name)
+        if (isChildDevice) {
+            val isParentPersonal = createdByRole.equals("PARENT", ignoreCase = true) &&
+                (isPersonal || (targetId.isNotBlank() && targetId == createdByMemberId))
+            if (!isParentPersonal) {
+                if (currentMemberName.isNotBlank() &&
+                    assignedMemberName.isNotBlank() &&
+                    assignedMemberName.trim().equals(currentMemberName.trim(), ignoreCase = true)
+                ) {
+                    return true
+                }
+                if (targetId.startsWith("m_kid") && createdByRole.equals("PARENT", ignoreCase = true)) {
+                    return true
+                }
+            }
+        }
+
+        return false
     }
 }
 

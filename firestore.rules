@@ -151,7 +151,9 @@ service cloud.firestore {
     // on a parent-created alarm assigned to that child, without modifying time, enabled state, sound, or recurrence.
     function isChildTargetDeviceAckOnly() {
       let changedKeys = request.resource.data.diff(resource.data).affectedKeys();
-      return alarmTargetMemberId(resource.data) == request.auth.uid
+      let targetId = alarmTargetMemberId(resource.data);
+      return (targetId == request.auth.uid
+          || (targetId != resource.data.get('createdByMemberId', '') && resource.data.get('isPersonal', false) == false))
         && changedKeys.hasOnly([
           'scheduleStatus',
           'acknowledgedByMemberId',

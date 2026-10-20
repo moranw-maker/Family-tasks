@@ -110,7 +110,7 @@ fun AddPeriodDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    SchoolDay.values().forEach { day ->
+                    SchoolDay.schoolDays.forEach { day ->
                         val isSelected = day == selectedDay
                         Surface(
                             shape = RoundedCornerShape(12.dp),

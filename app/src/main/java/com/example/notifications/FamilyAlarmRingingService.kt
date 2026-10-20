@@ -68,7 +68,7 @@ class FamilyAlarmRingingService : Service() {
             snoozeMinutes: Int,
             volumePercent: Int
         ) {
-            val appCtx = context.applicationContext
+            val appCtx = context.applicationContext ?: context
             val timeFormatted = String.format(java.util.Locale.US, "%02d:%02d", hour.coerceIn(0, 23), minute.coerceIn(0, 59))
             _activeRingingAlarm.value = ActiveRingingAlarmState(
                 alarmId = alarmId,
@@ -81,6 +81,35 @@ class FamilyAlarmRingingService : Service() {
                 vibrateEnabled = vibrateEnabled,
                 snoozeMinutes = snoozeMinutes,
                 volumePercent = volumePercent
+            )
+
+            // Ensure channel and high-priority full-screen notification are posted immediately
+            ensureStaticAlarmNotificationChannel(appCtx)
+            val immediateNotification = buildStaticAlarmNotification(
+                context = appCtx,
+                alarmId = alarmId,
+                title = title,
+                timeFormatted = timeFormatted,
+                hour = hour,
+                minute = minute,
+                soundType = soundType,
+                customUri = customSoundUri,
+                vibrateEnabled = vibrateEnabled,
+                snoozeMinutes = snoozeMinutes,
+                volumePercent = volumePercent
+            )
+            runCatching {
+                val nm = appCtx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                nm?.notify(FOREGROUND_NOTIFICATION_ID, immediateNotification)
+            }
+
+            // Start audio playback immediately so there is zero latency even before service binding completes
+            AlarmAudioController.startAlarmRinging(
+                context = appCtx,
+                soundType = soundType,
+                customSoundUri = customSoundUri,
+                volumePercent = volumePercent,
+                vibrateEnabled = vibrateEnabled
             )
 
             val serviceIntent = Intent(appCtx, FamilyAlarmRingingService::class.java).apply {
@@ -99,25 +128,37 @@ class FamilyAlarmRingingService : Service() {
             val startedForeground = runCatching {
                 ContextCompat.startForegroundService(appCtx, serviceIntent)
                 true
-            }.getOrDefault(false)
-
-            if (!startedForeground) {
-                // Fallback if OS blocks foreground service start in a specific state
-                AlarmAudioController.startAlarmRinging(
-                    context = appCtx,
-                    soundType = soundType,
-                    customSoundUri = customSoundUri,
-                    volumePercent = volumePercent,
-                    vibrateEnabled = vibrateEnabled
+            }.getOrElse { err ->
+                FamilyAlarmScheduler.recordDiagnosticError(
+                    "startForegroundService fallback: ${err.localizedMessage ?: err.javaClass.simpleName}"
                 )
+                false
+            }
+
+            if (startedForeground) {
+                FamilyAlarmScheduler.recordDiagnosticServiceStarted(alarmId)
+            }
+
+            // Launch full-screen / lock-screen ringing activity if permitted by OS state
+            runCatching {
+                val activityIntent = FamilyAlarmRingingActivity.createLaunchIntent(
+                    context = appCtx,
+                    alarmId = alarmId,
+                    title = title,
+                    hour = hour,
+                    minute = minute,
+                    snoozeMinutes = snoozeMinutes
+                )
+                appCtx.startActivity(activityIntent)
             }
         }
 
         fun dismissActiveAlarm(context: Context, alarmId: String = "") {
-            val appCtx = context.applicationContext
+            val appCtx = context.applicationContext ?: context
             val current = _activeRingingAlarm.value
             val resolvedId = alarmId.ifBlank { current?.alarmId.orEmpty() }
             _activeRingingAlarm.value = null
+            FamilyAlarmReceiver.clearRecentTrigger(resolvedId)
             AlarmAudioController.stopAlarmRinging(appCtx)
 
             val notificationManager = appCtx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
@@ -132,7 +173,7 @@ class FamilyAlarmRingingService : Service() {
         }
 
         fun snoozeActiveAlarm(context: Context): Long {
-            val appCtx = context.applicationContext
+            val appCtx = context.applicationContext ?: context
             val current = _activeRingingAlarm.value ?: return 0L
             val nextSnoozeMillis = FamilyAlarmScheduler.scheduleSnoozeAlarm(
                 context = appCtx,
@@ -146,6 +187,104 @@ class FamilyAlarmRingingService : Service() {
             )
             dismissActiveAlarm(appCtx, current.alarmId)
             return nextSnoozeMillis
+        }
+
+        private fun ensureStaticAlarmNotificationChannel(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+                val channel = NotificationChannel(
+                    ALARM_CHANNEL_ID,
+                    "שעון מעורר משפחתי (Family Alarms)",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "התראות צלצול פעיל של שעון מעורר משפחתי"
+                    enableVibration(true)
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                    setBypassDnd(true)
+                    setSound(null, null)
+                }
+                nm.createNotificationChannel(channel)
+            }
+        }
+
+        internal fun buildStaticAlarmNotification(
+            context: Context,
+            alarmId: String,
+            title: String,
+            timeFormatted: String,
+            hour: Int,
+            minute: Int,
+            soundType: String,
+            customUri: String,
+            vibrateEnabled: Boolean,
+            snoozeMinutes: Int,
+            volumePercent: Int
+        ): Notification {
+            val fullScreenActivityIntent = FamilyAlarmRingingActivity.createLaunchIntent(
+                context = context,
+                alarmId = alarmId,
+                title = title,
+                hour = hour,
+                minute = minute,
+                snoozeMinutes = snoozeMinutes
+            )
+            val fullScreenPendingIntent = PendingIntent.getActivity(
+                context,
+                (alarmId.hashCode() * 31 + 2) and 0x7FFFFFFF,
+                fullScreenActivityIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val snoozeIntent = Intent(context, FamilyAlarmReceiver::class.java).apply {
+                action = FamilyAlarmScheduler.ACTION_SNOOZE_FAMILY_ALARM
+                putExtra(FamilyAlarmScheduler.EXTRA_ALARM_ID, alarmId)
+                putExtra(FamilyAlarmScheduler.EXTRA_ALARM_TITLE, title)
+                putExtra(FamilyAlarmScheduler.EXTRA_ALARM_SOUND_TYPE, soundType)
+                putExtra(FamilyAlarmScheduler.EXTRA_ALARM_CUSTOM_URI, customUri)
+                putExtra(FamilyAlarmScheduler.EXTRA_ALARM_VIBRATE, vibrateEnabled)
+                putExtra(FamilyAlarmScheduler.EXTRA_ALARM_SNOOZE_MINUTES, snoozeMinutes)
+                putExtra(FamilyAlarmScheduler.EXTRA_ALARM_VOLUME_PERCENT, volumePercent)
+            }
+            val snoozePendingIntent = PendingIntent.getBroadcast(
+                context,
+                (alarmId.hashCode() * 31 + 3) and 0x7FFFFFFF,
+                snoozeIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val dismissIntent = Intent(context, FamilyAlarmReceiver::class.java).apply {
+                action = FamilyAlarmScheduler.ACTION_DISMISS_FAMILY_ALARM
+                putExtra(FamilyAlarmScheduler.EXTRA_ALARM_ID, alarmId)
+            }
+            val dismissPendingIntent = PendingIntent.getBroadcast(
+                context,
+                (alarmId.hashCode() * 31 + 4) and 0x7FFFFFFF,
+                dismissIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            return NotificationCompat.Builder(context, ALARM_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle("⏰ $timeFormatted • $title")
+                .setContentText("שעון מעורר מצלצל עכשיו • בחרו נודניק או כיבוי")
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setOngoing(true)
+                .setAutoCancel(false)
+                .setContentIntent(fullScreenPendingIntent)
+                .setFullScreenIntent(fullScreenPendingIntent, true)
+                .addAction(
+                    R.drawable.ic_notification,
+                    "נודניק (${snoozeMinutes} דק׳)",
+                    snoozePendingIntent
+                )
+                .addAction(
+                    R.drawable.ic_notification,
+                    "כיבוי",
+                    dismissPendingIntent
+                )
+                .build()
         }
     }
 
@@ -180,6 +319,9 @@ class FamilyAlarmRingingService : Service() {
                 val volumePercent = intent.getIntExtra(FamilyAlarmScheduler.EXTRA_ALARM_VOLUME_PERCENT, 85)
                 val timeFormatted = String.format(java.util.Locale.US, "%02d:%02d", hour.coerceIn(0, 23), minute.coerceIn(0, 59))
 
+                FamilyAlarmScheduler.recordDiagnosticServiceStarted(alarmId)
+
+                val prevRinging = _activeRingingAlarm.value
                 _activeRingingAlarm.value = ActiveRingingAlarmState(
                     alarmId = alarmId,
                     title = title,
@@ -194,8 +336,9 @@ class FamilyAlarmRingingService : Service() {
                 )
 
                 acquireBoundedWakeLock()
-                ensureAlarmNotificationChannel()
-                val notification = buildForegroundAlarmNotification(
+                ensureStaticAlarmNotificationChannel(this)
+                val notification = buildStaticAlarmNotification(
+                    context = this,
                     alarmId = alarmId,
                     title = title,
                     timeFormatted = timeFormatted,
@@ -222,25 +365,17 @@ class FamilyAlarmRingingService : Service() {
                     runCatching { startForeground(FOREGROUND_NOTIFICATION_ID, notification) }
                 }
 
-                AlarmAudioController.startAlarmRinging(
-                    context = this,
-                    soundType = soundType,
-                    customSoundUri = customUri,
-                    volumePercent = volumePercent,
-                    vibrateEnabled = vibrate
-                )
-
-                // Attempt to launch the lock-screen / full-screen ringing UI
-                runCatching {
-                    val activityIntent = FamilyAlarmRingingActivity.createLaunchIntent(
+                // If audio wasn't already started by startRingingService within the last 2 seconds, start it now
+                if (prevRinging == null || prevRinging.alarmId != alarmId ||
+                    (System.currentTimeMillis() - prevRinging.startedAtMillis) > 2_500L
+                ) {
+                    AlarmAudioController.startAlarmRinging(
                         context = this,
-                        alarmId = alarmId,
-                        title = title,
-                        hour = hour,
-                        minute = minute,
-                        snoozeMinutes = snoozeMin
+                        soundType = soundType,
+                        customSoundUri = customUri,
+                        volumePercent = volumePercent,
+                        vibrateEnabled = vibrate
                     )
-                    startActivity(activityIntent)
                 }
 
                 timeoutJob?.cancel()
@@ -256,7 +391,6 @@ class FamilyAlarmRingingService : Service() {
 
     override fun onDestroy() {
         timeoutJob?.cancel()
-        AlarmAudioController.stopAlarmRinging(this)
         releaseWakeLock()
         super.onDestroy()
     }
@@ -283,103 +417,5 @@ class FamilyAlarmRingingService : Service() {
             }
             wakeLock = null
         }
-    }
-
-    private fun ensureAlarmNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-            val channel = NotificationChannel(
-                ALARM_CHANNEL_ID,
-                "שעון מעורר משפחתי (Family Alarms)",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "התראות צלצול פעיל של שעון מעורר משפחתי"
-                enableVibration(true)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-                setBypassDnd(true)
-                // Audio is played directly by AlarmAudioController with USAGE_ALARM
-                setSound(null, null)
-            }
-            nm.createNotificationChannel(channel)
-        }
-    }
-
-    private fun buildForegroundAlarmNotification(
-        alarmId: String,
-        title: String,
-        timeFormatted: String,
-        hour: Int,
-        minute: Int,
-        soundType: String,
-        customUri: String,
-        vibrateEnabled: Boolean,
-        snoozeMinutes: Int,
-        volumePercent: Int
-    ): Notification {
-        val fullScreenActivityIntent = FamilyAlarmRingingActivity.createLaunchIntent(
-            context = this,
-            alarmId = alarmId,
-            title = title,
-            hour = hour,
-            minute = minute,
-            snoozeMinutes = snoozeMinutes
-        )
-        val fullScreenPendingIntent = PendingIntent.getActivity(
-            this,
-            (alarmId.hashCode() * 31 + 2) and 0x7FFFFFFF,
-            fullScreenActivityIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val snoozeIntent = Intent(this, FamilyAlarmReceiver::class.java).apply {
-            action = FamilyAlarmScheduler.ACTION_SNOOZE_FAMILY_ALARM
-            putExtra(FamilyAlarmScheduler.EXTRA_ALARM_ID, alarmId)
-            putExtra(FamilyAlarmScheduler.EXTRA_ALARM_TITLE, title)
-            putExtra(FamilyAlarmScheduler.EXTRA_ALARM_SOUND_TYPE, soundType)
-            putExtra(FamilyAlarmScheduler.EXTRA_ALARM_CUSTOM_URI, customUri)
-            putExtra(FamilyAlarmScheduler.EXTRA_ALARM_VIBRATE, vibrateEnabled)
-            putExtra(FamilyAlarmScheduler.EXTRA_ALARM_SNOOZE_MINUTES, snoozeMinutes)
-            putExtra(FamilyAlarmScheduler.EXTRA_ALARM_VOLUME_PERCENT, volumePercent)
-        }
-        val snoozePendingIntent = PendingIntent.getBroadcast(
-            this,
-            (alarmId.hashCode() * 31 + 3) and 0x7FFFFFFF,
-            snoozeIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val dismissIntent = Intent(this, FamilyAlarmReceiver::class.java).apply {
-            action = FamilyAlarmScheduler.ACTION_DISMISS_FAMILY_ALARM
-            putExtra(FamilyAlarmScheduler.EXTRA_ALARM_ID, alarmId)
-        }
-        val dismissPendingIntent = PendingIntent.getBroadcast(
-            this,
-            (alarmId.hashCode() * 31 + 4) and 0x7FFFFFFF,
-            dismissIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        return NotificationCompat.Builder(this, ALARM_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("⏰ $timeFormatted • $title")
-            .setContentText("שעון מעורר מצלצל עכשיו • בחרו נודניק או כיבוי")
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setOngoing(true)
-            .setAutoCancel(false)
-            .setContentIntent(fullScreenPendingIntent)
-            .setFullScreenIntent(fullScreenPendingIntent, true)
-            .addAction(
-                R.drawable.ic_notification,
-                "נודניק (${snoozeMinutes} דק׳)",
-                snoozePendingIntent
-            )
-            .addAction(
-                R.drawable.ic_notification,
-                "כיבוי",
-                dismissPendingIntent
-            )
-            .build()
     }
 }

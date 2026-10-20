@@ -212,7 +212,7 @@ fun TimetableScreen(
                         .padding(horizontal = 14.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    SchoolDay.values().forEach { day ->
+                    SchoolDay.schoolDays.forEach { day ->
                         val isDaySelected = day == selectedDay
                         val dayPeriodsCount = kidPeriods.count { it.day == day }
                         Surface(
@@ -340,7 +340,7 @@ fun WeeklyTimetableTableView(
     onDeletePeriod: (String) -> Unit,
     onTestAlert: (SchedulePeriod, String) -> Unit
 ) {
-    val schoolDays = SchoolDay.values().toList()
+    val schoolDays = SchoolDay.schoolDays
     val maxPeriod = maxOf(6, kidPeriods.maxOfOrNull { it.periodIndex } ?: 6)
     val periodIndices = (1..maxPeriod).toList()
     val horizontalScrollState = rememberScrollState()

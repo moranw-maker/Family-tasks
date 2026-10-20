@@ -74,8 +74,23 @@ class FamilyRepository(
         runCatching { FirebaseAuth.getInstance() }.getOrNull()
     }
 ) {
+    @Volatile
+    private var dynamicAppContext: Context? = context?.applicationContext ?: context
+
     private val appContext: Context?
-        get() = context
+        get() = dynamicAppContext
+            ?: context?.applicationContext
+            ?: context
+            ?: runCatching { com.google.firebase.FirebaseApp.getInstance().applicationContext }.getOrNull()
+
+    fun attachApplicationContext(ctx: Context) {
+        val appCtx = ctx.applicationContext ?: ctx
+        val wasNull = dynamicAppContext == null && context == null
+        dynamicAppContext = appCtx
+        if (wasNull && _familyAlarms.value.isNotEmpty()) {
+            resyncAlarmsForActiveMember()
+        }
+    }
 
     constructor(
         firestore: FirebaseFirestore,
@@ -190,6 +205,11 @@ class FamilyRepository(
     private var familyDocListenerRegistration: ListenerRegistration? = null
     private var foldersListenerRegistration: ListenerRegistration? = null
     private var filesListenerRegistration: ListenerRegistration? = null
+    private var alarmsListenerRegistration: ListenerRegistration? = null
+
+    private val locallyManagedAlarms = ConcurrentHashMap<String, FamilyAlarm>()
+    private val explicitlyDeletedAlarmIds: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     /** Configurable hooks for testing file upload cancellation, progress, and retry behavior. */
     @Volatile
@@ -3286,6 +3306,8 @@ class FamilyRepository(
                             it.id == signedInUid || it.id == _currentMember.value.id
                         }
                         if (updatedSelf != null) {
+                            val previousMemberId = _currentMember.value.id
+                            val previousRole = _currentMember.value.role
                             _currentMember.value = updatedSelf
                             _googleUserDisplayName.value = updatedSelf.name
                             if (_membershipState.value is FamilyMembershipState.ActiveMember) {
@@ -3305,6 +3327,9 @@ class FamilyRepository(
                                     role = updatedSelf.role,
                                     familyIdentity = updatedSelf.familyIdentity
                                 )
+                            }
+                            if (previousMemberId != updatedSelf.id || previousRole != updatedSelf.role || _familyAlarms.value.isNotEmpty()) {
+                                resyncAlarmsForActiveMember()
                             }
                         }
                         _cloudFamilyGroup.value = _cloudFamilyGroup.value.copy(
@@ -3481,14 +3506,17 @@ class FamilyRepository(
 
         // 8. Real-time Shared Family Alarms Listener (/families/{familyId}/alarms)
         runCatching {
-            familyRef.collection("alarms")
+            alarmsListenerRegistration?.remove()
+            alarmsListenerRegistration = familyRef.collection("alarms")
                 .addSnapshotListener { snapshot, error ->
                     if (error != null || snapshot == null) return@addSnapshotListener
-                    val currentMemberId = _currentMember.value.id
+                    val currentMember = _currentMember.value
+                    val currentMemberId = currentMember.id
                     val authUid = authProvider()?.currentUser?.uid.orEmpty()
                     val effectiveDeviceMemberId = authUid.ifBlank { currentMemberId }
                     val deviceModelLabel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
                     val remoteAlarms = snapshot.documents.mapNotNull { doc ->
+                        if (doc.id in explicitlyDeletedAlarmIds) return@mapNotNull null
                         val title = doc.getString("title") ?: return@mapNotNull null
                         val hour = (doc.getLong("hour") ?: 7L).toInt().coerceIn(0, 23)
                         val minute = (doc.getLong("minute") ?: 0L).toInt().coerceIn(0, 59)
@@ -3499,14 +3527,13 @@ class FamilyRepository(
                         val createdById = doc.getString("createdByMemberId").orEmpty()
                         val createdByName = doc.getString("createdByMemberName").orEmpty()
                         val rawCreatedByRole = doc.getString("createdByRole").orEmpty()
-                        // Safe migration of missing createdByRole only when creator is a known member in _members
                         val migratedCreatedByRole = rawCreatedByRole.ifBlank {
                             val creatorMember = _members.value.find { it.id == createdById }
                             creatorMember?.role?.toFirestoreValue().orEmpty()
                         }
                         val rawDays = (doc.get("daysOfWeek") as? List<*>)?.mapNotNull { d ->
                             (d as? String)?.let { runCatching { SchoolDay.valueOf(it) }.getOrNull() }
-                        } ?: SchoolDay.entries
+                        }?.ifEmpty { SchoolDay.allWeekDays } ?: SchoolDay.allWeekDays
                         val isEnabled = doc.getBoolean("isEnabled") ?: true
                         val emoji = doc.getString("ringtoneEmoji") ?: "⏰"
                         FamilyAlarm(
@@ -3539,21 +3566,34 @@ class FamilyRepository(
                             nextTriggerAtMillis = doc.getLong("nextTriggerAtMillis") ?: 0L,
                             lastScheduleError = doc.getString("lastScheduleError").orEmpty()
                         )
-                    }.sortedWith(compareBy({ it.hour }, { it.minute }))
+                    }
+
+                    // Merge any locally created/modified alarms whose Firestore write is still in flight
+                    val remoteIds = remoteAlarms.map { it.id }.toSet()
+                    val pendingLocalOnly = locallyManagedAlarms.values.filter { local ->
+                        local.id !in remoteIds &&
+                            local.id !in explicitlyDeletedAlarmIds &&
+                            (local.familyId.isBlank() || local.familyId == familyId)
+                    }
+                    val mergedAlarms = (remoteAlarms + pendingLocalOnly)
+                        .sortedWith(compareBy({ it.hour }, { it.minute }))
 
                     val ctx = appContext
                     val syncedAlarms = if (ctx != null) {
                         val localResults = com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
                             context = ctx,
-                            alarms = remoteAlarms,
+                            alarms = mergedAlarms,
                             currentMemberId = currentMemberId,
-                            currentAuthUid = authUid
+                            currentAuthUid = authUid,
+                            currentMemberName = currentMember.name,
+                            isChildDevice = !currentMember.isParent
                         )
-                        remoteAlarms.map { alarm ->
+                        mergedAlarms.map { alarm ->
                             val localRes = localResults[alarm.id]
                             if (localRes != null && localRes.isScheduled) {
                                 val needsAckWrite = alarm.scheduleStatus != localRes.statusCode ||
-                                    alarm.acknowledgedByMemberId != effectiveDeviceMemberId
+                                    alarm.acknowledgedByMemberId != effectiveDeviceMemberId ||
+                                    (alarm.isTargetedToAnotherMember() && !alarm.isTargetDeviceAcknowledged())
                                 val updatedAlarm = alarm.copy(
                                     scheduleStatus = localRes.statusCode,
                                     acknowledgedByMemberId = effectiveDeviceMemberId.ifBlank { alarm.acknowledgedByMemberId },
@@ -3566,6 +3606,7 @@ class FamilyRepository(
                                     nextTriggerAtMillis = localRes.nextTriggerAtMillis,
                                     lastScheduleError = localRes.errorMessage
                                 )
+                                locallyManagedAlarms[updatedAlarm.id] = updatedAlarm
                                 if (needsAckWrite) {
                                     acknowledgeAlarmOnTargetDeviceInFirestore(familyId, updatedAlarm)
                                 }
@@ -3575,7 +3616,7 @@ class FamilyRepository(
                             }
                         }
                     } else {
-                        remoteAlarms
+                        mergedAlarms
                     }
 
                     if (syncedAlarms.isNotEmpty() || _isGoogleSignedIn.value) {
@@ -3593,11 +3634,15 @@ class FamilyRepository(
         familyDocListenerRegistration?.remove()
         foldersListenerRegistration?.remove()
         filesListenerRegistration?.remove()
+        alarmsListenerRegistration?.remove()
         tasksListenerRegistration = null
         membersListenerRegistration = null
         rewardsListenerRegistration = null
         invitesListenerRegistration = null
         familyDocListenerRegistration = null
+        foldersListenerRegistration = null
+        filesListenerRegistration = null
+        alarmsListenerRegistration = null
         foldersListenerRegistration = null
         filesListenerRegistration = null
     }
@@ -5156,6 +5201,53 @@ class FamilyRepository(
 
     // --- Shared Family Alarm Clock Operations (/families/{familyId}/alarms) ---
 
+    fun resyncAlarmsForActiveMember() {
+        val ctx = appContext ?: return
+        val current = _currentMember.value
+        val authUid = authProvider()?.currentUser?.uid.orEmpty()
+        val effectiveDeviceMemberId = authUid.ifBlank { current.id }
+        val deviceModelLabel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
+        val familyId = _activeFamilyId.value
+
+        val currentAlarms = _familyAlarms.value
+        val localResults = com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
+            context = ctx,
+            alarms = currentAlarms,
+            currentMemberId = current.id,
+            currentAuthUid = authUid,
+            currentMemberName = current.name,
+            isChildDevice = !current.isParent
+        )
+        val updatedList = currentAlarms.map { alarm ->
+            val localRes = localResults[alarm.id]
+            if (localRes != null && localRes.isScheduled) {
+                val needsAckWrite = alarm.scheduleStatus != localRes.statusCode ||
+                    alarm.acknowledgedByMemberId != effectiveDeviceMemberId ||
+                    (alarm.isTargetedToAnotherMember() && !alarm.isTargetDeviceAcknowledged())
+                val updated = alarm.copy(
+                    scheduleStatus = localRes.statusCode,
+                    acknowledgedByMemberId = effectiveDeviceMemberId.ifBlank { alarm.acknowledgedByMemberId },
+                    acknowledgedByDeviceName = deviceModelLabel,
+                    acknowledgedAtMillis = if (alarm.acknowledgedAtMillis > 0L && !needsAckWrite) {
+                        alarm.acknowledgedAtMillis
+                    } else {
+                        System.currentTimeMillis()
+                    },
+                    nextTriggerAtMillis = localRes.nextTriggerAtMillis,
+                    lastScheduleError = localRes.errorMessage
+                )
+                locallyManagedAlarms[updated.id] = updated
+                if (needsAckWrite && familyId.isNotBlank()) {
+                    acknowledgeAlarmOnTargetDeviceInFirestore(familyId, updated)
+                }
+                updated
+            } else {
+                alarm
+            }
+        }
+        _familyAlarms.value = updatedList
+    }
+
     fun addOrUpdateFamilyAlarm(alarm: FamilyAlarm): Boolean {
         val current = _currentMember.value
         val authUid = authProvider()?.currentUser?.uid.orEmpty()
@@ -5167,8 +5259,16 @@ class FamilyRepository(
         }
 
         val resolvedCreatedById = existing?.createdByMemberId?.takeIf { it.isNotBlank() }
-            ?: alarm.createdByMemberId.takeIf { it.isNotBlank() }
-            ?: effectiveCallerId
+            ?: if (!current.isParent) {
+                effectiveCallerId
+            } else {
+                val rawCreator = alarm.createdByMemberId
+                if (rawCreator.isBlank() || rawCreator == current.id || rawCreator == authUid) {
+                    effectiveCallerId
+                } else {
+                    rawCreator
+                }
+            }
         val resolvedCreatedByName = existing?.createdByMemberName?.takeIf { it.isNotBlank() }
             ?: alarm.createdByMemberName.takeIf { it.isNotBlank() }
             ?: current.name
@@ -5176,12 +5276,12 @@ class FamilyRepository(
             ?: alarm.createdByRole.takeIf { it.isNotBlank() }
             ?: current.role.toFirestoreValue()
 
-        // Child can only create/assign alarms for themselves
+        // Child can only create/assign alarms for themselves; parent personal alarms normalize to effectiveCallerId
         val requestedTargetId = alarm.effectiveAssignedMemberId.ifBlank { effectiveCallerId }
-        val resolvedTargetId = if (!current.isParent) {
-            effectiveCallerId
-        } else {
-            requestedTargetId
+        val resolvedTargetId = when {
+            !current.isParent -> effectiveCallerId
+            requestedTargetId == current.id || requestedTargetId == effectiveCallerId || alarm.isPersonal -> effectiveCallerId
+            else -> requestedTargetId
         }
         val resolvedTargetName = _members.value.find { it.id == resolvedTargetId }?.name
             ?: alarm.assignedMemberName.takeIf { it.isNotBlank() }
@@ -5190,24 +5290,27 @@ class FamilyRepository(
         val deviceModelLabel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
         val isTargetedToAnotherMember = resolvedTargetId.isNotBlank() &&
             resolvedTargetId != current.id &&
+            resolvedTargetId != effectiveCallerId &&
             (authUid.isBlank() || resolvedTargetId != authUid)
 
         val normalizedInput = alarm.copy(
             familyId = _activeFamilyId.value,
             hour = alarm.hour.coerceIn(0, 23),
             minute = alarm.minute.coerceIn(0, 59),
+            daysOfWeek = alarm.daysOfWeek.ifEmpty { SchoolDay.allWeekDays },
             assignedMemberId = resolvedTargetId,
             assignedToMemberId = resolvedTargetId,
             assignedMemberName = resolvedTargetName,
             createdByMemberId = resolvedCreatedById,
             createdByMemberName = resolvedCreatedByName,
             createdByRole = resolvedCreatedByRole,
-            isPersonal = resolvedTargetId == resolvedCreatedById
+            isPersonal = !isTargetedToAnotherMember && (resolvedTargetId == resolvedCreatedById || !current.isParent)
         )
 
+        val ctx = appContext
         val scheduledAlarm = when {
             !normalizedInput.isEnabled -> {
-                appContext?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, normalizedInput.id) }
+                ctx?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, normalizedInput.id) }
                 normalizedInput.copy(
                     scheduleStatus = FamilyAlarm.STATUS_DISABLED,
                     nextTriggerAtMillis = 0L
@@ -5215,7 +5318,7 @@ class FamilyRepository(
             }
             isTargetedToAnotherMember -> {
                 // Created/updated by parent for a child's device: cancel on parent's phone and wait for child's device confirmation
-                appContext?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, normalizedInput.id) }
+                ctx?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, normalizedInput.id) }
                 normalizedInput.copy(
                     scheduleStatus = FamilyAlarm.STATUS_PENDING_TARGET_DEVICE,
                     acknowledgedByMemberId = "",
@@ -5225,8 +5328,8 @@ class FamilyRepository(
                 )
             }
             else -> {
-                // Personal alarm or alarm assigned to the current device's member
-                val localRes = appContext?.let {
+                // Personal alarm or alarm assigned to the current device's member: schedule locally immediately
+                val localRes = ctx?.let {
                     com.example.notifications.FamilyAlarmScheduler.scheduleLocalAlarm(it, normalizedInput)
                 }
                 val nextTrigger = localRes?.nextTriggerAtMillis
@@ -5243,6 +5346,9 @@ class FamilyRepository(
             }
         }
 
+        explicitlyDeletedAlarmIds.remove(scheduledAlarm.id)
+        locallyManagedAlarms[scheduledAlarm.id] = scheduledAlarm
+
         val existingIdx = _familyAlarms.value.indexOfFirst { it.id == scheduledAlarm.id }
         _familyAlarms.value = if (existingIdx >= 0) {
             _familyAlarms.value.map { if (it.id == scheduledAlarm.id) scheduledAlarm else it }
@@ -5250,14 +5356,6 @@ class FamilyRepository(
             (_familyAlarms.value + scheduledAlarm)
         }.sortedWith(compareBy({ it.hour }, { it.minute }))
 
-        appContext?.let {
-            com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
-                context = it,
-                alarms = _familyAlarms.value,
-                currentMemberId = current.id,
-                currentAuthUid = authUid
-            )
-        }
         persistFamilyAlarmInFirestore(scheduledAlarm, isDelete = false)
         return true
     }
@@ -5279,6 +5377,8 @@ class FamilyRepository(
         if (!target.canMemberDelete(current, authUid)) {
             return false
         }
+        explicitlyDeletedAlarmIds.add(alarmId)
+        locallyManagedAlarms.remove(alarmId)
         appContext?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, alarmId) }
         _familyAlarms.value = _familyAlarms.value.filterNot { it.id == alarmId }
         appContext?.let {
@@ -5286,7 +5386,9 @@ class FamilyRepository(
                 context = it,
                 alarms = _familyAlarms.value,
                 currentMemberId = current.id,
-                currentAuthUid = authUid
+                currentAuthUid = authUid,
+                currentMemberName = current.name,
+                isChildDevice = !current.isParent
             )
         }
         persistFamilyAlarmInFirestore(target, isDelete = true)
@@ -5298,21 +5400,22 @@ class FamilyRepository(
         val authUser = authProvider()?.currentUser ?: return
         if (familyId.isBlank()) return
         repoScope.launch {
+            val docRef = db.collection("families").document(familyId)
+                .collection("alarms").document(alarm.id)
+            val ackFields = mapOf(
+                "scheduleStatus" to alarm.scheduleStatus,
+                "acknowledgedByMemberId" to alarm.acknowledgedByMemberId,
+                "acknowledgedByDeviceName" to alarm.acknowledgedByDeviceName,
+                "acknowledgedAtMillis" to alarm.acknowledgedAtMillis,
+                "nextTriggerAtMillis" to alarm.nextTriggerAtMillis,
+                "lastScheduleError" to alarm.lastScheduleError,
+                "updatedByUid" to authUser.uid,
+                "updatedAt" to System.currentTimeMillis()
+            )
             runCatching {
-                db.collection("families").document(familyId)
-                    .collection("alarms").document(alarm.id)
-                    .update(
-                        mapOf(
-                            "scheduleStatus" to alarm.scheduleStatus,
-                            "acknowledgedByMemberId" to alarm.acknowledgedByMemberId,
-                            "acknowledgedByDeviceName" to alarm.acknowledgedByDeviceName,
-                            "acknowledgedAtMillis" to alarm.acknowledgedAtMillis,
-                            "nextTriggerAtMillis" to alarm.nextTriggerAtMillis,
-                            "lastScheduleError" to alarm.lastScheduleError,
-                            "updatedByUid" to authUser.uid,
-                            "updatedAt" to System.currentTimeMillis()
-                        )
-                    ).await()
+                docRef.update(ackFields).await()
+            }.onFailure { err ->
+                Log.w(TAG, "acknowledgeAlarmOnTargetDeviceInFirestore update failed for ${alarm.id}: ${err.message}")
             }
         }
     }
