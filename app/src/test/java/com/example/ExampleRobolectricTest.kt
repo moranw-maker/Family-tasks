@@ -1000,6 +1000,176 @@ class ExampleRobolectricTest {
             restartedRepository.documents.value.any { it.id == parentDoc.id }
         )
     }
+
+    @Test
+    fun `test complete file manager UX refinement camera JPG document PDF empty folders and safe cleanup`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = FamilyRepository()
+        repository.createFamilyAsParent(
+            familyNameInput = "משפחת כהן החדשה",
+            parentDisplayName = "אמא",
+            creatorUidOverride = "uid_mother_clean_test",
+            creatorEmailOverride = "mom.clean@example.com",
+            familyIdentity = com.example.model.FamilyIdentity.MOTHER
+        ).getOrThrow()
+
+        // 1. File manager starts completely empty with zero default/predefined folders and zero sample files
+        assertTrue(
+            "New FamilyTasks file manager must start with zero predefined folders",
+            FamilyRepository.defaultStarterFolders("fam_new_clean").isEmpty()
+        )
+        assertTrue(
+            "New family repository folders must be empty",
+            repository.folders.value.isEmpty()
+        )
+        assertTrue(
+            "New family repository documents must be empty",
+            repository.documents.value.isEmpty()
+        )
+        assertNull(
+            "Initial selectedFolderId must be null (FamilyTasks root folder)",
+            repository.selectedFolderId.value
+        )
+
+        // 2A. Take Photo (צילום תמונה) -> Always JPEG (.jpg, image/jpeg), never converted to PDF
+        val tempCameraFile = java.io.File(context.cacheDir, "test_camera_capture.jpg")
+        val sampleBitmap = android.graphics.Bitmap.createBitmap(120, 90, android.graphics.Bitmap.Config.ARGB_8888)
+        sampleBitmap.eraseColor(android.graphics.Color.rgb(30, 136, 229))
+        java.io.FileOutputStream(tempCameraFile).use { out ->
+            sampleBitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, out)
+        }
+        val cameraPayload = com.example.files.FamilyFileManagerHelper
+            .processCapturedCameraPhotoJpeg(tempCameraFile)
+            .getOrThrow()
+
+        assertTrue(
+            "Camera photo filename must end with .jpg",
+            cameraPayload.sanitizedName.lowercase().endsWith(".jpg")
+        )
+        assertEquals(
+            "Camera photo extension must be JPG (never PDF)",
+            "JPG",
+            cameraPayload.extension
+        )
+        assertEquals(
+            "Camera photo MIME type must be image/jpeg",
+            "image/jpeg",
+            cameraPayload.mimeType
+        )
+        assertEquals(
+            "image/jpeg",
+            com.example.model.FamilyDocument.defaultMimeTypeForExtension(cameraPayload.extension)
+        )
+        // Verify JPEG magic header (0xFF 0xD8)
+        assertTrue(cameraPayload.bytes.size > 4)
+        assertEquals(0xFF.toByte(), cameraPayload.bytes[0])
+        assertEquals(0xD8.toByte(), cameraPayload.bytes[1])
+        tempCameraFile.delete()
+
+        // 2B. Scan Document (סריקת מסמך) -> Always multi-page PDF (.pdf, application/pdf), never JPG
+        val page1Bytes = com.example.files.FamilyFileManagerHelper.generateSampleImageBytes("עמוד 1", "אמא")
+        val page2Bytes = com.example.files.FamilyFileManagerHelper.generateSampleImageBytes("עמוד 2", "אמא")
+        val scannedPdfBytes = com.example.files.FamilyFileManagerHelper.generateMultiPageScannedDocumentPdfBytes(
+            pagesBytes = listOf(page1Bytes, page2Bytes),
+            title = "אישור_לימודים"
+        )
+        assertTrue("Scanned multi-page PDF must be non-empty", scannedPdfBytes.size > 100)
+        val pdfHeader = String(scannedPdfBytes.copyOfRange(0, 4), Charsets.US_ASCII)
+        assertEquals("Scanned document must start with %PDF magic header", "%PDF", pdfHeader)
+        assertEquals(
+            "application/pdf",
+            com.example.model.FamilyDocument.defaultMimeTypeForExtension("PDF")
+        )
+
+        // 2C. Upload Existing File -> Preserves original format, extension, and MIME type
+        assertEquals(
+            "PNG",
+            com.example.files.FamilyFileManagerHelper.extractExtension("diagram.png", "PNG")
+        )
+        assertEquals(
+            "DOCX",
+            com.example.files.FamilyFileManagerHelper.extractExtension("homework_notes", "DOCX")
+        )
+        assertEquals(
+            "image/png",
+            com.example.model.FamilyDocument.defaultMimeTypeForExtension("PNG")
+        )
+
+        // 3. Root-level upload directly into shared FamilyTasks root (when folderId is blank)
+        val driveConfig = repository.connectOrSetupFamilyDriveFolder().getOrThrow()
+        val rootPhotoDoc = repository.uploadFamilyFileInCloud(
+            folderId = "",
+            rawFileName = cameraPayload.sanitizedName,
+            rawExtension = cameraPayload.extension,
+            rawBytes = cameraPayload.bytes
+        ).getOrThrow()
+
+        assertEquals("JPG", rootPhotoDoc.extension)
+        assertEquals(
+            "Root-level photo upload must use the shared FamilyTasks root folder ID as driveParentFolderId",
+            driveConfig.driveRootFolderId,
+            rootPhotoDoc.driveParentFolderId
+        )
+
+        val rootScannedPdfDoc = repository.uploadFamilyFileInCloud(
+            folderId = "",
+            rawFileName = "סריקה_רב_עמודית.pdf",
+            rawExtension = "PDF",
+            rawBytes = scannedPdfBytes
+        ).getOrThrow()
+
+        assertEquals("PDF", rootScannedPdfDoc.extension)
+        assertEquals(driveConfig.driveRootFolderId, rootScannedPdfDoc.driveParentFolderId)
+
+        // 4. Safe, idempotent cleanup of legacy auto-generated default folders:
+        //    - Empty legacy auto-generated folder ("f_medical") IS deleted.
+        //    - Non-empty legacy auto-generated folder ("f_school" with a file) is NOT deleted.
+        //    - Manually created folder with a similar name ("בית ספר") is NOT deleted even when empty.
+        val emptyLegacyFolder = com.example.model.DocumentFolder(
+            id = "f_medical",
+            nameHe = "רפואה ובריאות",
+            nameEn = "Medical",
+            iconEmoji = "🏥",
+            colorHex = 0xFFDC2626
+        )
+        val nonEmptyLegacyFolder = com.example.model.DocumentFolder(
+            id = "f_school",
+            nameHe = "בית ספר ולימודים",
+            nameEn = "School",
+            iconEmoji = "🎒",
+            colorHex = 0xFF2563EB
+        )
+        val manualSameNameFolder = repository.createSharedFolderInCloud(
+            nameHe = "בית ספר",
+            parentFolderId = null
+        ).getOrThrow()
+
+        repository.injectFolderForTest(emptyLegacyFolder)
+        repository.injectFolderForTest(nonEmptyLegacyFolder)
+
+        // Put a real family file inside nonEmptyLegacyFolder ("f_school")
+        repository.uploadFamilyFileInCloud(
+            folderId = "f_school",
+            rawFileName = "תעודה.pdf",
+            rawExtension = "PDF",
+            rawBytes = scannedPdfBytes
+        ).getOrThrow()
+
+        val deletedCount = repository.cleanupEmptyAutoGeneratedDefaultFolders()
+        assertEquals("Only the 1 empty legacy auto-generated folder must be removed", 1, deletedCount)
+        assertFalse(
+            "Empty auto-generated default folder f_medical must be removed",
+            repository.folders.value.any { it.id == "f_medical" }
+        )
+        assertTrue(
+            "Non-empty legacy folder f_school containing a family file must NOT be deleted",
+            repository.folders.value.any { it.id == "f_school" }
+        )
+        assertTrue(
+            "Manually created folder with similar name ('בית ספר') must NEVER be deleted by auto-cleanup",
+            repository.folders.value.any { it.id == manualSameNameFolder.id }
+        )
+    }
 }
 
 

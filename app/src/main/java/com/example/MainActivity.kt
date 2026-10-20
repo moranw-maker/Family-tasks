@@ -673,13 +673,15 @@ fun FamilyTasksApp(
                     if (showCameraScannerDialog) {
                         CameraScannerDialog(
                             folders = folders,
-                            selectedFolderId = selectedFolderId,
+                            initialFolderId = selectedFolderId,
                             isHebrew = isHebrew,
                             onDismiss = { showCameraScannerDialog = false },
-                            onUploadFile = { folderId, name, ext, size ->
-                                viewModel.simulateUploadFileToDrive(folderId, name, ext, size)
+                            onUploadBinaryFile = { folderId, name, ext, bytes ->
+                                viewModel.uploadBinaryFileToFamily(folderId, name, ext, bytes)
                             },
-                            onShowToast = { viewModel.showToastMessage(it) }
+                            onConfirmScannedDocument = { folderId, name, _ ->
+                                viewModel.simulateUploadFileToDrive(folderId, name, "PDF", "1.4 MB")
+                            }
                         )
                     }
 

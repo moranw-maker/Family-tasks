@@ -195,11 +195,10 @@ fun AddFolderDialog(
     onDismiss: () -> Unit,
     onSaveFolder: (nameHebrew: String, nameEnglish: String, colorHex: Long, iconEmoji: String) -> Unit
 ) {
-    var nameHebrew by remember { mutableStateOf("") }
-    var nameEnglish by remember { mutableStateOf("") }
+    var folderName by remember { mutableStateOf("") }
     var selectedEmoji by remember { mutableStateOf("📁") }
 
-    val emojis = listOf("📁", "📝", "🏥", "🎨", "⚽", "🎓", "📑", "💳")
+    val emojis = listOf("📁", "📂", "📄", "📷", "🏥", "🎓", "🏠", "⭐")
     val safeDismiss = {
         onDismiss()
     }
@@ -217,6 +216,7 @@ fun AddFolderDialog(
             modifier = Modifier
                 .fillMaxWidth(0.92f)
                 .padding(vertical = 16.dp)
+                .testTag("add_folder_dialog")
         ) {
             Column(
                 modifier = Modifier
@@ -229,7 +229,7 @@ fun AddFolderDialog(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = if (isHebrew) "פתיחת תיקייה משותפת חדשה" else "New Shared Folder",
+                        text = if (isHebrew) "תיקייה חדשה" else "New Folder",
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = FontWeight.Bold,
                             color = GoogleBlue
@@ -243,26 +243,17 @@ fun AddFolderDialog(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 OutlinedTextField(
-                    value = nameHebrew,
-                    onValueChange = { nameHebrew = it },
-                    label = { Text(if (isHebrew) "שם התיקייה בעברית" else "Folder Name (Hebrew)") },
+                    value = folderName,
+                    onValueChange = { folderName = it },
+                    label = { Text(if (isHebrew) "שם התיקייה" else "Folder Name") },
                     singleLine = true,
                     shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("add_folder_name_input")
                 )
 
-                Spacer(modifier = Modifier.height(10.dp))
-
-                OutlinedTextField(
-                    value = nameEnglish,
-                    onValueChange = { nameEnglish = it },
-                    label = { Text(if (isHebrew) "שם התיקייה באנגלית" else "Folder Name (English)") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -290,23 +281,26 @@ fun AddFolderDialog(
 
                 Button(
                     onClick = {
-                        if (nameHebrew.isNotBlank() || nameEnglish.isNotBlank()) {
+                        val trimmed = folderName.trim()
+                        if (trimmed.isNotBlank()) {
                             onSaveFolder(
-                                nameHebrew.ifBlank { nameEnglish },
-                                nameEnglish.ifBlank { nameHebrew },
+                                trimmed,
+                                trimmed,
                                 0xFF1A73E8,
                                 selectedEmoji
                             )
                         }
                     },
+                    enabled = folderName.trim().isNotBlank(),
                     shape = RoundedCornerShape(18.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = GoogleBlue),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(48.dp)
+                        .testTag("confirm_add_folder_button")
                 ) {
                     Text(
-                        text = if (isHebrew) "צור תיקייה משותפת" else "Create Shared Folder",
+                        text = if (isHebrew) "צור תיקייה" else "Create Folder",
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp
                     )

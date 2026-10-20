@@ -1,11 +1,17 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.app.Activity
+import android.app.PendingIntent
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.provider.OpenableColumns
 import android.util.Base64
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -14,21 +20,21 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -41,24 +47,34 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.activity.result.IntentSenderRequest
+import androidx.core.content.ContextCompat
 import com.example.files.FamilyFileManagerHelper
-import com.example.model.*
+import com.example.files.GoogleDriveFamilyService
+import com.example.model.DocumentFolder
+import com.example.model.DriveConnectionStatus
+import com.example.model.DrivePickerAuthorizationRequest
+import com.example.model.FamilyDocument
+import com.example.model.FamilyDriveConfig
+import com.example.model.FamilyMember
+import com.example.model.FileSortOption
+import com.example.model.FileUploadStatus
+import com.example.model.FileUploadTaskState
+import com.example.model.FilesViewMode
 import com.example.ui.dialogs.CameraScannerDialog
 import com.example.ui.dialogs.FamilyDriveSharingDialog
 import com.example.ui.dialogs.FilePreviewDialog
-import com.example.ui.dialogs.GoogleDriveFamilyTasksBanner
 import com.example.ui.dialogs.GoogleDrivePickerDialog
-import com.example.ui.dialogs.MoveFileToFolderDialog
 import com.example.ui.dialogs.RenameFileDialog
 import com.example.ui.dialogs.RenameFolderDialog
-import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -68,7 +84,7 @@ fun FilesScreen(
     files: List<FamilyDocument>,
     currentMember: FamilyMember,
     members: List<FamilyMember> = emptyList(),
-    viewMode: FilesViewMode,
+    viewMode: FilesViewMode = FilesViewMode.LIST,
     isHebrew: Boolean,
     activeUploads: List<FileUploadTaskState> = emptyList(),
     sortOption: FileSortOption = FileSortOption.DATE,
@@ -76,17 +92,16 @@ fun FilesScreen(
     searchQuery: String = "",
     onSelectFolder: (String?) -> Unit,
     onNavigateUpFolder: () -> Boolean = {
-        val current = folders.find { it.id == selectedFolderId }
-        onSelectFolder(current?.parentFolderId?.takeIf { it.isNotBlank() })
+        onSelectFolder(null)
         true
     },
-    onViewModeChange: (FilesViewMode) -> Unit,
+    onViewModeChange: (FilesViewMode) -> Unit = {},
     onSortOptionChange: (FileSortOption) -> Unit = {},
     onSearchQueryChange: (String) -> Unit = {},
     onAddFolder: () -> Unit,
     onDeleteFolder: (String) -> Unit = {},
     onUploadFile: (folderId: String, fileName: String, extension: String, sizeFormatted: String) -> Unit,
-    onUploadBinaryFile: ((folderId: String?, fileName: String, extension: String, bytes: ByteArray) -> Unit)? = null,
+    onUploadBinaryFile: ((folderId: String, fileName: String, extension: String, bytes: ByteArray) -> Unit)? = null,
     onCancelUpload: (String) -> Unit = {},
     onRetryUpload: (String) -> Unit = {},
     onDismissUpload: (String) -> Unit = {},
@@ -95,8 +110,8 @@ fun FilesScreen(
     onRenameFolder: (folderId: String, newNameHe: String) -> Unit = { _, _ -> },
     onDeleteFile: (String) -> Unit,
     familyDriveConfig: FamilyDriveConfig = FamilyDriveConfig(),
-    driveConsentPendingIntent: android.app.PendingIntent? = null,
-    driveConsentIntent: android.content.Intent? = null,
+    driveConsentPendingIntent: PendingIntent? = null,
+    driveConsentIntent: Intent? = null,
     onConnectFamilyDrive: () -> Unit = {},
     onClearDriveConsentPrompts: () -> Unit = {},
     onShareDriveWithMember: (memberId: String, email: String) -> Unit = { _, _ -> },
@@ -108,42 +123,94 @@ fun FilesScreen(
     onVerifyPickedSharedFolder: (pickedDriveId: String, pickedName: String) -> Unit = { _, _ -> },
     onDismissDrivePicker: () -> Unit = {},
     fileBytesProvider: (suspend (FamilyDocument) -> ByteArray?)? = null,
-    onShowToast: (String) -> Unit
+    onShowToast: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
-    var localSearchQuery by rememberSaveable { mutableStateOf(searchQuery) }
-    var localSortOption by rememberSaveable { mutableStateOf(sortOption) }
-    var localSortAsc by rememberSaveable { mutableStateOf(sortAscending) }
 
-    LaunchedEffect(searchQuery) {
-        if (searchQuery != localSearchQuery) localSearchQuery = searchQuery
-    }
-    LaunchedEffect(sortOption, sortAscending) {
-        localSortOption = sortOption
-        localSortAsc = sortAscending
+    // Navigate up folder hierarchy on system Back press when inside a subfolder
+    BackHandler(enabled = selectedFolderId != null) {
+        onNavigateUpFolder()
     }
 
-    var showFabMenu by remember { mutableStateOf(false) }
-    var showQuickUploadDialog by remember { mutableStateOf(false) }
-    var showCameraDialog by rememberSaveable { mutableStateOf(false) }
-    var cameraInitialDocMode by rememberSaveable { mutableStateOf(true) }
-    var showStorageQuotaDialog by remember { mutableStateOf(false) }
-    var showDriveSharingDialog by remember { mutableStateOf(false) }
+    val currentFolder = remember(folders, selectedFolderId) {
+        folders.find { it.id == selectedFolderId }
+    }
+    val breadcrumbTrail = remember(folders, selectedFolderId) {
+        FamilyFileManagerHelper.buildFolderBreadcrumbTrail(folders, selectedFolderId)
+    }
 
+    val rootDriveId = familyDriveConfig.driveRootFolderId.trim()
+
+    // Visible folders at the current hierarchy level (or matching search query)
+    val currentLevelFolders = remember(folders, selectedFolderId, searchQuery, rootDriveId) {
+        val q = searchQuery.trim()
+        if (q.isNotEmpty()) {
+            folders.filter { folder ->
+                folder.nameHe.contains(q, ignoreCase = true) ||
+                    folder.nameEn.contains(q, ignoreCase = true)
+            }
+        } else if (selectedFolderId == null) {
+            folders.filter { folder ->
+                folder.parentFolderId.isNullOrBlank() || folder.parentFolderId == rootDriveId
+            }
+        } else {
+            folders.filter { folder ->
+                folder.parentFolderId == selectedFolderId ||
+                    (currentFolder != null && currentFolder.driveFolderId.isNotBlank() &&
+                        folder.driveParentFolderId == currentFolder.driveFolderId)
+            }
+        }
+    }
+
+    // Visible files at the current hierarchy level (or matching search query)
+    val sortedFilteredFiles = remember(files, folders, selectedFolderId, currentFolder, searchQuery, sortOption, sortAscending, rootDriveId) {
+        val q = searchQuery.trim()
+        val levelFiltered = if (q.isNotEmpty()) {
+            files.filter { doc ->
+                doc.name.contains(q, ignoreCase = true) ||
+                    doc.extension.contains(q, ignoreCase = true) ||
+                    doc.uploadedByName.contains(q, ignoreCase = true)
+            }
+        } else if (selectedFolderId == null) {
+            // Root level: show files stored directly in the root FamilyTasks folder (not inside any user subfolder)
+            files.filter { doc ->
+                doc.folderId.isBlank() ||
+                    doc.folderId == rootDriveId ||
+                    folders.none { f ->
+                        doc.folderId == f.id ||
+                            (f.driveFolderId.isNotBlank() && (doc.folderId == f.driveFolderId || doc.driveParentFolderId == f.driveFolderId))
+                    }
+            }
+        } else {
+            // Subfolder level: show files inside the selected folder
+            files.filter { doc ->
+                doc.folderId == selectedFolderId ||
+                    (currentFolder != null && currentFolder.driveFolderId.isNotBlank() &&
+                        (doc.folderId == currentFolder.driveFolderId || doc.driveParentFolderId == currentFolder.driveFolderId))
+            }
+        }
+        FamilyFileManagerHelper.sortFiles(levelFiltered, sortOption, sortAscending)
+    }
+
+    // --- Dialog & Sheet States ---
+    var showAddActionBottomSheet by rememberSaveable { mutableStateOf(false) }
+    var showDocumentScannerDialog by rememberSaveable { mutableStateOf(false) }
+    var showDriveSharingDialog by rememberSaveable { mutableStateOf(false) }
     var previewFile by remember { mutableStateOf<FamilyDocument?>(null) }
     var fileToRename by remember { mutableStateOf<FamilyDocument?>(null) }
     var fileToMove by remember { mutableStateOf<FamilyDocument?>(null) }
+    var fileToDeleteConfirm by remember { mutableStateOf<FamilyDocument?>(null) }
     var folderToRename by remember { mutableStateOf<DocumentFolder?>(null) }
-    var filePendingDelete by remember { mutableStateOf<FamilyDocument?>(null) }
-    var folderPendingDelete by remember { mutableStateOf<DocumentFolder?>(null) }
+    var folderToDeleteConfirm by remember { mutableStateOf<DocumentFolder?>(null) }
+    var showSearchBar by rememberSaveable { mutableStateOf(false) }
 
-    // Google Drive OAuth 2.0 Consent Launchers (Play Services Identity / UserRecoverableAuth)
+    // --- Google Drive OAuth Resolution Launchers ---
     val driveIntentSenderLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         onClearDriveConsentPrompts()
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            com.example.files.GoogleDriveFamilyService.handleAuthorizationActivityResult(
+        if (result.resultCode == Activity.RESULT_OK) {
+            GoogleDriveFamilyService.handleAuthorizationActivityResult(
                 context = context,
                 data = result.data,
                 accountEmail = currentMember.googleEmail
@@ -156,826 +223,708 @@ fun FilesScreen(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
         onClearDriveConsentPrompts()
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
+        if (result.resultCode == Activity.RESULT_OK) {
             onConnectFamilyDrive()
         }
     }
 
-    LaunchedEffect(driveConsentPendingIntent) {
-        driveConsentPendingIntent?.let { pendingIntent ->
+    LaunchedEffect(driveConsentPendingIntent, driveConsentIntent) {
+        if (driveConsentPendingIntent != null) {
             runCatching {
-                driveIntentSenderLauncher.launch(
-                    IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                val req = IntentSenderRequest.Builder(driveConsentPendingIntent.intentSender).build()
+                driveIntentSenderLauncher.launch(req)
+            }.onFailure {
+                onClearDriveConsentPrompts()
+            }
+        } else if (driveConsentIntent != null) {
+            runCatching {
+                driveLegacyConsentLauncher.launch(driveConsentIntent)
+            }.onFailure {
+                onClearDriveConsentPrompts()
+            }
+        }
+    }
+
+    // --- 1A. Take Photo (צילום תמונה) -> Always JPEG (.jpg, image/jpeg) with EXIF orientation ---
+    // CRITICAL: rememberSaveable preserves the temp photo file path across Activity rotation / process recreation
+    var pendingDirectCameraPhotoPath by rememberSaveable { mutableStateOf<String?>(null) }
+
+    val takePhotoJpegLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        val path = pendingDirectCameraPhotoPath
+        val capturedFile = path?.let { File(it) }
+        pendingDirectCameraPhotoPath = null
+
+        if (success && capturedFile != null && capturedFile.exists() && capturedFile.length() > 0L) {
+            val targetFolder = selectedFolderId.orEmpty()
+            val processed = FamilyFileManagerHelper.processCapturedCameraPhotoJpeg(
+                photoFile = capturedFile,
+                isHebrew = isHebrew
+            )
+            processed.fold(
+                onSuccess = { payload ->
+                    // Strictly upload as JPG (image/jpeg) — NEVER convert a regular camera photo to PDF!
+                    if (onUploadBinaryFile != null) {
+                        onUploadBinaryFile(
+                            targetFolder,
+                            payload.sanitizedName,
+                            "JPG",
+                            payload.bytes
+                        )
+                    } else {
+                        onUploadFile(
+                            targetFolder,
+                            payload.sanitizedName,
+                            "JPG",
+                            payload.sizeFormatted
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    onShowToast(err.localizedMessage ?: if (isHebrew) "שגיאה בעיבוד התמונה" else "Failed to process photo")
+                }
+            )
+        }
+    }
+
+    val takePhotoPreviewFallbackLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicturePreview()
+    ) { bmp: Bitmap? ->
+        if (bmp != null) {
+            val targetFolder = selectedFolderId.orEmpty()
+            val (jpegBytes, _) = FamilyFileManagerHelper.encodeCameraBitmapToJpegBytes(bmp, quality = 92)
+            val photoName = FamilyFileManagerHelper.generateCameraPhotoFileName(isHebrew = isHebrew)
+            if (onUploadBinaryFile != null) {
+                onUploadBinaryFile(targetFolder, photoName, "JPG", jpegBytes)
+            } else {
+                onUploadFile(
+                    targetFolder,
+                    photoName,
+                    "JPG",
+                    FamilyFileManagerHelper.formatFileSize(jpegBytes.size.toLong())
                 )
-            }.onFailure {
-                onClearDriveConsentPrompts()
             }
         }
     }
 
-    LaunchedEffect(driveConsentIntent) {
-        driveConsentIntent?.let { intent ->
+    fun launchDirectCameraPhotoCapture() {
+        runCatching {
+            val (file, uri) = FamilyFileManagerHelper.createTempCameraCaptureUri(context, "camera_photo")
+            pendingDirectCameraPhotoPath = file.absolutePath
+            takePhotoJpegLauncher.launch(uri)
+        }.onFailure {
             runCatching {
-                driveLegacyConsentLauncher.launch(intent)
+                takePhotoPreviewFallbackLauncher.launch(null)
             }.onFailure {
-                onClearDriveConsentPrompts()
+                onShowToast(
+                    if (isHebrew) "לא ניתן לפתוח את המצלמה במכשיר זה"
+                    else "Could not launch camera on this device"
+                )
             }
         }
     }
 
-    // Support system Back navigation when inside a folder/subfolder
-    BackHandler(enabled = selectedFolderId != null) {
-        onNavigateUpFolder()
+    val directCameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            launchDirectCameraPhotoCapture()
+        } else {
+            onShowToast(
+                if (isHebrew) "נדרשת הרשאת מצלמה לצילום תמונה"
+                else "Camera permission is required to take a photo"
+            )
+        }
     }
 
-    // Native Storage Access Framework (SAF) file picker launcher
-    val safDocumentLauncher = rememberLauncherForActivityResult(
+    fun triggerTakePhotoAction() {
+        val hasPerm = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasPerm) {
+            launchDirectCameraPhotoCapture()
+        } else {
+            directCameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    // --- 1C. Upload Existing File (העלאת קובץ) -> Preserves original format, extension & MIME type ---
+    val openDeviceFileLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
-            var displayName = "קובץ_משפחתי.pdf"
             runCatching {
-                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                    val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (nameIndex >= 0 && cursor.moveToFirst()) {
-                        displayName = cursor.getString(nameIndex) ?: displayName
-                    }
-                }
-            }
-            val bytes = runCatching {
-                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            }.getOrNull()
-
-            if (bytes != null) {
-                val ext = FamilyFileManagerHelper.extractExtension(displayName, "PDF")
-                val targetFolder = selectedFolderId ?: folders.firstOrNull()?.id ?: "f_school"
-                if (onUploadBinaryFile != null) {
-                    onUploadBinaryFile(targetFolder, displayName, ext, bytes)
-                } else {
-                    onUploadFile(
-                        targetFolder,
-                        displayName,
-                        ext,
-                        FamilyFileManagerHelper.formatFileSize(bytes.size.toLong())
-                    )
-                }
-            } else {
-                onShowToast(
-                    if (isHebrew) "לא ניתן לקרוא את הקובץ שנבחר. נסו קובץ אחר."
-                    else "Could not read selected file."
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             }
+            val targetFolder = selectedFolderId.orEmpty()
+            val payloadResult = FamilyFileManagerHelper.readPickedUriPayload(context, uri)
+            payloadResult.fold(
+                onSuccess = { payload ->
+                    if (onUploadBinaryFile != null) {
+                        onUploadBinaryFile(
+                            targetFolder,
+                            payload.sanitizedName,
+                            payload.extension,
+                            payload.bytes
+                        )
+                    } else {
+                        onUploadFile(
+                            targetFolder,
+                            payload.sanitizedName,
+                            payload.extension,
+                            payload.sizeFormatted
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    onShowToast(err.localizedMessage ?: if (isHebrew) "שגיאה בקריאת הקובץ" else "Failed to read file")
+                }
+            )
         }
     }
 
-    // Compute breadcrumb chain from root to selectedFolderId
-    val breadcrumbChain = remember(folders, selectedFolderId) {
-        val chain = mutableListOf<DocumentFolder>()
-        var cursor = folders.find { it.id == selectedFolderId }
-        val visited = mutableSetOf<String>()
-        while (cursor != null && visited.add(cursor.id)) {
-            chain.add(0, cursor)
-            val parentId = cursor.parentFolderId?.takeIf { it.isNotBlank() }
-            cursor = if (parentId != null) folders.find { it.id == parentId } else null
-        }
-        chain
-    }
+    val layoutDir = if (isHebrew) LayoutDirection.Rtl else LayoutDirection.Ltr
 
-    // Filter subfolders for current level
-    val currentLevelFolders = remember(folders, selectedFolderId, localSearchQuery) {
-        val q = localSearchQuery.trim()
-        if (q.isNotBlank()) {
-            folders.filter {
-                it.nameHe.contains(q, ignoreCase = true) ||
-                    it.nameEn.contains(q, ignoreCase = true)
-            }
-        } else {
-            folders.filter { folder ->
-                val parent = folder.parentFolderId?.takeIf { it.isNotBlank() }
-                parent == selectedFolderId
-            }
-        }
-    }
-
-    // Filter and sort files
-    val displayedFiles = remember(files, selectedFolderId, localSearchQuery, localSortOption, localSortAsc) {
-        val q = localSearchQuery.trim()
-        val base = files.filter { doc ->
-            val matchesFolder = if (q.isNotBlank()) {
-                true
-            } else {
-                selectedFolderId == null || doc.folderId == selectedFolderId
-            }
-            val matchesQuery = q.isBlank() ||
-                doc.name.contains(q, ignoreCase = true) ||
-                doc.extension.contains(q, ignoreCase = true) ||
-                doc.uploadedByName.contains(q, ignoreCase = true)
-            matchesFolder && matchesQuery
-        }
-
-        val comparator = when (localSortOption) {
-            FileSortOption.NAME -> compareBy<FamilyDocument> { it.name.lowercase() }
-            FileSortOption.DATE -> compareBy<FamilyDocument> { it.uploadedAtMillis }
-            FileSortOption.SIZE -> compareBy<FamilyDocument> {
-                if (it.sizeBytes > 0L) it.sizeBytes else FamilyFileManagerHelper.parseApproximateSizeBytes(it.sizeFormatted)
-            }
-            FileSortOption.TYPE -> compareBy<FamilyDocument> { it.extension.uppercase() }
-                .thenBy { it.name.lowercase() }
-        }
-        if (localSortAsc) base.sortedWith(comparator) else base.sortedWith(comparator.reversed())
-    }
-
-    val currentFolderObj = remember(folders, selectedFolderId) {
-        folders.find { it.id == selectedFolderId }
-    }
-
-    Box(modifier = Modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
-        ) {
-            // Top Bar: Title + Back action + View Mode Toggle + Storage Info
-            Surface(
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 1.dp,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
+    CompositionLocalProvider(LocalLayoutDirection provides layoutDir) {
+        Scaffold(
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            floatingActionButton = {
+                FloatingActionButton(
+                    onClick = { showAddActionBottomSheet = true },
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    shape = RoundedCornerShape(20.dp),
+                    elevation = FloatingActionButtonDefaults.elevation(
+                        defaultElevation = 6.dp,
+                        pressedElevation = 10.dp
+                    ),
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .padding(bottom = 8.dp)
+                        .size(60.dp)
+                        .testTag("files_fab_upload")
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            if (selectedFolderId != null) {
-                                IconButton(
-                                    onClick = { onNavigateUpFolder() },
-                                    modifier = Modifier
-                                        .size(40.dp)
-                                        .testTag("files_back_button")
-                                ) {
-                                    Icon(
-                                        Icons.AutoMirrored.Filled.ArrowBack,
-                                        contentDescription = if (isHebrew) "חזרה לתיקייה הקודמת" else "Back"
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(4.dp))
-                            }
-                            Column {
-                                Text(
-                                    text = currentFolderObj?.getDisplayName(isHebrew)
-                                        ?: (if (isHebrew) "קבצים ותיקיות משפחתיות" else "Shared Family Files"),
-                                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = if (isHebrew) {
-                                        "${currentLevelFolders.size} תיקיות • ${displayedFiles.size} קבצים ב-Google Drive ($GOOGLE_DRIVE_ROOT_FOLDER_NAME)"
-                                    } else {
-                                        "${currentLevelFolders.size} folders • ${displayedFiles.size} files in Google Drive ($GOOGLE_DRIVE_ROOT_FOLDER_NAME)"
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            // Grid / List View Switcher
-                            IconButton(
-                                onClick = {
-                                    val next = if (viewMode == FilesViewMode.GRID) FilesViewMode.LIST else FilesViewMode.GRID
-                                    onViewModeChange(next)
-                                },
-                                modifier = Modifier
-                                    .size(42.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
-                                    .testTag("toggle_files_view_mode")
-                            ) {
-                                Icon(
-                                    imageVector = if (viewMode == FilesViewMode.GRID) Icons.Default.ViewList else Icons.Default.GridView,
-                                    contentDescription = if (isHebrew) "החלף תצוגת רשת/רשימה" else "Toggle Grid/List View",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-
-                            // Storage Quotas & Security Info Button
-                            IconButton(
-                                onClick = { showStorageQuotaDialog = true },
-                                modifier = Modifier
-                                    .size(42.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
-                                    .testTag("storage_quota_info_button")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.CloudDone,
-                                    contentDescription = if (isHebrew) "מידע על אחסון ואבטחה" else "Storage & Security Info",
-                                    tint = Color(0xFF059669)
-                                )
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    // Breadcrumb Navigation Bar
-                    LazyRow(
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = if (isHebrew) "הוספה" else "Add",
+                        modifier = Modifier.size(30.dp)
+                    )
+                }
+            }
+        ) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+                    .padding(innerPadding)
+            ) {
+                // --- Clean Top Header Bar ---
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 1.dp,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("files_breadcrumb_bar"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
                     ) {
-                        item {
-                            AssistChip(
-                                onClick = { onSelectFolder(null) },
-                                label = {
-                                    Text(
-                                        text = if (isHebrew) "🏠 כל התיקיות" else "🏠 All Folders",
-                                        fontWeight = if (selectedFolderId == null) FontWeight.ExtraBold else FontWeight.Medium
-                                    )
-                                },
-                                colors = AssistChipDefaults.assistChipColors(
-                                    containerColor = if (selectedFolderId == null) {
-                                        MaterialTheme.colorScheme.primaryContainer
-                                    } else {
-                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                                    }
-                                ),
-                                border = null,
-                                modifier = Modifier.testTag("breadcrumb_root_chip")
-                            )
-                        }
-
-                        items(breadcrumbChain, key = { it.id }) { crumb ->
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = " / ",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                val isCurrent = crumb.id == selectedFolderId
-                                AssistChip(
-                                    onClick = { onSelectFolder(crumb.id) },
-                                    label = {
-                                        Text(
-                                            text = "${crumb.iconEmoji} ${crumb.getDisplayName(isHebrew)}",
-                                            fontWeight = if (isCurrent) FontWeight.ExtraBold else FontWeight.Medium
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                if (selectedFolderId != null) {
+                                    IconButton(
+                                        onClick = { onNavigateUpFolder() },
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .testTag("breadcrumb_back_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                            contentDescription = if (isHebrew) "חזרה" else "Back"
                                         )
-                                    },
-                                    colors = AssistChipDefaults.assistChipColors(
-                                        containerColor = if (isCurrent) {
-                                            MaterialTheme.colorScheme.primaryContainer
-                                        } else {
-                                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                    }
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                } else {
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                        modifier = Modifier.size(40.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Default.FolderShared,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                modifier = Modifier.size(22.dp)
+                                            )
                                         }
-                                    ),
-                                    border = null,
-                                    modifier = Modifier.testTag("breadcrumb_folder_${crumb.id}")
-                                )
+                                    }
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                }
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = currentFolder?.getDisplayName(isHebrew)
+                                            ?: if (isHebrew) "קבצי המשפחה" else "Family Files",
+                                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        val isConnected = familyDriveConfig.connectionStatus == DriveConnectionStatus.CONNECTED ||
+                                            familyDriveConfig.isConfigured
+                                        Icon(
+                                            imageVector = if (isConnected) Icons.Default.CloudDone else Icons.Default.CloudSync,
+                                            contentDescription = null,
+                                            tint = if (isConnected) Color(0xFF059669) else MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Text(
+                                            text = if (selectedFolderId != null && breadcrumbTrail.isNotEmpty()) {
+                                                "FamilyTasks / " + breadcrumbTrail.joinToString(" / ") { it.getDisplayName(isHebrew) }
+                                            } else if (isHebrew) {
+                                                "Google Drive • תיקיית FamilyTasks משותפת"
+                                            } else {
+                                                "Google Drive • Shared FamilyTasks"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
                             }
-                        }
-                    }
 
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Search Bar
-                    OutlinedTextField(
-                        value = localSearchQuery,
-                        onValueChange = {
-                            localSearchQuery = it
-                            onSearchQueryChange(it)
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("files_search_input"),
-                        placeholder = {
-                            Text(
-                                if (isHebrew) "חיפוש קובץ, תיקייה או מעלה..." else "Search files, folders, or uploader...",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        },
-                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                        trailingIcon = {
-                            if (localSearchQuery.isNotEmpty()) {
+                            // Compact utility icons: Search, List/Grid toggle, Refresh/Sync, and (if needed) Drive settings
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
                                 IconButton(
                                     onClick = {
-                                        localSearchQuery = ""
-                                        onSearchQueryChange("")
-                                    }
+                                        showSearchBar = !showSearchBar
+                                        if (!showSearchBar && searchQuery.isNotEmpty()) {
+                                            onSearchQueryChange("")
+                                        }
+                                    },
+                                    modifier = Modifier.testTag("toggle_search_button")
                                 ) {
-                                    Icon(Icons.Default.Clear, contentDescription = "Clear")
+                                    Icon(
+                                        imageVector = if (showSearchBar || searchQuery.isNotEmpty()) Icons.Default.SearchOff else Icons.Default.Search,
+                                        contentDescription = if (isHebrew) "חיפוש" else "Search"
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        val nextMode = if (viewMode == FilesViewMode.GRID) FilesViewMode.LIST else FilesViewMode.GRID
+                                        onViewModeChange(nextMode)
+                                    },
+                                    modifier = Modifier.testTag(
+                                        if (viewMode == FilesViewMode.GRID) "view_mode_list" else "view_mode_grid"
+                                    )
+                                ) {
+                                    Icon(
+                                        imageVector = if (viewMode == FilesViewMode.GRID) {
+                                            Icons.AutoMirrored.Filled.ViewList
+                                        } else {
+                                            Icons.Default.GridView
+                                        },
+                                        contentDescription = if (isHebrew) "שינוי תצוגה" else "Toggle view mode"
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = onConnectFamilyDrive,
+                                    modifier = Modifier.testTag("sync_family_drive_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Sync,
+                                        contentDescription = if (isHebrew) "רענון מ-Google Drive" else "Sync Google Drive"
+                                    )
+                                }
+
+                                if (currentMember.isParent) {
+                                    IconButton(
+                                        onClick = { showDriveSharingDialog = true },
+                                        modifier = Modifier.testTag("open_drive_sharing_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.CloudQueue,
+                                            contentDescription = if (isHebrew) "הגדרות שיתוף Google Drive" else "Google Drive Sharing Settings"
+                                        )
+                                    }
                                 }
                             }
-                        },
-                        singleLine = true,
-                        shape = RoundedCornerShape(14.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                            focusedContainerColor = MaterialTheme.colorScheme.surface
-                        )
-                    )
+                        }
 
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Sorting Row (Name, Date, Size, Type)
-                    LazyRow(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("files_sort_bar"),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        item {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.Sort,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = if (isHebrew) "מיון:" else "Sort:",
-                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                        // Expandable Search Bar
+                        AnimatedVisibility(visible = showSearchBar || searchQuery.isNotEmpty()) {
+                            Column {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                OutlinedTextField(
+                                    value = searchQuery,
+                                    onValueChange = onSearchQueryChange,
+                                    placeholder = {
+                                        Text(
+                                            text = if (isHebrew) "חיפוש קובץ או תיקייה..." else "Search files or folders...",
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp))
+                                    },
+                                    trailingIcon = {
+                                        if (searchQuery.isNotEmpty()) {
+                                            IconButton(
+                                                onClick = { onSearchQueryChange("") },
+                                                modifier = Modifier.testTag("clear_file_search_button")
+                                            ) {
+                                                Icon(Icons.Default.Clear, contentDescription = "Clear", modifier = Modifier.size(18.dp))
+                                            }
+                                        }
+                                    },
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("file_search_input")
                                 )
                             }
                         }
-                        items(FileSortOption.entries) { option ->
-                            val isSelected = localSortOption == option
-                            FilterChip(
-                                selected = isSelected,
-                                onClick = {
-                                    if (localSortOption == option) {
-                                        localSortAsc = !localSortAsc
-                                    } else {
-                                        localSortOption = option
-                                        localSortAsc = (option == FileSortOption.NAME || option == FileSortOption.TYPE)
+
+                        // Sort strip when files are present
+                        if (sortedFilteredFiles.size > 1) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = if (isHebrew) "מיון:" else "Sort:",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                FileSortOption.entries.forEach { option ->
+                                    val selected = sortOption == option
+                                    FilterChip(
+                                        selected = selected,
+                                        onClick = { onSortOptionChange(option) },
+                                        label = {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    text = option.getDisplayName(isHebrew),
+                                                    style = MaterialTheme.typography.labelSmall.copy(
+                                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                                    )
+                                                )
+                                                if (selected) {
+                                                    Spacer(modifier = Modifier.width(2.dp))
+                                                    Icon(
+                                                        imageVector = if (sortAscending) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(13.dp)
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.testTag("sort_chip_${option.name.lowercase()}")
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // --- Connection / Picker Authorization Alert Banner (shown ONLY when action is required) ---
+                val needsPickerAuth = familyDriveConfig.connectionStatus == DriveConnectionStatus.NEEDS_SHARED_FOLDER_PICKER ||
+                    pendingDrivePickerRequest != null
+                val needsDriveConnect = !familyDriveConfig.isConfigured &&
+                    familyDriveConfig.connectionStatus != DriveConnectionStatus.CONNECTED
+
+                if (needsPickerAuth || needsDriveConnect || !familyDriveConfig.errorMessageHe.isNullOrBlank()) {
+                    DriveActionRequiredBanner(
+                        config = familyDriveConfig,
+                        isParent = currentMember.isParent,
+                        isHebrew = isHebrew,
+                        needsPickerAuth = needsPickerAuth,
+                        onConnectDrive = onConnectFamilyDrive,
+                        onOpenPicker = onRequestSharedFolderPicker
+                    )
+                }
+
+                // --- Active Upload Progress / Retry Strip ---
+                if (activeUploads.isNotEmpty()) {
+                    ActiveUploadTasksStrip(
+                        uploads = activeUploads,
+                        isHebrew = isHebrew,
+                        onCancel = onCancelUpload,
+                        onRetry = onRetryUpload,
+                        onDismiss = onDismissUpload
+                    )
+                }
+
+                // --- Main Folder & File Browser Content ---
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                ) {
+                    val isEmptyAtCurrentLevel = currentLevelFolders.isEmpty() && sortedFilteredFiles.isEmpty()
+
+                    if (isEmptyAtCurrentLevel) {
+                        EmptyFilesWorkspaceView(
+                            isSearchActive = searchQuery.isNotBlank(),
+                            isSubfolder = selectedFolderId != null,
+                            folderName = currentFolder?.getDisplayName(isHebrew),
+                            isHebrew = isHebrew,
+                            onOpenAddMenu = { showAddActionBottomSheet = true }
+                        )
+                    } else if (viewMode == FilesViewMode.GRID) {
+                        LazyVerticalGrid(
+                            columns = GridCells.Adaptive(minSize = 156.dp),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 16.dp)
+                                .testTag("files_grid_container"),
+                            contentPadding = PaddingValues(top = 12.dp, bottom = 108.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            if (currentLevelFolders.isNotEmpty()) {
+                                item(span = { GridItemSpan(maxLineSpan) }) {
+                                    SectionHeaderLabel(
+                                        text = if (isHebrew) "תיקיות (${currentLevelFolders.size})" else "Folders (${currentLevelFolders.size})"
+                                    )
+                                }
+                                items(currentLevelFolders, key = { "folder_${it.id}" }) { folder ->
+                                    val subCount = files.count { it.folderId == folder.id } +
+                                        folders.count { it.parentFolderId == folder.id }
+                                    FolderGridCard(
+                                        folder = folder,
+                                        itemCount = subCount,
+                                        isHebrew = isHebrew,
+                                        onClick = { onSelectFolder(folder.id) },
+                                        onRename = { folderToRename = folder },
+                                        onDelete = { folderToDeleteConfirm = folder }
+                                    )
+                                }
+                            }
+
+                            if (sortedFilteredFiles.isNotEmpty()) {
+                                item(span = { GridItemSpan(maxLineSpan) }) {
+                                    SectionHeaderLabel(
+                                        text = if (isHebrew) "קבצים (${sortedFilteredFiles.size})" else "Files (${sortedFilteredFiles.size})"
+                                    )
+                                }
+                                items(sortedFilteredFiles, key = { "file_${it.id}" }) { file ->
+                                    val uploader = members.find {
+                                        it.id == file.uploadedByUid || it.id == file.uploadedByMemberId
                                     }
-                                    onSortOptionChange(option)
-                                },
-                                label = {
-                                    val arrow = if (isSelected) (if (localSortAsc) " ↑" else " ↓") else ""
-                                    Text("${option.getDisplayName(isHebrew)}$arrow")
-                                },
-                                modifier = Modifier.testTag("sort_chip_${option.name.lowercase()}")
-                            )
+                                    FileGridCard(
+                                        file = file,
+                                        uploader = uploader,
+                                        isHebrew = isHebrew,
+                                        onClick = { previewFile = file },
+                                        onMove = { fileToMove = file },
+                                        onRename = { fileToRename = file },
+                                        onDelete = { fileToDeleteConfirm = file }
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 16.dp)
+                                .testTag("files_list_container"),
+                            contentPadding = PaddingValues(top = 12.dp, bottom = 108.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            if (currentLevelFolders.isNotEmpty()) {
+                                item {
+                                    SectionHeaderLabel(
+                                        text = if (isHebrew) "תיקיות (${currentLevelFolders.size})" else "Folders (${currentLevelFolders.size})"
+                                    )
+                                }
+                                items(currentLevelFolders, key = { "folder_${it.id}" }) { folder ->
+                                    val subCount = files.count { it.folderId == folder.id } +
+                                        folders.count { it.parentFolderId == folder.id }
+                                    FolderListRowCard(
+                                        folder = folder,
+                                        itemCount = subCount,
+                                        isHebrew = isHebrew,
+                                        onClick = { onSelectFolder(folder.id) },
+                                        onRename = { folderToRename = folder },
+                                        onDelete = { folderToDeleteConfirm = folder }
+                                    )
+                                }
+                            }
+
+                            if (sortedFilteredFiles.isNotEmpty()) {
+                                item {
+                                    SectionHeaderLabel(
+                                        text = if (isHebrew) "קבצים (${sortedFilteredFiles.size})" else "Files (${sortedFilteredFiles.size})"
+                                    )
+                                }
+                                items(sortedFilteredFiles, key = { "file_${it.id}" }) { file ->
+                                    val uploader = members.find {
+                                        it.id == file.uploadedByUid || it.id == file.uploadedByMemberId
+                                    }
+                                    FileListRowCard(
+                                        file = file,
+                                        uploader = uploader,
+                                        isHebrew = isHebrew,
+                                        onClick = { previewFile = file },
+                                        onMove = { fileToMove = file },
+                                        onRename = { fileToRename = file },
+                                        onDelete = { fileToDeleteConfirm = file }
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
+    }
 
-            // Google Drive `FamilyTasks` Shared Folder Setup & Family Sharing Bar
-            GoogleDriveFamilyTasksBanner(
-                familyDriveConfig = familyDriveConfig,
-                currentMember = currentMember,
-                membersCount = members.size.coerceAtLeast(1),
-                isHebrew = isHebrew,
-                onConnectDrive = onConnectFamilyDrive,
-                onOpenSharingDialog = { showDriveSharingDialog = true },
-                onOpenGooglePicker = onRequestSharedFolderPicker
-            )
-
-            // Active Uploads Progress & Retry Panel
-            AnimatedVisibility(visible = activeUploads.isNotEmpty()) {
+    // --- 2. Compact Material 3 Modal Bottom Sheet for the (+) Add Button ---
+    // Contains strictly the 4 file/folder creation actions in Hebrew RTL layout.
+    if (showAddActionBottomSheet) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { showAddActionBottomSheet = false },
+            sheetState = sheetState,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp,
+            modifier = Modifier.testTag("files_add_action_sheet")
+        ) {
+            CompositionLocalProvider(LocalLayoutDirection provides layoutDir) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                        .testTag("active_uploads_panel"),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    activeUploads.forEach { task ->
-                        UploadTaskStatusCard(
-                            task = task,
-                            isHebrew = isHebrew,
-                            onCancel = { onCancelUpload(task.uploadId) },
-                            onRetry = { onRetryUpload(task.uploadId) },
-                            onDismiss = { onDismissUpload(task.uploadId) }
-                        )
-                    }
-                }
-            }
-
-            // Main Folders & Files Content Area (Grid or List View)
-            if (viewMode == FilesViewMode.GRID) {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 156.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .testTag("files_grid_container"),
-                    contentPadding = PaddingValues(
-                        start = 16.dp,
-                        end = 16.dp,
-                        top = 12.dp,
-                        bottom = 96.dp
-                    ),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    if (currentLevelFolders.isNotEmpty()) {
-                        item(span = { GridItemSpan(maxLineSpan) }) {
-                            Text(
-                                text = if (selectedFolderId == null) {
-                                    if (isHebrew) "תיקיות משותפות" else "Shared Folders"
-                                } else {
-                                    if (isHebrew) "תתי-תיקיות" else "Subfolders"
-                                },
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        items(currentLevelFolders, key = { "folder_${it.id}" }) { folder ->
-                            val itemCount = files.count { it.folderId == folder.id } +
-                                folders.count { it.parentFolderId == folder.id }
-                            FolderGridCard(
-                                folder = folder,
-                                fileCount = itemCount,
-                                canDelete = FamilyFileManagerHelper.canMemberDeleteFolder(currentMember),
-                                isHebrew = isHebrew,
-                                onClick = { onSelectFolder(folder.id) },
-                                onRename = { folderToRename = folder },
-                                onDelete = { folderPendingDelete = folder }
-                            )
-                        }
-                    }
-
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = if (isHebrew) "קבצים (${displayedFiles.size})" else "Files (${displayedFiles.size})",
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    if (displayedFiles.isEmpty()) {
-                        item(span = { GridItemSpan(maxLineSpan) }) {
-                            EmptyFilesCard(
-                                isHebrew = isHebrew,
-                                onUploadClick = { showQuickUploadDialog = true },
-                                onCameraClick = {
-                                    cameraInitialDocMode = false
-                                    showCameraDialog = true
-                                }
-                            )
-                        }
-                    } else {
-                        items(displayedFiles, key = { "file_${it.id}" }) { doc ->
-                            val folder = folders.find { it.id == doc.folderId }
-                            val uploader = members.find { it.id == doc.uploadedByUid || it.id == doc.uploadedByMemberId }
-                            val canModify = FamilyFileManagerHelper.canMemberModifyOrDeleteFile(
-                                file = doc,
-                                member = currentMember,
-                                authenticatedUid = currentMember.id
-                            )
-                            FileGridCard(
-                                doc = doc,
-                                folder = folder,
-                                uploader = uploader,
-                                canModify = canModify,
-                                isHebrew = isHebrew,
-                                onOpen = {
-                                    handleSingleTapFileOpen(
-                                        context = context,
-                                        doc = doc,
-                                        isHebrew = isHebrew,
-                                        onOpenPreview = { previewFile = it },
-                                        onShowToast = onShowToast
-                                    )
-                                },
-                                onShare = {
-                                    FamilyFileManagerHelper.shareFileViaSharesheet(
-                                        context = context,
-                                        doc = doc,
-                                        rawBytes = null,
-                                        isHebrew = isHebrew
-                                    )
-                                },
-                                onMove = { fileToMove = doc },
-                                onRename = { fileToRename = doc },
-                                onDelete = { filePendingDelete = doc }
-                            )
-                        }
-                    }
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .testTag("files_list_container"),
-                    contentPadding = PaddingValues(
-                        start = 16.dp,
-                        end = 16.dp,
-                        top = 12.dp,
-                        bottom = 96.dp
-                    ),
+                        .padding(horizontal = 20.dp)
+                        .padding(bottom = 28.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    if (currentLevelFolders.isNotEmpty()) {
-                        item {
-                            Text(
-                                text = if (selectedFolderId == null) {
-                                    if (isHebrew) "תיקיות משותפות" else "Shared Folders"
-                                } else {
-                                    if (isHebrew) "תתי-תיקיות" else "Subfolders"
-                                },
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        items(currentLevelFolders, key = { "list_folder_${it.id}" }) { folder ->
-                            val itemCount = files.count { it.folderId == folder.id } +
-                                folders.count { it.parentFolderId == folder.id }
-                            FolderListItemCard(
-                                folder = folder,
-                                fileCount = itemCount,
-                                canDelete = FamilyFileManagerHelper.canMemberDeleteFolder(currentMember),
-                                isHebrew = isHebrew,
-                                onClick = { onSelectFolder(folder.id) },
-                                onRename = { folderToRename = folder },
-                                onDelete = { folderPendingDelete = folder }
-                            )
-                        }
-                    }
-
-                    item {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = if (isHebrew) "קבצים (${displayedFiles.size})" else "Files (${displayedFiles.size})",
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    if (displayedFiles.isEmpty()) {
-                        item {
-                            EmptyFilesCard(
-                                isHebrew = isHebrew,
-                                onUploadClick = { showQuickUploadDialog = true },
-                                onCameraClick = {
-                                    cameraInitialDocMode = false
-                                    showCameraDialog = true
-                                }
-                            )
-                        }
-                    } else {
-                        items(displayedFiles, key = { "list_file_${it.id}" }) { doc ->
-                            val folder = folders.find { it.id == doc.folderId }
-                            val uploader = members.find { it.id == doc.uploadedByUid || it.id == doc.uploadedByMemberId }
-                            val canModify = FamilyFileManagerHelper.canMemberModifyOrDeleteFile(
-                                file = doc,
-                                member = currentMember,
-                                authenticatedUid = currentMember.id
-                            )
-                            FileListItemCard(
-                                doc = doc,
-                                folder = folder,
-                                uploader = uploader,
-                                canModify = canModify,
-                                isHebrew = isHebrew,
-                                onOpen = {
-                                    handleSingleTapFileOpen(
-                                        context = context,
-                                        doc = doc,
-                                        isHebrew = isHebrew,
-                                        onOpenPreview = { previewFile = it },
-                                        onShowToast = onShowToast
-                                    )
-                                },
-                                onShare = {
-                                    FamilyFileManagerHelper.shareFileViaSharesheet(
-                                        context = context,
-                                        doc = doc,
-                                        rawBytes = null,
-                                        isHebrew = isHebrew
-                                    )
-                                },
-                                onMove = { fileToMove = doc },
-                                onRename = { fileToRename = doc },
-                                onDelete = { filePendingDelete = doc }
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // Floating + Action Button with the 4 required actions
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(20.dp)
-        ) {
-            FloatingActionButton(
-                onClick = { showFabMenu = true },
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier.testTag("files_fab_add")
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = if (isHebrew) "הוספה" else "Add")
-                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (isHebrew) "הוספה" else "New",
-                        fontWeight = FontWeight.Bold
+                        text = if (isHebrew) {
+                            if (currentFolder != null) {
+                                "הוספה אל \"${currentFolder.getDisplayName(true)}\""
+                            } else {
+                                "הוספה לתיקיית המשפחה"
+                            }
+                        } else {
+                            if (currentFolder != null) {
+                                "Add to \"${currentFolder.getDisplayName(false)}\""
+                            } else {
+                                "Add to Family Folder"
+                            }
+                        },
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+
+                    // Action 1: 📷 צילום תמונה — Take Photo (JPG)
+                    AddActionSheetRow(
+                        icon = Icons.Default.PhotoCamera,
+                        emoji = "📷",
+                        title = if (isHebrew) "צילום תמונה" else "Take Photo",
+                        subtitle = if (isHebrew) "צילום במצלמה ושמירה כתמונת JPG" else "Capture camera photo as JPG",
+                        accentColor = Color(0xFF059669),
+                        testTag = "add_action_take_photo",
+                        onClick = {
+                            showAddActionBottomSheet = false
+                            triggerTakePhotoAction()
+                        }
+                    )
+
+                    // Action 2: 📄 סריקת מסמך — Scan Document (PDF)
+                    AddActionSheetRow(
+                        icon = Icons.Default.DocumentScanner,
+                        emoji = "📄",
+                        title = if (isHebrew) "סריקת מסמך" else "Scan Document",
+                        subtitle = if (isHebrew) "סריקת עמוד אחד או יותר לקובץ PDF" else "Scan single or multi-page document to PDF",
+                        accentColor = Color(0xFFDC2626),
+                        testTag = "add_action_scan_document",
+                        onClick = {
+                            showAddActionBottomSheet = false
+                            showDocumentScannerDialog = true
+                        }
+                    )
+
+                    // Action 3: 📤 העלאת קובץ — Upload Existing File
+                    AddActionSheetRow(
+                        icon = Icons.Default.UploadFile,
+                        emoji = "📤",
+                        title = if (isHebrew) "העלאת קובץ" else "Upload Existing File",
+                        subtitle = if (isHebrew) "בחירת קובץ קיים מהמכשיר בשמירה על הפורמט המקורי" else "Pick an existing file from device",
+                        accentColor = Color(0xFF2563EB),
+                        testTag = "add_action_upload_file",
+                        onClick = {
+                            showAddActionBottomSheet = false
+                            openDeviceFileLauncher.launch(FamilyFileManagerHelper.SAF_MIME_TYPES)
+                        }
+                    )
+
+                    // Action 4: 📁 תיקייה חדשה — Create New Folder
+                    AddActionSheetRow(
+                        icon = Icons.Default.CreateNewFolder,
+                        emoji = "📁",
+                        title = if (isHebrew) "תיקייה חדשה" else "Create New Folder",
+                        subtitle = if (isHebrew) "יצירת תיקייה חדשה לארגון קבצים" else "Create a new folder",
+                        accentColor = Color(0xFFD97706),
+                        testTag = "add_action_new_folder",
+                        onClick = {
+                            showAddActionBottomSheet = false
+                            onAddFolder()
+                        }
                     )
                 }
             }
-
-            DropdownMenu(
-                expanded = showFabMenu,
-                onDismissRequest = { showFabMenu = false },
-                modifier = Modifier
-                    .width(230.dp)
-                    .testTag("files_fab_menu")
-            ) {
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            text = if (isHebrew) "העלאת קובץ" else "Upload File",
-                            fontWeight = FontWeight.Bold
-                        )
-                    },
-                    leadingIcon = {
-                        Icon(Icons.Default.UploadFile, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    },
-                    onClick = {
-                        showFabMenu = false
-                        showQuickUploadDialog = true
-                    },
-                    modifier = Modifier.testTag("fab_action_upload_file")
-                )
-
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            text = if (isHebrew) "צילום תמונה" else "Take Photo",
-                            fontWeight = FontWeight.Bold
-                        )
-                    },
-                    leadingIcon = {
-                        Icon(Icons.Default.PhotoCamera, contentDescription = null, tint = Color(0xFF10B981))
-                    },
-                    onClick = {
-                        showFabMenu = false
-                        cameraInitialDocMode = false
-                        showCameraDialog = true
-                    },
-                    modifier = Modifier.testTag("fab_action_take_photo")
-                )
-
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            text = if (isHebrew) "צילום מסמך" else "Scan Document",
-                            fontWeight = FontWeight.Bold
-                        )
-                    },
-                    leadingIcon = {
-                        Icon(Icons.Default.DocumentScanner, contentDescription = null, tint = Color(0xFFEF4444))
-                    },
-                    onClick = {
-                        showFabMenu = false
-                        cameraInitialDocMode = true
-                        showCameraDialog = true
-                    },
-                    modifier = Modifier.testTag("fab_action_scan_document")
-                )
-
-                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            text = if (isHebrew) "תיקייה חדשה" else "New Folder",
-                            fontWeight = FontWeight.Bold
-                        )
-                    },
-                    leadingIcon = {
-                        Icon(Icons.Default.CreateNewFolder, contentDescription = null, tint = Color(0xFFD97706))
-                    },
-                    onClick = {
-                        showFabMenu = false
-                        onAddFolder()
-                    },
-                    modifier = Modifier.testTag("fab_action_new_folder")
-                )
-            }
         }
     }
 
-    // --- Dialogs & Viewers ---
-
-    // 1. One-Tap File Viewer (Images, PDFs, Documents)
-    previewFile?.let { doc ->
-        val folder = folders.find { it.id == doc.folderId }
-        val uploader = members.find { it.id == doc.uploadedByUid || it.id == doc.uploadedByMemberId }
-        val canModify = FamilyFileManagerHelper.canMemberModifyOrDeleteFile(
-            file = doc,
-            member = currentMember,
-            authenticatedUid = currentMember.id
-        )
-        FilePreviewDialog(
-            file = doc,
-            folder = folder,
-            uploader = uploader,
-            isHebrew = isHebrew,
-            fileBytesProvider = fileBytesProvider,
-            onDismiss = { previewFile = null },
-            onMove = if (canModify) {
-                {
-                    val target = doc
-                    previewFile = null
-                    fileToMove = target
-                }
-            } else null,
-            onRename = if (canModify) {
-                {
-                    val target = doc
-                    previewFile = null
-                    fileToRename = target
-                }
-            } else null,
-            onDelete = if (canModify) {
-                {
-                    val target = doc
-                    previewFile = null
-                    filePendingDelete = target
-                }
-            } else null,
-            onShowToast = onShowToast
-        )
-    }
-
-    // 2. Rename File Dialog
-    fileToRename?.let { doc ->
-        RenameFileDialog(
-            file = doc,
-            isHebrew = isHebrew,
-            onDismiss = { fileToRename = null },
-            onConfirmRename = { fileId, newName ->
-                onRenameFile(fileId, newName)
-                fileToRename = null
-            }
-        )
-    }
-
-    // 2b. Move File to Folder Dialog
-    fileToMove?.let { doc ->
-        MoveFileToFolderDialog(
-            file = doc,
+    // --- Dedicated Multi-Page Document Scanner Dialog (PDF only) ---
+    if (showDocumentScannerDialog) {
+        CameraScannerDialog(
             folders = folders,
+            initialFolderId = selectedFolderId,
             isHebrew = isHebrew,
-            onDismiss = { fileToMove = null },
-            onConfirmMove = { fileId, targetFolderId ->
-                onMoveFile(fileId, targetFolderId)
-                fileToMove = null
+            onDismiss = { showDocumentScannerDialog = false },
+            onUploadBinaryFile = onUploadBinaryFile,
+            onConfirmScannedDocument = { folderId, fileName, _ ->
+                onUploadFile(folderId, fileName, "PDF", "1.4 MB")
             }
         )
     }
 
-    // 2c. Rename Folder Dialog (Available to both Parents and Children)
-    folderToRename?.let { folder ->
-        RenameFolderDialog(
-            folder = folder,
-            isHebrew = isHebrew,
-            onDismiss = { folderToRename = null },
-            onConfirmRename = { folderId, newName ->
-                onRenameFolder(folderId, newName)
-                folderToRename = null
-            }
-        )
-    }
-
-    // 2d. Family Google Drive Sharing & Permissions Dialog
+    // --- Google Drive Family Sharing Dialog (Parent management, separated from Add menu) ---
     if (showDriveSharingDialog) {
         FamilyDriveSharingDialog(
             familyDriveConfig = familyDriveConfig,
-            members = members.ifEmpty { listOf(currentMember) },
+            members = members,
             currentMember = currentMember,
             isHebrew = isHebrew,
             onConnectOrSetupDrive = onConnectFamilyDrive,
@@ -986,25 +935,96 @@ fun FilesScreen(
         )
     }
 
-    // 2e. Google Picker Shared Folder Authorization & ID Verification Dialog
+    // --- Google Picker Shared Folder Authorization Dialog ---
     pendingDrivePickerRequest?.let { pickerReq ->
         GoogleDrivePickerDialog(
             request = pickerReq,
-            accessToken = com.example.files.GoogleDriveFamilyService.getActiveAccessToken(),
-            isHebrew = isHebrew,
+            accessToken = GoogleDriveFamilyService.getCurrentAccessToken(),
             verificationError = drivePickerVerificationError,
-            onFolderPickedAndVerify = { pickedDriveId, pickedName ->
-                onVerifyPickedSharedFolder(pickedDriveId, pickedName)
+            isHebrew = isHebrew,
+            onFolderPickedAndVerify = { pickedId, pickedName ->
+                onVerifyPickedSharedFolder(pickedId, pickedName)
             },
             onDismiss = onDismissDrivePicker
         )
     }
 
-    // 3. Safe File Deletion Confirmation Dialog
-    filePendingDelete?.let { doc ->
+    // --- File Preview Dialog ---
+    previewFile?.let { file ->
+        val folder = folders.find { it.id == file.folderId }
+        val uploader = members.find {
+            it.id == file.uploadedByUid || it.id == file.uploadedByMemberId
+        }
+        FilePreviewDialog(
+            file = file,
+            folder = folder,
+            uploader = uploader,
+            isHebrew = isHebrew,
+            fileBytesProvider = fileBytesProvider,
+            onDismiss = { previewFile = null },
+            onMove = {
+                val target = file
+                previewFile = null
+                fileToMove = target
+            },
+            onRename = {
+                val target = file
+                previewFile = null
+                fileToRename = target
+            },
+            onDelete = {
+                val target = file
+                previewFile = null
+                fileToDeleteConfirm = target
+            },
+            onShowToast = onShowToast
+        )
+    }
+
+    // --- Move File to Folder Dialog ---
+    fileToMove?.let { target ->
+        MoveFileToFolderDialog(
+            file = target,
+            folders = folders,
+            isHebrew = isHebrew,
+            onDismiss = { fileToMove = null },
+            onConfirmMove = { destinationFolderId ->
+                onMoveFile(target.id, destinationFolderId)
+                fileToMove = null
+            }
+        )
+    }
+
+    // --- Rename File Dialog ---
+    fileToRename?.let { target ->
+        RenameFileDialog(
+            file = target,
+            isHebrew = isHebrew,
+            onDismiss = { fileToRename = null },
+            onConfirmRename = { fileId, newName ->
+                onRenameFile(fileId, newName)
+                fileToRename = null
+            }
+        )
+    }
+
+    // --- Rename Folder Dialog ---
+    folderToRename?.let { targetFolder ->
+        RenameFolderDialog(
+            folder = targetFolder,
+            isHebrew = isHebrew,
+            onDismiss = { folderToRename = null },
+            onConfirmRename = { folderId, updatedName ->
+                onRenameFolder(folderId, updatedName)
+                folderToRename = null
+            }
+        )
+    }
+
+    // --- Delete File Confirmation Dialog ---
+    fileToDeleteConfirm?.let { target ->
         AlertDialog(
-            onDismissRequest = { filePendingDelete = null },
-            modifier = Modifier.testTag("confirm_delete_file_dialog"),
+            onDismissRequest = { fileToDeleteConfirm = null },
             icon = {
                 Icon(
                     Icons.Default.DeleteForever,
@@ -1014,44 +1034,43 @@ fun FilesScreen(
             },
             title = {
                 Text(
-                    text = if (isHebrew) "מחיקת קובץ משפחתי" else "Delete Shared File",
+                    text = if (isHebrew) "מחיקת קובץ" else "Delete File",
                     fontWeight = FontWeight.Bold
                 )
             },
             text = {
                 Text(
                     text = if (isHebrew) {
-                        "האם למחוק את הקובץ \"${doc.name}\" מהתיקייה המשפחתית? פעולה זו תסיר את הקובץ עבור כל בני המשפחה."
+                        "האם למחוק את \"${target.name}\" מתיקיית המשפחה?"
                     } else {
-                        "Are you sure you want to delete \"${doc.name}\" from the shared family folder?"
+                        "Delete \"${target.name}\" from the shared family folder?"
                     }
                 )
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        onDeleteFile(doc.id)
-                        filePendingDelete = null
+                        onDeleteFile(target.id)
+                        fileToDeleteConfirm = null
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                     modifier = Modifier.testTag("confirm_delete_file_button")
                 ) {
-                    Text(if (isHebrew) "מחק קובץ" else "Delete", fontWeight = FontWeight.Bold)
+                    Text(if (isHebrew) "מחק" else "Delete")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { filePendingDelete = null }) {
+                TextButton(onClick = { fileToDeleteConfirm = null }) {
                     Text(if (isHebrew) "ביטול" else "Cancel")
                 }
             }
         )
     }
 
-    // 4. Safe Folder Deletion Confirmation Dialog (Parents only)
-    folderPendingDelete?.let { folder ->
+    // --- Delete Folder Confirmation Dialog ---
+    folderToDeleteConfirm?.let { targetFolder ->
         AlertDialog(
-            onDismissRequest = { folderPendingDelete = null },
-            modifier = Modifier.testTag("confirm_delete_folder_dialog"),
+            onDismissRequest = { folderToDeleteConfirm = null },
             icon = {
                 Icon(
                     Icons.Default.FolderDelete,
@@ -1061,274 +1080,749 @@ fun FilesScreen(
             },
             title = {
                 Text(
-                    text = if (isHebrew) "מחיקת תיקייה משותפת" else "Delete Shared Folder",
+                    text = if (isHebrew) "מחיקת תיקייה" else "Delete Folder",
                     fontWeight = FontWeight.Bold
                 )
             },
             text = {
                 Text(
                     text = if (isHebrew) {
-                        "האם למחוק את התיקייה \"${folder.getDisplayName(true)}\"?"
+                        "האם למחוק את התיקייה \"${targetFolder.getDisplayName(true)}\"?"
                     } else {
-                        "Delete shared folder \"${folder.getDisplayName(false)}\"?"
+                        "Delete folder \"${targetFolder.getDisplayName(false)}\"?"
                     }
                 )
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        onDeleteFolder(folder.id)
-                        folderPendingDelete = null
+                        onDeleteFolder(targetFolder.id)
+                        folderToDeleteConfirm = null
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                     modifier = Modifier.testTag("confirm_delete_folder_button")
                 ) {
-                    Text(if (isHebrew) "מחק תיקייה" else "Delete", fontWeight = FontWeight.Bold)
+                    Text(if (isHebrew) "מחק תיקייה" else "Delete Folder")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { folderPendingDelete = null }) {
+                TextButton(onClick = { folderToDeleteConfirm = null }) {
                     Text(if (isHebrew) "ביטול" else "Cancel")
                 }
             }
         )
     }
-
-    // 5. Camera & Document Capture Dialog
-    if (showCameraDialog) {
-        CameraScannerDialog(
-            folders = folders,
-            selectedFolderId = selectedFolderId,
-            isHebrew = isHebrew,
-            initialDocumentMode = cameraInitialDocMode,
-            onDismiss = { showCameraDialog = false },
-            onUploadFile = onUploadFile,
-            onUploadBinaryFile = { folderId, name, ext, bytes ->
-                if (onUploadBinaryFile != null) {
-                    onUploadBinaryFile(folderId, name, ext, bytes)
-                } else {
-                    onUploadFile(folderId, name, ext, FamilyFileManagerHelper.formatFileSize(bytes.size.toLong()))
-                }
-            },
-            onShowToast = onShowToast
-        )
-    }
-
-    // 6. File Upload Selection Dialog (Native SAF Picker + Supported Format Upload)
-    if (showQuickUploadDialog) {
-        FileUploadSelectionDialog(
-            folders = folders,
-            selectedFolderId = selectedFolderId,
-            currentMember = currentMember,
-            isHebrew = isHebrew,
-            onDismiss = { showQuickUploadDialog = false },
-            onLaunchSystemFilePicker = {
-                showQuickUploadDialog = false
-                runCatching {
-                    safDocumentLauncher.launch(FamilyFileManagerHelper.SAF_MIME_TYPES)
-                }.onFailure {
-                    onShowToast(
-                        if (isHebrew) "לא ניתן לפתוח את בורר הקבצים במכשיר זה"
-                        else "Could not launch system file picker"
-                    )
-                }
-            },
-            onUploadConfirmed = { folderId, fileName, ext, bytes ->
-                showQuickUploadDialog = false
-                if (onUploadBinaryFile != null) {
-                    onUploadBinaryFile(folderId, fileName, ext, bytes)
-                } else {
-                    onUploadFile(
-                        folderId,
-                        fileName,
-                        ext,
-                        FamilyFileManagerHelper.formatFileSize(bytes.size.toLong())
-                    )
-                }
-            }
-        )
-    }
-
-    // 7. Google Drive FamilyTasks Storage & Security Info Dialog
-    if (showStorageQuotaDialog) {
-        AlertDialog(
-            onDismissRequest = { showStorageQuotaDialog = false },
-            modifier = Modifier.testTag("storage_quota_dialog"),
-            icon = {
-                Icon(Icons.Default.Security, contentDescription = null, tint = Color(0xFF059669))
-            },
-            title = {
-                Text(
-                    text = if (isHebrew) "אחסון Google Drive (FamilyTasks) והרשאות משפחתיות" else "Google Drive FamilyTasks & Permissions",
-                    fontWeight = FontWeight.Bold
-                )
-            },
-            text = {
-                Text(
-                    text = if (isHebrew) {
-                        "• Google Drive בלבד: כל הקבצים והתיקיות נשמרים אך ורק בתיקיית FamilyTasks המשותפת ב-Google Drive של ההורה.\n" +
-                            "• הרשאות שוות לכל המשפחה: בתיקיית FamilyTasks המשותפת להורים ולילדים יש אותן הרשאות מלאות (העלאה, צפייה, עריכה, שינוי שם, העברה בין תיקיות, יצירת תיקיות ומחיקה).\n" +
-                            "• אבטחה ופרטיות: האפליקציה ניגשת אך ורק לתיקיית FamilyTasks המורשית לפי מזהה התיקייה ב-Google Drive, ואינה ניגשת לתיקיות פרטיות אחרות.\n" +
-                            "• ללא עלויות נוספות: האחסון מתבצע ישירות בחשבון ה-Google Drive המשפחתי ללא שימוש ב-Firebase Storage או חיובים בתשלום."
-                    } else {
-                        "• Exclusive Google Drive Storage: All files and folders are stored exclusively in the shared FamilyTasks folder in Google Drive.\n" +
-                            "• Equal Family Permissions: Parents and children have identical Editor permissions inside FamilyTasks (upload, open, edit, rename, move, create folders, delete).\n" +
-                            "• Scoped Privacy: Only the registered FamilyTasks folder ID is accessed; unrelated Drive folders are never touched.\n" +
-                            "• Zero Extra Billing: Uses your Google Drive storage directly without Firebase Cloud Storage or Firestore binary chunks."
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    lineHeight = 20.sp
-                )
-            },
-            confirmButton = {
-                Button(onClick = { showStorageQuotaDialog = false }) {
-                    Text(if (isHebrew) "הבנתי" else "Got it", fontWeight = FontWeight.Bold)
-                }
-            }
-        )
-    }
 }
 
-private fun handleSingleTapFileOpen(
-    context: android.content.Context,
-    doc: FamilyDocument,
-    isHebrew: Boolean,
-    onOpenPreview: (FamilyDocument) -> Unit,
-    onShowToast: (String) -> Unit
+@Composable
+private fun SectionHeaderLabel(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+    )
+}
+
+@Composable
+private fun AddActionSheetRow(
+    icon: ImageVector,
+    emoji: String,
+    title: String,
+    subtitle: String,
+    accentColor: Color,
+    testTag: String,
+    onClick: () -> Unit
 ) {
-    val ext = doc.extension.uppercase()
-    if (ext in setOf("JPG", "JPEG", "PNG", "WEBP", "PDF")) {
-        // Images & PDFs open directly in our built-in full-screen / PdfRenderer viewer
-        onOpenPreview(doc)
-    } else {
-        // Office documents (DOCX, XLSX, PPTX), TXT, ZIP: try secure ACTION_VIEW with FileProvider first,
-        // and also open the built-in document sheet viewer if no external app is installed on the emulator/device
-        val externalRes = FamilyFileManagerHelper.openFileWithExternalApp(
-            context = context,
-            doc = doc,
-            rawBytes = null,
-            isHebrew = isHebrew
-        )
-        if (externalRes.isFailure) {
-            onOpenPreview(doc)
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 64.dp)
+            .testTag(testTag)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = accentColor.copy(alpha = 0.14f),
+                modifier = Modifier.size(46.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = accentColor,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "$emoji  $title",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Icon(
+                imageVector = Icons.Default.ChevronLeft,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
 
 @Composable
-private fun UploadTaskStatusCard(
-    task: FileUploadTaskState,
+private fun DriveActionRequiredBanner(
+    config: FamilyDriveConfig,
+    isParent: Boolean,
     isHebrew: Boolean,
-    onCancel: () -> Unit,
-    onRetry: () -> Unit,
-    onDismiss: () -> Unit
+    needsPickerAuth: Boolean,
+    onConnectDrive: () -> Unit,
+    onOpenPicker: () -> Unit
 ) {
-    val statusColor = when (task.status) {
-        FileUploadStatus.UPLOADING -> MaterialTheme.colorScheme.primary
-        FileUploadStatus.SUCCESS -> Color(0xFF059669)
-        FileUploadStatus.FAILED -> MaterialTheme.colorScheme.error
-        FileUploadStatus.CANCELLED -> Color(0xFFD97706)
-    }
-
-    Card(
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("upload_task_card_${task.uploadId}"),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = statusColor.copy(alpha = 0.08f)
-        )
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .testTag("family_drive_workspace_banner"),
+        shape = RoundedCornerShape(16.dp),
+        color = if (needsPickerAuth) {
+            Color(0xFFFEF3C7)
+        } else {
+            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f)
+        }
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(
-                        imageVector = when (task.status) {
-                            FileUploadStatus.UPLOADING -> Icons.Default.CloudUpload
-                            FileUploadStatus.SUCCESS -> Icons.Default.CheckCircle
-                            FileUploadStatus.FAILED -> Icons.Default.ErrorOutline
-                            FileUploadStatus.CANCELLED -> Icons.Default.Cancel
-                        },
-                        contentDescription = null,
-                        tint = statusColor,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column {
-                        Text(
-                            text = task.fileName,
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        val subtitle = when (task.status) {
-                            FileUploadStatus.UPLOADING ->
-                                if (isHebrew) "מעלה לענן המשפחתי... ${(task.progress * 100).toInt()}%"
-                                else "Uploading... ${(task.progress * 100).toInt()}%"
-                            FileUploadStatus.SUCCESS ->
-                                if (isHebrew) "הועלה וסונכרן בהצלחה ✓" else "Uploaded & synced ✓"
-                            FileUploadStatus.FAILED ->
-                                task.getErrorMessage(isHebrew) ?: (if (isHebrew) "ההעלאה נכשלה" else "Upload failed")
-                            FileUploadStatus.CANCELLED ->
-                                if (isHebrew) "ההעלאה בוטלה" else "Upload cancelled"
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = when {
+                        needsPickerAuth -> if (isHebrew) {
+                            "נדרש אישור גישה לתיקיית המשפחה ב-Google Drive"
+                        } else {
+                            "Shared Folder Authorization Required"
                         }
-                        Text(
-                            text = subtitle,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = statusColor
+                        !config.errorMessageHe.isNullOrBlank() -> config.errorMessageHe
+                        else -> if (isHebrew) {
+                            "חיבור תיקיית FamilyTasks ב-Google Drive"
+                        } else {
+                            "Connect FamilyTasks Google Drive Folder"
+                        }
+                    },
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                    color = if (needsPickerAuth) Color(0xFF92400E) else MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            if (needsPickerAuth) {
+                Button(
+                    onClick = onOpenPicker,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.testTag("open_shared_folder_picker_button")
+                ) {
+                    Text(
+                        text = if (isHebrew) "אשר תיקייה" else "Authorize",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            } else if (isParent || config.driveRootFolderId.isNotBlank()) {
+                FilledTonalButton(
+                    onClick = onConnectDrive,
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text(
+                        text = if (isHebrew) "חבר Drive" else "Connect Drive",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActiveUploadTasksStrip(
+    uploads: List<FileUploadTaskState>,
+    isHebrew: Boolean,
+    onCancel: (String) -> Unit,
+    onRetry: (String) -> Unit,
+    onDismiss: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        uploads.take(3).forEach { task ->
+            val isUploading = task.status == FileUploadStatus.UPLOADING
+            val isFailed = task.status == FileUploadStatus.FAILED
+            val isSuccess = task.status == FileUploadStatus.SUCCESS
+
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = when {
+                    isFailed -> MaterialTheme.colorScheme.errorContainer
+                    isSuccess -> Color(0xFF10B981).copy(alpha = 0.14f)
+                    else -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("upload_task_${task.uploadId}")
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = when {
+                                    isFailed -> Icons.Default.ErrorOutline
+                                    isSuccess -> Icons.Default.CheckCircle
+                                    else -> Icons.Default.CloudUpload
+                                },
+                                contentDescription = null,
+                                tint = when {
+                                    isFailed -> MaterialTheme.colorScheme.error
+                                    isSuccess -> Color(0xFF059669)
+                                    else -> MaterialTheme.colorScheme.primary
+                                },
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = task.fileName,
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = when {
+                                        isUploading -> if (isHebrew) {
+                                            "מעלה (${task.extension})... ${(task.progress * 100).toInt()}%"
+                                        } else {
+                                            "Uploading (${task.extension})... ${(task.progress * 100).toInt()}%"
+                                        }
+                                        isFailed -> task.getErrorMessage(isHebrew)
+                                            ?: (if (isHebrew) "העלאה נכשלה" else "Upload failed")
+                                        isSuccess -> if (isHebrew) "הועלה בהצלחה (${task.extension}) ✓" else "Uploaded (${task.extension}) ✓"
+                                        else -> if (isHebrew) "בוטל" else "Cancelled"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (isUploading) {
+                                IconButton(
+                                    onClick = { onCancel(task.uploadId) },
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .testTag("cancel_upload_${task.uploadId}")
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = "Cancel", modifier = Modifier.size(16.dp))
+                                }
+                            } else if (isFailed) {
+                                TextButton(
+                                    onClick = { onRetry(task.uploadId) },
+                                    modifier = Modifier.testTag("retry_upload_${task.uploadId}")
+                                ) {
+                                    Text(if (isHebrew) "נסה שוב" else "Retry", fontWeight = FontWeight.Bold)
+                                }
+                                IconButton(
+                                    onClick = { onDismiss(task.uploadId) },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = "Dismiss", modifier = Modifier.size(16.dp))
+                                }
+                            } else {
+                                IconButton(
+                                    onClick = { onDismiss(task.uploadId) },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = "Dismiss", modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        }
+                    }
+
+                    if (isUploading) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LinearProgressIndicator(
+                            progress = { task.progress.coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp))
                         )
                     }
                 }
+            }
+        }
+    }
+}
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (task.status == FileUploadStatus.UPLOADING) {
-                        TextButton(
-                            onClick = onCancel,
-                            modifier = Modifier.testTag("cancel_upload_${task.uploadId}")
-                        ) {
-                            Text(if (isHebrew) "ביטול" else "Cancel", fontWeight = FontWeight.Bold)
+@Composable
+private fun EmptyFilesWorkspaceView(
+    isSearchActive: Boolean,
+    isSubfolder: Boolean,
+    folderName: String?,
+    isHebrew: Boolean,
+    onOpenAddMenu: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(32.dp)
+            .testTag("empty_files_workspace_state"),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+            modifier = Modifier.size(84.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = if (isSearchActive) Icons.Default.SearchOff else Icons.Default.FolderOpen,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(42.dp)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(18.dp))
+
+        Text(
+            text = when {
+                isSearchActive -> if (isHebrew) "לא נמצאו תוצאות חיפוש" else "No matching files or folders"
+                isSubfolder -> if (isHebrew) "התיקייה \"${folderName.orEmpty()}\" ריקה" else "Folder \"${folderName.orEmpty()}\" is empty"
+                else -> if (isHebrew) "מנהל הקבצים המשפחתי ריק" else "Family File Manager is Empty"
+            },
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+            textAlign = TextAlign.Center
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = if (isSearchActive) {
+                if (isHebrew) "נסו לחפש מילה אחרת או נקו את תיבת החיפוש." else "Try a different search term."
+            } else {
+                if (isHebrew) {
+                    "לחצו על כפתור ה-+ כדי לצלם תמונה (JPG), לסרוק מסמך (PDF), להעלות קובץ או ליצור תיקייה חדשה."
+                } else {
+                    "Tap the + button to take a photo (JPG), scan a document (PDF), upload a file, or create a new folder."
+                }
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+
+        if (!isSearchActive) {
+            Spacer(modifier = Modifier.height(20.dp))
+            FilledTonalButton(
+                onClick = onOpenAddMenu,
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.testTag("empty_state_add_button")
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (isHebrew) "הוספת קובץ או תיקייה" else "Add File or Folder",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FolderListRowCard(
+    folder: DocumentFolder,
+    itemCount: Int,
+    isHebrew: Boolean,
+    onClick: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 1.dp,
+        shadowElevation = 1.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("folder_row_${folder.id}")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color(folder.colorHex).copy(alpha = 0.14f),
+                modifier = Modifier.size(44.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(text = folder.iconEmoji.ifBlank { "📁" }, fontSize = 22.sp)
+                }
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = folder.getDisplayName(isHebrew),
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = if (isHebrew) "$itemCount פריטים" else "$itemCount items",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Box {
+                IconButton(
+                    onClick = { menuExpanded = true },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Default.MoreVert,
+                        contentDescription = if (isHebrew) "אפשרויות תיקייה" else "Folder options",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text(if (isHebrew) "שינוי שם" else "Rename") },
+                        leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            onRename()
                         }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = if (isHebrew) "מחיקה" else "Delete",
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.DeleteOutline,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            onDelete()
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FolderGridCard(
+    folder: DocumentFolder,
+    itemCount: Int,
+    isHebrew: Boolean,
+    onClick: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 1.dp,
+        shadowElevation = 1.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("folder_grid_${folder.id}")
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(folder.colorHex).copy(alpha = 0.14f),
+                    modifier = Modifier.size(42.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(text = folder.iconEmoji.ifBlank { "📁" }, fontSize = 20.sp)
                     }
-                    if (task.status == FileUploadStatus.FAILED || task.status == FileUploadStatus.CANCELLED) {
-                        TextButton(
-                            onClick = onRetry,
-                            modifier = Modifier.testTag("retry_upload_${task.uploadId}")
-                        ) {
-                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(if (isHebrew) "נסה שוב" else "Retry", fontWeight = FontWeight.Bold)
-                        }
+                }
+                Box {
+                    IconButton(
+                        onClick = { menuExpanded = true },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(Icons.Default.MoreVert, contentDescription = null, modifier = Modifier.size(18.dp))
                     }
-                    if (task.status != FileUploadStatus.UPLOADING) {
-                        IconButton(
-                            onClick = onDismiss,
-                            modifier = Modifier
-                                .size(32.dp)
-                                .testTag("dismiss_upload_${task.uploadId}")
-                        ) {
-                            Icon(Icons.Default.Close, contentDescription = "Dismiss", modifier = Modifier.size(16.dp))
-                        }
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text(if (isHebrew) "שינוי שם" else "Rename") },
+                            leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                onRename()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = if (isHebrew) "מחיקה" else "Delete",
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.DeleteOutline,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onDelete()
+                            }
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = folder.getDisplayName(isHebrew),
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = if (isHebrew) "$itemCount פריטים" else "$itemCount items",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FileListRowCard(
+    file: FamilyDocument,
+    uploader: FamilyMember?,
+    isHebrew: Boolean,
+    onClick: () -> Unit,
+    onMove: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val context = LocalContext.current
+    var menuExpanded by remember { mutableStateOf(false) }
+    val ext = file.extension.uppercase()
+    val typeColor = fileExtensionColor(ext)
+
+    val thumbBitmap = remember(file.thumbnailBase64) {
+        file.thumbnailBase64?.takeIf { it.isNotBlank() }?.let { b64 ->
+            runCatching {
+                val bytes = Base64.decode(b64, Base64.DEFAULT)
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            }.getOrNull()
+        }
+    }
+
+    val uploaderLabel = uploader?.getDisplayName(isHebrew)?.takeIf { it.isNotBlank() }
+        ?: file.uploadedByName.ifBlank { if (isHebrew) "חבר משפחה" else "Family Member" }
+
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 1.dp,
+        shadowElevation = 1.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = { menuExpanded = true }
+            )
+            .testTag("file_row_${file.id}")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (thumbBitmap != null) {
+                Image(
+                    bitmap = thumbBitmap.asImageBitmap(),
+                    contentDescription = file.name,
+                    modifier = Modifier
+                        .size(46.dp)
+                        .clip(RoundedCornerShape(12.dp)),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = typeColor.copy(alpha = 0.14f),
+                    modifier = Modifier.size(46.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = fileExtensionIcon(ext),
+                            contentDescription = ext,
+                            tint = typeColor,
+                            modifier = Modifier.size(24.dp)
+                        )
                     }
                 }
             }
 
-            if (task.status == FileUploadStatus.UPLOADING) {
-                Spacer(modifier = Modifier.height(6.dp))
-                LinearProgressIndicator(
-                    progress = { task.progress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(6.dp)
-                        .clip(CircleShape),
-                    color = statusColor
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = file.name,
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "$ext • ${file.sizeFormatted} • $uploaderLabel",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Box {
+                IconButton(
+                    onClick = { menuExpanded = true },
+                    modifier = Modifier
+                        .size(36.dp)
+                        .testTag("file_more_${file.id}")
+                ) {
+                    Icon(
+                        Icons.Default.MoreVert,
+                        contentDescription = if (isHebrew) "אפשרויות קובץ" else "File options",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text(if (isHebrew) "תצוגה מקדימה" else "Preview") },
+                        leadingIcon = { Icon(Icons.Default.Visibility, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            onClick()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (isHebrew) "פתח באפליקציה חיצונית" else "Open Externally") },
+                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            FamilyFileManagerHelper.openFileWithExternalApp(context, file, null, isHebrew)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (isHebrew) "העבר לתיקייה" else "Move to Folder") },
+                        leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            onMove()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (isHebrew) "שינוי שם" else "Rename") },
+                        leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            onRename()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = if (isHebrew) "מחיקה" else "Delete",
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.DeleteOutline,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            onDelete()
+                        }
+                    )
+                }
             }
         }
     }
@@ -1336,683 +1830,237 @@ private fun UploadTaskStatusCard(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun FolderGridCard(
-    folder: DocumentFolder,
-    fileCount: Int,
-    canDelete: Boolean,
+private fun FileGridCard(
+    file: FamilyDocument,
+    uploader: FamilyMember?,
     isHebrew: Boolean,
     onClick: () -> Unit,
-    onRename: () -> Unit = {},
+    onMove: () -> Unit,
+    onRename: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val folderColor = Color(folder.colorHex)
-    Card(
+    var menuExpanded by remember { mutableStateOf(false) }
+    val ext = file.extension.uppercase()
+    val typeColor = fileExtensionColor(ext)
+
+    val thumbBitmap = remember(file.thumbnailBase64) {
+        file.thumbnailBase64?.takeIf { it.isNotBlank() }?.let { b64 ->
+            runCatching {
+                val bytes = Base64.decode(b64, Base64.DEFAULT)
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            }.getOrNull()
+        }
+    }
+
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 1.dp,
+        shadowElevation = 1.dp,
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(18.dp))
             .combinedClickable(
                 onClick = onClick,
-                onLongClick = { if (canDelete) onDelete() }
+                onLongClick = { menuExpanded = true }
             )
-            .testTag("folder_card_${folder.id}"),
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(folderColor.copy(alpha = 0.16f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(text = folder.iconEmoji, fontSize = 22.sp)
-                }
-                Spacer(modifier = Modifier.width(10.dp))
-                Column {
-                    Text(
-                        text = folder.getDisplayName(isHebrew),
-                        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Bold),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = if (isHebrew) "$fileCount פריטים" else "$fileCount items",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            if (canDelete) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = onRename,
-                        modifier = Modifier
-                            .size(30.dp)
-                            .testTag("rename_folder_${folder.id}")
-                    ) {
-                        Icon(
-                            Icons.Default.Edit,
-                            contentDescription = if (isHebrew) "שנה שם תיקייה" else "Rename folder",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                    IconButton(
-                        onClick = onDelete,
-                        modifier = Modifier
-                            .size(30.dp)
-                            .testTag("delete_folder_${folder.id}")
-                    ) {
-                        Icon(
-                            Icons.Default.DeleteOutline,
-                            contentDescription = if (isHebrew) "מחק תיקייה" else "Delete folder",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun FolderListItemCard(
-    folder: DocumentFolder,
-    fileCount: Int,
-    canDelete: Boolean,
-    isHebrew: Boolean,
-    onClick: () -> Unit,
-    onRename: () -> Unit = {},
-    onDelete: () -> Unit
-) {
-    val folderColor = Color(folder.colorHex)
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
-            .testTag("folder_card_${folder.id}"),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                Box(
-                    modifier = Modifier
-                        .size(42.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(folderColor.copy(alpha = 0.16f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(text = folder.iconEmoji, fontSize = 20.sp)
-                }
-                Spacer(modifier = Modifier.width(12.dp))
-                Column {
-                    Text(
-                        text = folder.getDisplayName(isHebrew),
-                        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Bold)
-                    )
-                    Text(
-                        text = if (isHebrew) "$fileCount פריטים בתיקייה" else "$fileCount items in folder",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            if (canDelete) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = onRename,
-                        modifier = Modifier.testTag("rename_folder_${folder.id}")
-                    ) {
-                        Icon(
-                            Icons.Default.Edit,
-                            contentDescription = if (isHebrew) "שנה שם תיקייה" else "Rename folder",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    IconButton(
-                        onClick = onDelete,
-                        modifier = Modifier.testTag("delete_folder_${folder.id}")
-                    ) {
-                        Icon(
-                            Icons.Default.DeleteOutline,
-                            contentDescription = if (isHebrew) "מחק תיקייה" else "Delete folder",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            } else {
-                Icon(
-                    Icons.Default.ChevronLeft,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun FileGridCard(
-    doc: FamilyDocument,
-    folder: DocumentFolder?,
-    uploader: FamilyMember?,
-    canModify: Boolean,
-    isHebrew: Boolean,
-    onOpen: () -> Unit,
-    onShare: () -> Unit,
-    onMove: () -> Unit = {},
-    onRename: () -> Unit,
-    onDelete: () -> Unit
-) {
-    val (typeIcon, typeColor) = fileVisualSpec(doc.extension)
-    val uploaderName = uploader?.getDisplayName(isHebrew)?.takeIf { it.isNotBlank() }
-        ?: doc.uploadedByName.ifBlank { if (isHebrew) "חבר משפחה" else "Family Member" }
-    val dateLabel = doc.uploadDateFormatted.ifBlank { doc.uploadedDateFormatted }
-
-    val thumbnailBitmap = remember(doc.id, doc.thumbnailBase64) {
-        doc.thumbnailBase64?.takeIf { it.isNotBlank() }?.let { b64 ->
-            runCatching {
-                val raw = Base64.decode(b64, Base64.DEFAULT)
-                BitmapFactory.decodeByteArray(raw, 0, raw.size)
-            }.getOrNull()
-        }
-    }
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .clickable(onClick = onOpen)
-            .testTag("file_card_${doc.id}"),
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            .testTag("file_grid_${file.id}")
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            // Top Preview / Thumbnail Box
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(92.dp)
+                    .height(104.dp)
                     .clip(RoundedCornerShape(14.dp))
                     .background(typeColor.copy(alpha = 0.1f)),
                 contentAlignment = Alignment.Center
             ) {
-                if (thumbnailBitmap != null) {
+                if (thumbBitmap != null) {
                     Image(
-                        bitmap = thumbnailBitmap.asImageBitmap(),
-                        contentDescription = doc.name,
+                        bitmap = thumbBitmap.asImageBitmap(),
+                        contentDescription = file.name,
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop
                     )
                 } else {
                     Icon(
-                        imageVector = typeIcon,
-                        contentDescription = doc.extension,
+                        imageVector = fileExtensionIcon(ext),
+                        contentDescription = ext,
                         tint = typeColor,
-                        modifier = Modifier.size(38.dp)
+                        modifier = Modifier.size(40.dp)
                     )
                 }
 
                 Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
+                    shape = RoundedCornerShape(8.dp),
+                    color = typeColor,
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .padding(6.dp)
+                        .padding(8.dp)
                 ) {
                     Text(
-                        text = doc.extension.uppercase(),
-                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
-                        color = typeColor,
+                        text = ext,
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = Color.White,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                     )
                 }
-            }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = doc.name,
-                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            Spacer(modifier = Modifier.height(2.dp))
-
-            Text(
-                text = "${doc.sizeFormatted} • $dateLabel",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            Text(
-                text = if (isHebrew) "הועלה ע\"י $uploaderName" else "By $uploaderName",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(
-                    onClick = onShare,
-                    modifier = Modifier
-                        .size(30.dp)
-                        .testTag("share_file_${doc.id}")
-                ) {
-                    Icon(
-                        Icons.Default.Share,
-                        contentDescription = if (isHebrew) "שיתוף" else "Share",
-                        modifier = Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                if (canModify) {
+                Box(modifier = Modifier.align(Alignment.TopEnd)) {
                     IconButton(
-                        onClick = onMove,
-                        modifier = Modifier
-                            .size(30.dp)
-                            .testTag("move_file_${doc.id}")
+                        onClick = { menuExpanded = true },
+                        modifier = Modifier.size(30.dp)
                     ) {
-                        Icon(
-                            Icons.Default.DriveFileMove,
-                            contentDescription = if (isHebrew) "העברה לתיקייה" else "Move",
-                            modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Icon(Icons.Default.MoreVert, contentDescription = null, modifier = Modifier.size(18.dp))
                     }
-                    IconButton(
-                        onClick = onRename,
-                        modifier = Modifier
-                            .size(30.dp)
-                            .testTag("rename_file_${doc.id}")
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false }
                     ) {
-                        Icon(
-                            Icons.Default.Edit,
-                            contentDescription = if (isHebrew) "שינוי שם" else "Rename",
-                            modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        DropdownMenuItem(
+                            text = { Text(if (isHebrew) "העבר לתיקייה" else "Move to Folder") },
+                            leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                onMove()
+                            }
                         )
-                    }
-                    IconButton(
-                        onClick = onDelete,
-                        modifier = Modifier
-                            .size(30.dp)
-                            .testTag("delete_file_${doc.id}")
-                    ) {
-                        Icon(
-                            Icons.Default.DeleteOutline,
-                            contentDescription = if (isHebrew) "מחיקה" else "Delete",
-                            modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.error
+                        DropdownMenuItem(
+                            text = { Text(if (isHebrew) "שינוי שם" else "Rename") },
+                            leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                onRename()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = if (isHebrew) "מחיקה" else "Delete",
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.DeleteOutline,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onDelete()
+                            }
                         )
                     }
                 }
             }
-        }
-    }
-}
 
-@Composable
-private fun FileListItemCard(
-    doc: FamilyDocument,
-    folder: DocumentFolder?,
-    uploader: FamilyMember?,
-    canModify: Boolean,
-    isHebrew: Boolean,
-    onOpen: () -> Unit,
-    onShare: () -> Unit,
-    onMove: () -> Unit = {},
-    onRename: () -> Unit,
-    onDelete: () -> Unit
-) {
-    val (typeIcon, typeColor) = fileVisualSpec(doc.extension)
-    val uploaderName = uploader?.getDisplayName(isHebrew)?.takeIf { it.isNotBlank() }
-        ?: doc.uploadedByName.ifBlank { if (isHebrew) "חבר משפחה" else "Family Member" }
-    val dateLabel = doc.uploadDateFormatted.ifBlank { doc.uploadedDateFormatted }
-
-    val thumbnailBitmap = remember(doc.id, doc.thumbnailBase64) {
-        doc.thumbnailBase64?.takeIf { it.isNotBlank() }?.let { b64 ->
-            runCatching {
-                val raw = Base64.decode(b64, Base64.DEFAULT)
-                BitmapFactory.decodeByteArray(raw, 0, raw.size)
-            }.getOrNull()
-        }
-    }
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onOpen)
-            .testTag("file_card_${doc.id}"),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(typeColor.copy(alpha = 0.12f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (thumbnailBitmap != null) {
-                        Image(
-                            bitmap = thumbnailBitmap.asImageBitmap(),
-                            contentDescription = doc.name,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    } else {
-                        Icon(
-                            imageVector = typeIcon,
-                            contentDescription = doc.extension,
-                            tint = typeColor,
-                            modifier = Modifier.size(26.dp)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(12.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = doc.name,
-                        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Bold),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "${doc.extension.uppercase()} • ${doc.sizeFormatted} • $dateLabel",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = if (isHebrew) {
-                            "הועלה ע\"י $uploaderName" + (folder?.let { " • ${it.getDisplayName(true)}" } ?: "")
-                        } else {
-                            "Uploaded by $uploaderName" + (folder?.let { " • ${it.getDisplayName(false)}" } ?: "")
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = onShare,
-                    modifier = Modifier
-                        .size(34.dp)
-                        .testTag("share_file_${doc.id}")
-                ) {
-                    Icon(
-                        Icons.Default.Share,
-                        contentDescription = if (isHebrew) "שיתוף" else "Share",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-                if (canModify) {
-                    IconButton(
-                        onClick = onMove,
-                        modifier = Modifier
-                            .size(34.dp)
-                            .testTag("move_file_${doc.id}")
-                    ) {
-                        Icon(
-                            Icons.Default.DriveFileMove,
-                            contentDescription = if (isHebrew) "העברה לתיקייה" else "Move",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    IconButton(
-                        onClick = onRename,
-                        modifier = Modifier
-                            .size(34.dp)
-                            .testTag("rename_file_${doc.id}")
-                    ) {
-                        Icon(
-                            Icons.Default.Edit,
-                            contentDescription = if (isHebrew) "שינוי שם" else "Rename",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    IconButton(
-                        onClick = onDelete,
-                        modifier = Modifier
-                            .size(34.dp)
-                            .testTag("delete_file_${doc.id}")
-                    ) {
-                        Icon(
-                            Icons.Default.DeleteOutline,
-                            contentDescription = if (isHebrew) "מחיקה" else "Delete",
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun EmptyFilesCard(
-    isHebrew: Boolean,
-    onUploadClick: () -> Unit,
-    onCameraClick: () -> Unit
-) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 12.dp)
-            .testTag("empty_files_state"),
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Icon(
-                Icons.Default.FolderOpen,
-                contentDescription = null,
-                modifier = Modifier.size(48.dp),
-                tint = MaterialTheme.colorScheme.primary
-            )
             Spacer(modifier = Modifier.height(10.dp))
+
             Text(
-                text = if (isHebrew) "אין עדיין קבצים בתיקייה זו" else "No files in this folder yet",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                text = file.name,
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
-            Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = if (isHebrew) {
-                    "לחצו על כפתור ה-+ להוספת קובץ, צילום תמונה או סריקת מסמך למשפחה."
-                } else {
-                    "Tap the + button to upload a file, take a photo, or scan a document."
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                text = "${file.sizeFormatted} • ${uploader?.getDisplayName(isHebrew) ?: file.uploadedByName}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
-            Spacer(modifier = Modifier.height(14.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = onUploadClick,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.testTag("empty_state_upload_button")
-                ) {
-                    Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (isHebrew) "העלאת קובץ" else "Upload File", fontWeight = FontWeight.Bold)
-                }
-                OutlinedButton(
-                    onClick = onCameraClick,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.testTag("empty_state_camera_button")
-                ) {
-                    Icon(Icons.Default.PhotoCamera, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (isHebrew) "צילום תמונה" else "Take Photo", fontWeight = FontWeight.Bold)
-                }
-            }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun FileUploadSelectionDialog(
+fun MoveFileToFolderDialog(
+    file: FamilyDocument,
     folders: List<DocumentFolder>,
-    selectedFolderId: String?,
-    currentMember: FamilyMember,
     isHebrew: Boolean,
     onDismiss: () -> Unit,
-    onLaunchSystemFilePicker: () -> Unit,
-    onUploadConfirmed: (folderId: String, fileName: String, extension: String, bytes: ByteArray) -> Unit
+    onConfirmMove: (targetFolderId: String) -> Unit
 ) {
-    var fileNameInput by rememberSaveable { mutableStateOf("") }
-    var selectedExt by rememberSaveable { mutableStateOf("PDF") }
-    var targetFolderId by rememberSaveable {
-        mutableStateOf(selectedFolderId ?: folders.firstOrNull()?.id ?: "f_school")
-    }
-    val supportedFormats = listOf("PDF", "JPG", "PNG", "DOCX", "XLSX", "PPTX", "TXT", "ZIP")
+    var selectedTargetId by remember { mutableStateOf(file.folderId) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        modifier = Modifier.testTag("file_upload_dialog"),
+        icon = {
+            Icon(
+                Icons.Default.DriveFileMove,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+        },
         title = {
             Text(
-                text = if (isHebrew) "העלאת קובץ לתיקייה המשפחתית" else "Upload Shared Family File",
-                fontWeight = FontWeight.ExtraBold
+                text = if (isHebrew) "העברת קובץ לתיקייה" else "Move File to Folder",
+                fontWeight = FontWeight.Bold
             )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                // Button 1: Open Android Storage Access Framework (SAF)
-                FilledTonalButton(
-                    onClick = onLaunchSystemFilePicker,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .testTag("launch_saf_picker_button"),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(Icons.Default.FolderOpen, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = if (isHebrew) "בחירת קובץ מהמכשיר (SAF)" else "Select File from Device",
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                HorizontalDivider()
-
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = if (isHebrew) "או יצירה והעלאה מהירה של קובץ:" else "Or quick file upload:",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                    text = if (isHebrew) "בחרו תיקיית יעד עבור \"${file.name}\":" else "Select destination folder for \"${file.name}\":",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                OutlinedTextField(
-                    value = fileNameInput,
-                    onValueChange = { fileNameInput = it },
+                // Root FamilyTasks option
+                val isRootSelected = selectedTargetId.isBlank()
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isRootSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .testTag("upload_file_name_input"),
-                    label = {
-                        Text(if (isHebrew) "שם הקובץ" else "File Name")
-                    },
-                    placeholder = {
-                        Text(if (isHebrew) "למשל: חוזר_לימודים" else "e.g., School_Circular")
-                    },
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp)
-                )
-
-                Text(
-                    text = if (isHebrew) "סוג קובץ:" else "Format:",
-                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
-                )
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(supportedFormats) { ext ->
-                        FilterChip(
-                            selected = selectedExt == ext,
-                            onClick = { selectedExt = ext },
-                            label = { Text(ext) },
-                            modifier = Modifier.testTag("format_chip_${ext.lowercase()}")
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { selectedTargetId = "" }
+                        .testTag("move_target_folder_root")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(text = "🏠", fontSize = 18.sp)
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = if (isHebrew) "תיקיית FamilyTasks הראשית" else "Main FamilyTasks Folder",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                            modifier = Modifier.weight(1f)
                         )
+                        if (isRootSelected) {
+                            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                        }
                     }
                 }
 
-                if (folders.isNotEmpty()) {
-                    Text(
-                        text = if (isHebrew) "תיקיית יעד:" else "Target Folder:",
-                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
-                    )
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(folders, key = { it.id }) { folder ->
-                            FilterChip(
-                                selected = targetFolderId == folder.id,
-                                onClick = { targetFolderId = folder.id },
-                                label = { Text("${folder.iconEmoji} ${folder.getDisplayName(isHebrew)}") }
+                folders.forEach { folder ->
+                    val isSelected = folder.id == selectedTargetId
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (isSelected) Color(folder.colorHex).copy(alpha = 0.16f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { selectedTargetId = folder.id }
+                            .testTag("move_target_folder_${folder.id}")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(text = folder.iconEmoji.ifBlank { "📁" }, fontSize = 18.sp)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = folder.getDisplayName(isHebrew),
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                modifier = Modifier.weight(1f)
                             )
+                            if (isSelected) {
+                                Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(folder.colorHex), modifier = Modifier.size(18.dp))
+                            }
                         }
                     }
                 }
@@ -2020,32 +2068,10 @@ private fun FileUploadSelectionDialog(
         },
         confirmButton = {
             Button(
-                onClick = {
-                    val base = fileNameInput.trim().ifBlank {
-                        if (isHebrew) "קובץ_משפחתי" else "Family_File"
-                    }
-                    val sanitizedName = FamilyFileManagerHelper.sanitizeFileName(base, selectedExt.lowercase())
-                    val bytes = when (selectedExt) {
-                        "PDF" -> FamilyFileManagerHelper.generateDocumentPdfBytes(
-                            title = sanitizedName,
-                            uploaderName = currentMember.name,
-                            dateFormatted = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm")),
-                            bodyLines = listOf("מסמך משפחתי משותף: $sanitizedName")
-                        )
-                        "JPG", "PNG" -> FamilyFileManagerHelper.generateSampleImageBytes(
-                            title = sanitizedName,
-                            uploaderName = currentMember.name
-                        )
-                        else -> "קובץ משפחתי משותף: $sanitizedName".toByteArray(Charsets.UTF_8)
-                    }
-                    onUploadConfirmed(targetFolderId, sanitizedName, selectedExt, bytes)
-                },
-                modifier = Modifier.testTag("confirm_upload_file_button"),
-                shape = RoundedCornerShape(12.dp)
+                onClick = { onConfirmMove(selectedTargetId) },
+                modifier = Modifier.testTag("confirm_move_file_button")
             ) {
-                Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(if (isHebrew) "העלה קובץ" else "Upload", fontWeight = FontWeight.Bold)
+                Text(if (isHebrew) "העבר לכאן" else "Move Here")
             }
         },
         dismissButton = {
@@ -2056,15 +2082,22 @@ private fun FileUploadSelectionDialog(
     )
 }
 
-private fun fileVisualSpec(extension: String): Pair<ImageVector, Color> {
-    return when (extension.uppercase()) {
-        "PDF" -> Icons.Default.PictureAsPdf to Color(0xFFEF4444)
-        "JPG", "JPEG", "PNG", "WEBP" -> Icons.Default.Image to Color(0xFF10B981)
-        "DOCX", "DOC" -> Icons.Default.Description to Color(0xFF3B82F6)
-        "XLSX", "XLS" -> Icons.Default.TableChart to Color(0xFF059669)
-        "PPTX", "PPT" -> Icons.Default.Slideshow to Color(0xFFD97706)
-        "TXT" -> Icons.Default.Article to Color(0xFF0284C7)
-        "ZIP" -> Icons.Default.FolderZip to Color(0xFF7C3AED)
-        else -> Icons.AutoMirrored.Filled.InsertDriveFile to Color(0xFF6366F1)
+private fun fileExtensionColor(ext: String): Color {
+    return when (ext.uppercase()) {
+        "PDF" -> Color(0xFFEF4444)
+        "JPG", "JPEG", "PNG", "WEBP" -> Color(0xFF10B981)
+        "DOC", "DOCX", "TXT" -> Color(0xFF3B82F6)
+        "XLS", "XLSX" -> Color(0xFF059669)
+        "PPT", "PPTX" -> Color(0xFFD97706)
+        "ZIP" -> Color(0xFF7C3AED)
+        else -> Color(0xFF6366F1)
+    }
+}
+
+private fun fileExtensionIcon(ext: String): ImageVector {
+    return when (ext.uppercase()) {
+        "PDF" -> Icons.Default.PictureAsPdf
+        "JPG", "JPEG", "PNG", "WEBP" -> Icons.Default.Image
+        else -> Icons.Default.Description
     }
 }

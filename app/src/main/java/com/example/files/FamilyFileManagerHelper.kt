@@ -183,14 +183,19 @@ object FamilyFileManagerHelper {
      * Extracts uppercase extension from a filename or fallback extension.
      */
     fun extractExtension(fileName: String, fallbackExtension: String = ""): String {
+        val fallbackClean = fallbackExtension.trim().trimStart('.').uppercase(Locale.ROOT)
         val dotIdx = fileName.lastIndexOf('.')
         val fromName = if (dotIdx > 0 && dotIdx < fileName.length - 1) {
             fileName.substring(dotIdx + 1).trim().uppercase(Locale.ROOT)
         } else {
             ""
         }
-        val resolved = fromName.ifBlank { fallbackExtension.trim().trimStart('.').uppercase(Locale.ROOT) }
-        return if (resolved == "JPEG") "JPG" else resolved.ifBlank { "PDF" }
+        val resolved = fromName.ifBlank { fallbackClean }
+        return when (resolved) {
+            "JPEG" -> "JPG"
+            "" -> "PDF"
+            else -> resolved
+        }
     }
 
     /**
@@ -342,19 +347,20 @@ object FamilyFileManagerHelper {
     }
 
     /**
-     * Reads a picked [Uri] from Android Storage Access Framework into a [PickedFilePayload].
+     * Reads a picked [Uri] from Android Storage Access Framework into a [PickedFilePayload],
+     * strictly preserving the original file format, extension, and MIME type without unnecessary conversion.
      */
     fun readPickedUriPayload(context: Context, uri: Uri): Result<PickedFilePayload> {
         return runCatching {
             val resolver = context.contentResolver
-            var displayName = "מסמך_משפחתי.pdf"
+            var queriedDisplayName: String? = null
             var queriedSize = -1L
 
             resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     if (nameIndex >= 0 && !cursor.isNull(nameIndex)) {
-                        displayName = cursor.getString(nameIndex) ?: displayName
+                        queriedDisplayName = cursor.getString(nameIndex)?.trim()?.takeIf { it.isNotEmpty() }
                     }
                     val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
                     if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
@@ -367,10 +373,32 @@ object FamilyFileManagerHelper {
                 throw IllegalArgumentException("הקובץ גדול מדי (${formatFileSize(queriedSize)}). מקסימום 15 MB.")
             }
 
-            val detectedMime = resolver.getType(uri).orEmpty()
-            val fallbackExt = mimeTypeToExtension(detectedMime)
-            val ext = extractExtension(displayName, fallbackExt)
-            val sanitized = sanitizeFileName(displayName, ext.lowercase(Locale.ROOT))
+            val detectedMime = resolver.getType(uri)?.trim().orEmpty()
+            val mimeDerivedExt = mimeTypeToExtensionOrNull(detectedMime)
+            val rawName = queriedDisplayName
+                ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+                ?: "קובץ_${formatTimestampForFileName()}"
+
+            val dotIdx = rawName.lastIndexOf('.')
+            val extFromName = if (dotIdx > 0 && dotIdx < rawName.length - 1) {
+                rawName.substring(dotIdx + 1).trim().uppercase(Locale.ROOT)
+            } else {
+                ""
+            }
+            val normalizedExtFromName = if (extFromName == "JPEG") "JPG" else extFromName
+            val ext = when {
+                normalizedExtFromName.isNotBlank() && normalizedExtFromName in ALLOWED_EXTENSIONS -> normalizedExtFromName
+                !mimeDerivedExt.isNullOrBlank() -> mimeDerivedExt
+                normalizedExtFromName.isNotBlank() -> normalizedExtFromName
+                else -> "PDF"
+            }
+
+            val displayNameWithExt = if (extFromName.isNotBlank()) {
+                rawName
+            } else {
+                "$rawName.${ext.lowercase(Locale.ROOT)}"
+            }
+            val sanitized = sanitizeFileName(displayNameWithExt, ext.lowercase(Locale.ROOT))
 
             val bytes = resolver.openInputStream(uri)?.use { input ->
                 val buffer = ByteArrayOutputStream()
@@ -389,6 +417,11 @@ object FamilyFileManagerHelper {
             } ?: throw IllegalStateException("לא ניתן לקרוא את הקובץ שנבחר מהמכשיר.")
 
             val actualSize = bytes.size.toLong().coerceAtLeast(1L)
+            val resolvedMimeType = if (detectedMime.isNotBlank() && detectedMime != "*/*" && detectedMime != "application/octet-stream") {
+                if (ext == "JPG") "image/jpeg" else detectedMime
+            } else {
+                FamilyDocument.defaultMimeTypeForExtension(ext)
+            }
             val thumb = if (ext in setOf("JPG", "JPEG", "PNG", "WEBP")) {
                 createCompactThumbnailBase64(bytes)
             } else {
@@ -396,10 +429,10 @@ object FamilyFileManagerHelper {
             }
 
             PickedFilePayload(
-                originalName = displayName,
+                originalName = displayNameWithExt,
                 sanitizedName = sanitized,
                 extension = ext,
-                mimeType = FamilyDocument.defaultMimeTypeForExtension(ext),
+                mimeType = resolvedMimeType,
                 sizeBytes = actualSize,
                 sizeFormatted = formatFileSize(actualSize),
                 bytes = bytes,
@@ -408,7 +441,7 @@ object FamilyFileManagerHelper {
         }
     }
 
-    private fun mimeTypeToExtension(mimeType: String): String {
+    private fun mimeTypeToExtensionOrNull(mimeType: String): String? {
         return when (mimeType.lowercase(Locale.ROOT)) {
             "application/pdf" -> "PDF"
             "image/jpeg", "image/jpg" -> "JPG"
@@ -422,7 +455,272 @@ object FamilyFileManagerHelper {
             "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> "PPTX"
             "text/plain" -> "TXT"
             "application/zip", "application/x-zip-compressed" -> "ZIP"
-            else -> "PDF"
+            else -> null
+        }
+    }
+
+    private fun mimeTypeToExtension(mimeType: String): String {
+        return mimeTypeToExtensionOrNull(mimeType) ?: "PDF"
+    }
+
+    fun formatTimestampForFileName(nowMillis: Long = System.currentTimeMillis()): String {
+        val sdf = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+        return sdf.format(java.util.Date(nowMillis))
+    }
+
+    /**
+     * Generates a descriptive timestamped JPEG filename for a regular camera photo.
+     * Always ends with `.jpg` — never `.pdf`.
+     */
+    fun generateCameraPhotoFileName(isHebrew: Boolean = true, nowMillis: Long = System.currentTimeMillis()): String {
+        val ts = formatTimestampForFileName(nowMillis)
+        val prefix = if (isHebrew) "צילום" else "Photo"
+        return "${prefix}_${ts}.jpg"
+    }
+
+    /**
+     * Generates a descriptive timestamped PDF filename for a scanned document.
+     * Always ends with `.pdf` — never `.jpg`.
+     */
+    fun generateScannedDocumentFileName(
+        customTitle: String = "",
+        isHebrew: Boolean = true,
+        nowMillis: Long = System.currentTimeMillis()
+    ): String {
+        val cleanCustom = customTitle.trim()
+            .removeSuffix(".pdf")
+            .removeSuffix(".PDF")
+            .removeSuffix(".jpg")
+            .removeSuffix(".JPG")
+            .removeSuffix(".jpeg")
+            .removeSuffix(".JPEG")
+            .trim()
+        val base = if (cleanCustom.isNotBlank()) {
+            cleanCustom
+        } else {
+            val ts = formatTimestampForFileName(nowMillis)
+            if (isHebrew) "סריקה_$ts" else "Scan_$ts"
+        }
+        return sanitizeFileName("$base.pdf", "pdf")
+    }
+
+    /**
+     * Processes a captured camera photo from [photoFile] (or raw bytes):
+     * - Reads EXIF orientation (`ExifInterface`) and rotates/flips the image so portrait/landscape orientation is preserved.
+     * - Always encodes as JPEG (`.jpg`) with MIME type `image/jpeg`.
+     * - Never converts a regular photograph into PDF.
+     */
+    fun processCapturedCameraPhotoJpeg(
+        photoFile: File?,
+        fallbackBytes: ByteArray? = null,
+        isHebrew: Boolean = true,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Result<PickedFilePayload> {
+        return runCatching {
+            val rawBytes = when {
+                photoFile != null && photoFile.exists() && photoFile.length() > 0L -> photoFile.readBytes()
+                fallbackBytes != null && fallbackBytes.isNotEmpty() -> fallbackBytes
+                else -> throw IllegalArgumentException("לא התקבלה תמונה מהמצלמה.")
+            }
+
+            val orientedJpegBytes = normalizeJpegOrientation(photoFile, rawBytes)
+            val fileName = generateCameraPhotoFileName(isHebrew = isHebrew, nowMillis = nowMillis)
+            val sanitized = sanitizeFileName(fileName, "jpg")
+            val sizeBytes = orientedJpegBytes.size.toLong().coerceAtLeast(1L)
+            val thumb = createCompactThumbnailBase64(orientedJpegBytes)
+
+            PickedFilePayload(
+                originalName = sanitized,
+                sanitizedName = sanitized,
+                extension = "JPG",
+                mimeType = "image/jpeg",
+                sizeBytes = sizeBytes,
+                sizeFormatted = formatFileSize(sizeBytes),
+                bytes = orientedJpegBytes,
+                thumbnailBase64 = thumb
+            )
+        }
+    }
+
+    /**
+     * Reads EXIF orientation from [photoFile] (if available) and rotates/flips the decoded bitmap
+     * so that the saved JPEG always has upright pixel orientation (`ORIENTATION_NORMAL`).
+     */
+    fun normalizeJpegOrientation(photoFile: File?, rawBytes: ByteArray, quality: Int = 92): ByteArray {
+        return runCatching {
+            val orientation = if (photoFile != null && photoFile.exists()) {
+                android.media.ExifInterface(photoFile.absolutePath).getAttributeInt(
+                    android.media.ExifInterface.TAG_ORIENTATION,
+                    android.media.ExifInterface.ORIENTATION_NORMAL
+                )
+            } else {
+                android.media.ExifInterface.ORIENTATION_NORMAL
+            }
+
+            val decoded = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size)
+                ?: return rawBytes
+
+            val matrix = android.graphics.Matrix()
+            when (orientation) {
+                android.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                android.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                android.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                android.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
+                android.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
+                else -> {
+                    // Already upright; ensure valid JPEG header or re-compress cleanly
+                    if (rawBytes.size >= 2 && rawBytes[0] == 0xFF.toByte() && rawBytes[1] == 0xD8.toByte()) {
+                        return rawBytes
+                    }
+                }
+            }
+
+            val transformed = if (!matrix.isIdentity) {
+                Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+            } else {
+                decoded
+            }
+            val out = ByteArrayOutputStream()
+            transformed.compress(Bitmap.CompressFormat.JPEG, quality, out)
+            val result = out.toByteArray()
+            if (result.isNotEmpty()) result else rawBytes
+        }.getOrDefault(rawBytes)
+    }
+
+    /**
+     * Transforms a scanned page image with optional rotation (0, 90, 180, 270),
+     * crop margin ratio (0f..0.25f), and high-contrast document filter.
+     */
+    fun processScannedPageBitmap(
+        rawPageBytes: ByteArray,
+        rotationDegrees: Int = 0,
+        cropInsetRatio: Float = 0f,
+        enhanceContrast: Boolean = true
+    ): Bitmap? {
+        return runCatching {
+            val src = BitmapFactory.decodeByteArray(rawPageBytes, 0, rawPageBytes.size) ?: return null
+            val safeInset = cropInsetRatio.coerceIn(0f, 0.25f)
+            val cropX = (src.width * safeInset).toInt().coerceAtLeast(0)
+            val cropY = (src.height * safeInset).toInt().coerceAtLeast(0)
+            val cropW = (src.width - cropX * 2).coerceAtLeast(1)
+            val cropH = (src.height - cropY * 2).coerceAtLeast(1)
+
+            val matrix = android.graphics.Matrix()
+            val normRot = ((rotationDegrees % 360) + 360) % 360
+            if (normRot != 0) {
+                matrix.postRotate(normRot.toFloat())
+            }
+            val croppedAndRotated = Bitmap.createBitmap(src, cropX, cropY, cropW, cropH, matrix, true)
+
+            if (!enhanceContrast) {
+                return croppedAndRotated
+            }
+
+            val enhanced = Bitmap.createBitmap(
+                croppedAndRotated.width.coerceAtLeast(1),
+                croppedAndRotated.height.coerceAtLeast(1),
+                Bitmap.Config.ARGB_8888
+            )
+            val canvas = Canvas(enhanced)
+            val cm = android.graphics.ColorMatrix(
+                floatArrayOf(
+                    1.25f, 0f, 0f, 0f, -20f,
+                    0f, 1.25f, 0f, 0f, -20f,
+                    0f, 0f, 1.25f, 0f, -20f,
+                    0f, 0f, 0f, 1f, 0f
+                )
+            )
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                colorFilter = android.graphics.ColorMatrixColorFilter(cm)
+            }
+            canvas.drawBitmap(croppedAndRotated, 0f, 0f, paint)
+            enhanced
+        }.getOrNull()
+    }
+
+    /**
+     * Generates a multi-page PDF document from one or more scanned page images ([pagesBytes]).
+     * Always produces a valid PDF (`.pdf`, `application/pdf`) and never substitutes a JPG file.
+     */
+    fun generateMultiPageScannedDocumentPdfBytes(
+        pagesBytes: List<ByteArray>,
+        title: String,
+        uploaderName: String = "FamilyTasks",
+        dateFormatted: String = ""
+    ): ByteArray {
+        if (pagesBytes.isEmpty()) {
+            return generateDocumentPdfBytes(
+                title = title,
+                uploaderName = uploaderName,
+                dateFormatted = dateFormatted,
+                bodyLines = listOf("מסמך סרוק: $title", "נסרק על ידי: $uploaderName")
+            )
+        }
+        return runCatching {
+            val pdfDocument = PdfDocument()
+            val pageWidth = 595
+            val pageHeight = 842
+            val margin = 28f
+            val availableW = pageWidth - margin * 2
+            val availableH = pageHeight - margin * 2 - 36f
+
+            pagesBytes.forEachIndexed { index, pageRawBytes ->
+                val pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, index + 1).create()
+                val page = pdfDocument.startPage(pageInfo)
+                val canvas = page.canvas
+
+                val bgPaint = Paint().apply { color = Color.WHITE }
+                canvas.drawRect(0f, 0f, pageWidth.toFloat(), pageHeight.toFloat(), bgPaint)
+
+                val decoded = BitmapFactory.decodeByteArray(pageRawBytes, 0, pageRawBytes.size)
+                if (decoded != null && decoded.width > 0 && decoded.height > 0) {
+                    val scale = minOf(
+                        availableW / decoded.width.toFloat(),
+                        availableH / decoded.height.toFloat()
+                    )
+                    val drawW = decoded.width * scale
+                    val drawH = decoded.height * scale
+                    val left = margin + (availableW - drawW) / 2f
+                    val top = margin + (availableH - drawH) / 2f
+                    val destRect = android.graphics.RectF(left, top, left + drawW, top + drawH)
+                    canvas.drawBitmap(decoded, null, destRect, Paint(Paint.FILTER_BITMAP_FLAG))
+                } else {
+                    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                        color = Color.rgb(30, 41, 59)
+                        textSize = 16f
+                    }
+                    canvas.drawText("FamilyTasks • $title (Page ${index + 1})", margin, 80f, textPaint)
+                }
+
+                val footerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.rgb(120, 130, 140)
+                    textSize = 11f
+                }
+                canvas.drawText(
+                    "$title • עמוד ${index + 1} מתוך ${pagesBytes.size}",
+                    margin,
+                    pageHeight - 16f,
+                    footerPaint
+                )
+                pdfDocument.finishPage(page)
+            }
+
+            val out = ByteArrayOutputStream()
+            pdfDocument.writeTo(out)
+            pdfDocument.close()
+            val result = out.toByteArray()
+            if (result.isNotEmpty() && String(result.take(5).toByteArray()).startsWith("%PDF-")) {
+                result
+            } else {
+                throw IllegalStateException("PDF output empty in stubbed environment")
+            }
+        }.getOrElse {
+            generateDocumentPdfBytes(
+                title = title,
+                uploaderName = uploaderName,
+                dateFormatted = dateFormatted,
+                bodyLines = listOf("מסמך סרוק (${pagesBytes.size} עמודים): $title")
+            )
         }
     }
 
@@ -513,7 +811,12 @@ object FamilyFileManagerHelper {
             val out = ByteArrayOutputStream()
             pdfDocument.writeTo(out)
             pdfDocument.close()
-            out.toByteArray()
+            val bytes = out.toByteArray()
+            if (bytes.isNotEmpty() && String(bytes.take(5).toByteArray()).startsWith("%PDF-")) {
+                bytes
+            } else {
+                throw IllegalStateException("PDF output empty in stubbed environment")
+            }
         }.getOrElse {
             // Minimal valid PDF fallback for JVM unit tests where Android Canvas is stubbed
             "%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >> endobj\nxref\n0 4\ntrailer << /Size 4 /Root 1 0 R >>\n%%EOF".toByteArray(Charsets.UTF_8)

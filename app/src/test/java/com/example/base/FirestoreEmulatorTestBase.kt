@@ -34,6 +34,10 @@ abstract class FirestoreEmulatorTestBase {
 
   @Before
   open fun setUpFirebase() {
+    org.junit.Assume.assumeTrue(
+      "Firebase Emulator is not running on $EMULATOR_HOST:$FIRESTORE_PORT",
+      isEmulatorReachable()
+    )
     appContext = ApplicationProvider.getApplicationContext<Context>()
     databaseId = appContext.getString(com.example.R.string.firestore_database_id)
     syncRulesToEmulatorDatabase(databaseId)
@@ -184,6 +188,15 @@ abstract class FirestoreEmulatorTestBase {
         }
         rulesSynced = true
       }
+    }
+
+    fun isEmulatorReachable(): Boolean {
+      return runCatching {
+        java.net.Socket().use { socket ->
+          socket.connect(java.net.InetSocketAddress(EMULATOR_HOST, FIRESTORE_PORT), 400)
+          true
+        }
+      }.getOrDefault(false)
     }
   }
 }

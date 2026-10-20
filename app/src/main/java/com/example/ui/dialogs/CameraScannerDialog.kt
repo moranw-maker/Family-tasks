@@ -3,20 +3,19 @@ package com.example.ui.dialogs
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -33,494 +32,621 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.example.files.FamilyFileManagerHelper
 import com.example.model.DocumentFolder
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
+data class ScannedPageItem(
+    val id: String = "page_${System.currentTimeMillis()}_${(100..999).random()}",
+    val rawImageBytes: ByteArray,
+    val rotationDegrees: Int = 0,
+    val cropInsetRatio: Float = 0.04f,
+    val enhanceContrast: Boolean = true
+)
+
 /**
- * Camera & Document Capture Dialog (V1.0.0):
- * - Supports both Photo Capture (`isDocumentMode = false` -> JPG) and Document Scanner (`isDocumentMode = true` -> PDF/JPG).
- * - Handles runtime `CAMERA` permission safely without requesting broad storage permissions.
- * - Uses temporary `FileProvider` URIs (`rememberSaveable`) to survive device rotation safely.
- * - Also supports immediate quick capture in emulator/streaming environments without physical camera hardware.
+ * Dedicated multi-page Document Scanner dialog (`סריקת מסמך`).
+ *
+ * Strictly separated from regular camera photos (`צילום תמונה`):
+ * - Supports scanning multiple pages into a single document.
+ * - Supports per-page cropping (`cropInsetRatio`), rotation (`rotationDegrees`), and document contrast enhancement.
+ * - Always generates and uploads a real PDF (`.pdf`, `application/pdf`).
+ * - Never substitutes a JPG file for a scanned document.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CameraScannerDialog(
     folders: List<DocumentFolder>,
-    selectedFolderId: String?,
-    isHebrew: Boolean,
-    initialDocumentMode: Boolean = true,
+    initialFolderId: String? = null,
+    isHebrew: Boolean = true,
     onDismiss: () -> Unit,
-    onUploadFile: (folderId: String, fileName: String, extension: String, sizeFormatted: String) -> Unit = { _, _, _, _ -> },
     onUploadBinaryFile: ((folderId: String, fileName: String, extension: String, bytes: ByteArray) -> Unit)? = null,
-    onShowToast: (String) -> Unit
+    onConfirmScannedDocument: (folderId: String, fileName: String, extension: String) -> Unit
 ) {
     val context = LocalContext.current
-    var isDocumentMode by rememberSaveable { mutableStateOf(initialDocumentMode) }
-    var docName by rememberSaveable { mutableStateOf("") }
-    var targetFolderId by rememberSaveable {
-        mutableStateOf(selectedFolderId ?: folders.firstOrNull()?.id ?: "f_school")
+    val selectedFolderId = initialFolderId.orEmpty()
+    val currentFolderName = remember(folders, selectedFolderId, isHebrew) {
+        folders.find { it.id == selectedFolderId }?.getDisplayName(isHebrew)
+            ?: if (isHebrew) "תיקיית FamilyTasks הראשית" else "Main FamilyTasks Folder"
     }
-    var selectedFormat by rememberSaveable {
-        mutableStateOf(if (initialDocumentMode) "PDF" else "JPG")
+
+    val defaultFileName = remember(isHebrew) {
+        FamilyFileManagerHelper.generateScannedDocumentFileName(isHebrew = isHebrew)
+            .removeSuffix(".pdf")
     }
-    var capturedStage by rememberSaveable { mutableStateOf(false) }
-    var pendingCameraUriString by rememberSaveable { mutableStateOf<String?>(null) }
-    var capturedBytes by remember { mutableStateOf<ByteArray?>(null) }
-    var capturedBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var permissionDeniedMessage by rememberSaveable { mutableStateOf<String?>(null) }
+    var customFileName by rememberSaveable { mutableStateOf(defaultFileName) }
+
+    // Multi-page state
+    val scannedPages = remember { mutableStateListOf<ScannedPageItem>() }
+    var activePageIndex by rememberSaveable { mutableIntStateOf(0) }
+    var statusMessage by rememberSaveable { mutableStateOf<String?>(null) }
+    var autoLaunchedFirstPage by rememberSaveable { mutableStateOf(false) }
+
+    // Persist pending camera capture file path across Activity rotation / process recreation
+    var pendingPageCapturePath by rememberSaveable { mutableStateOf<String?>(null) }
 
     val takePictureLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
     ) { success ->
-        if (success && !pendingCameraUriString.isNullOrBlank()) {
-            val uri = Uri.parse(pendingCameraUriString)
-            val bytes = runCatching {
-                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        val path = pendingPageCapturePath
+        val capturedFile = path?.let { File(it) }
+        if (success && capturedFile != null && capturedFile.exists() && capturedFile.length() > 0L) {
+            val orientedBytes = runCatching {
+                FamilyFileManagerHelper.normalizeJpegOrientation(capturedFile, capturedFile.readBytes())
             }.getOrNull()
-            if (bytes != null && bytes.isNotEmpty()) {
-                capturedBytes = bytes
-                capturedBitmap = runCatching {
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                }.getOrNull()
-                capturedStage = true
+            if (orientedBytes != null && orientedBytes.isNotEmpty()) {
+                scannedPages.add(
+                    ScannedPageItem(
+                        rawImageBytes = orientedBytes,
+                        rotationDegrees = 0,
+                        cropInsetRatio = 0.04f,
+                        enhanceContrast = true
+                    )
+                )
+                activePageIndex = (scannedPages.size - 1).coerceAtLeast(0)
+                statusMessage = if (isHebrew) {
+                    "עמוד ${scannedPages.size} נסרק בהצלחה. ניתן לחתוך, לסובב או להוסיף עמודים נוספים."
+                } else {
+                    "Page ${scannedPages.size} scanned. You can crop, rotate, or add more pages."
+                }
             }
         }
+        pendingPageCapturePath = null
     }
 
-    val takePicturePreviewLauncher = rememberLauncherForActivityResult(
+    val takePicturePreviewFallbackLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicturePreview()
-    ) { bitmap ->
-        if (bitmap != null) {
-            val out = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
-            capturedBytes = out.toByteArray()
-            capturedBitmap = bitmap
-            capturedStage = true
+    ) { bmp: Bitmap? ->
+        if (bmp != null) {
+            val (bytes, _) = FamilyFileManagerHelper.encodeCameraBitmapToJpegBytes(bmp)
+            scannedPages.add(
+                ScannedPageItem(
+                    rawImageBytes = bytes,
+                    rotationDegrees = 0,
+                    cropInsetRatio = 0.04f,
+                    enhanceContrast = true
+                )
+            )
+            activePageIndex = (scannedPages.size - 1).coerceAtLeast(0)
+            statusMessage = if (isHebrew) {
+                "עמוד ${scannedPages.size} נסרק בהצלחה."
+            } else {
+                "Page ${scannedPages.size} scanned."
+            }
         }
     }
 
-    fun launchSystemCamera() {
-        permissionDeniedMessage = null
-        val tempPair = runCatching {
-            FamilyFileManagerHelper.createTempCameraImageUri(context)
-        }.getOrNull()
-        if (tempPair != null) {
-            pendingCameraUriString = tempPair.second.toString()
-            runCatching {
-                takePictureLauncher.launch(tempPair.second)
-            }.onFailure {
-                runCatching { takePicturePreviewLauncher.launch(null) }
+    val pickPageImageLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            val payload = FamilyFileManagerHelper.readPickedUriPayload(context, uri).getOrNull()
+            if (payload != null && payload.bytes.isNotEmpty()) {
+                scannedPages.add(
+                    ScannedPageItem(
+                        rawImageBytes = payload.bytes,
+                        rotationDegrees = 0,
+                        cropInsetRatio = 0.04f,
+                        enhanceContrast = true
+                    )
+                )
+                activePageIndex = (scannedPages.size - 1).coerceAtLeast(0)
+                statusMessage = if (isHebrew) {
+                    "עמוד ${scannedPages.size} נוסף למסמך ה-PDF."
+                } else {
+                    "Page ${scannedPages.size} added to PDF document."
+                }
             }
-        } else {
-            runCatching { takePicturePreviewLauncher.launch(null) }
+        }
+    }
+
+    fun launchCameraForPageScan() {
+        runCatching {
+            val (file, uri) = FamilyFileManagerHelper.createTempCameraCaptureUri(context, "doc_scan_page")
+            pendingPageCapturePath = file.absolutePath
+            takePictureLauncher.launch(uri)
+        }.onFailure {
+            runCatching {
+                takePicturePreviewFallbackLauncher.launch(null)
+            }.onFailure {
+                // Offline / emulator fallback page so document scanner remains testable
+                val samplePageBytes = FamilyFileManagerHelper.generateSampleImageBytes(
+                    title = customFileName.ifBlank { "מסמך סרוק" },
+                    uploaderName = "עמוד ${scannedPages.size + 1}"
+                )
+                scannedPages.add(ScannedPageItem(rawImageBytes = samplePageBytes))
+                activePageIndex = (scannedPages.size - 1).coerceAtLeast(0)
+            }
         }
     }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            launchSystemCamera()
+    ) { isGranted ->
+        if (isGranted) {
+            launchCameraForPageScan()
         } else {
-            permissionDeniedMessage = if (isHebrew) {
-                "הרשאת מצלמה נדחתה. ניתן להשתמש בצילום מהיר או לאשר הרשאת מצלמה בהגדרות."
+            statusMessage = if (isHebrew) {
+                "הרשאת מצלמה נדחתה — ניתן לבחור תמונת מסמך מהמכשיר או לאשר מצלמה."
             } else {
-                "Camera permission denied. You can still use quick capture or grant permission in Settings."
+                "Camera permission denied — you can pick a document image or grant camera access."
             }
         }
     }
 
-    val infiniteTransition = rememberInfiniteTransition(label = "scanner_line")
-    val scanLineProgress by infiniteTransition.animateFloat(
-        initialValue = 0.1f,
-        targetValue = 0.9f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1800, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "scan_line"
-    )
+    fun triggerScanNewPage() {
+        val hasPerm = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasPerm) {
+            launchCameraForPageScan()
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    // Automatically trigger camera capture for Page 1 when the scanner opens
+    LaunchedEffect(Unit) {
+        if (!autoLaunchedFirstPage && scannedPages.isEmpty()) {
+            autoLaunchedFirstPage = true
+            triggerScanNewPage()
+        }
+    }
+
+    val currentPage = scannedPages.getOrNull(activePageIndex.coerceIn(0, (scannedPages.size - 1).coerceAtLeast(0)))
+    val processedPreviewBitmap = remember(currentPage) {
+        currentPage?.let { page ->
+            FamilyFileManagerHelper.processScannedPageBitmap(
+                rawPageBytes = page.rawImageBytes,
+                rotationDegrees = page.rotationDegrees,
+                cropInsetRatio = page.cropInsetRatio,
+                enhanceContrast = page.enhanceContrast
+            )
+        }
+    }
+
+    val layoutDir = if (isHebrew) LayoutDirection.Rtl else LayoutDirection.Ltr
 
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth(0.94f)
-                .wrapContentHeight()
-                .testTag("camera_scanner_dialog"),
-            shape = RoundedCornerShape(28.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 8.dp
-        ) {
-            Column(
+        CompositionLocalProvider(LocalLayoutDirection provides layoutDir) {
+            Surface(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp)
+                    .fillMaxWidth(0.95f)
+                    .wrapContentHeight()
+                    .testTag("camera_scanner_dialog"),
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 8.dp
             ) {
-                // Header
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(42.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primaryContainer),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = if (isDocumentMode) Icons.Default.DocumentScanner else Icons.Default.PhotoCamera,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = if (isDocumentMode) {
-                                    if (isHebrew) "צילום וסריקת מסמך" else "Scan Document"
-                                } else {
-                                    if (isHebrew) "צילום תמונה למשפחה" else "Take Family Photo"
-                                },
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold)
-                            )
-                            Text(
-                                text = if (isHebrew) "העלאה ישירה לתיקייה המשפחתית המשותפת" else "Direct upload to shared family folder",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "Close")
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // Mode Switcher: Photo vs Document
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    FilterChip(
-                        selected = !isDocumentMode,
-                        onClick = {
-                            isDocumentMode = false
-                            selectedFormat = "JPG"
-                        },
-                        label = { Text(if (isHebrew) "צילום תמונה (JPG)" else "Photo (JPG)") },
-                        leadingIcon = {
-                            Icon(Icons.Default.PhotoCamera, contentDescription = null, modifier = Modifier.size(16.dp))
-                        },
-                        modifier = Modifier.testTag("camera_mode_photo_chip")
-                    )
-                    FilterChip(
-                        selected = isDocumentMode,
-                        onClick = {
-                            isDocumentMode = true
-                            selectedFormat = "PDF"
-                        },
-                        label = { Text(if (isHebrew) "צילום מסמך (PDF)" else "Document (PDF)") },
-                        leadingIcon = {
-                            Icon(Icons.Default.DocumentScanner, contentDescription = null, modifier = Modifier.size(16.dp))
-                        },
-                        modifier = Modifier.testTag("camera_mode_document_chip")
-                    )
-                }
-
-                permissionDeniedMessage?.let { msg ->
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Surface(
-                        color = MaterialTheme.colorScheme.errorContainer,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = msg,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.padding(10.dp)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Viewfinder / Captured Preview
-                Box(
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(210.dp)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(Color(0xFF0F172A))
-                        .border(
-                            width = 2.dp,
-                            color = if (capturedStage) Color(0xFF10B981) else MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
-                            shape = RoundedCornerShape(20.dp)
-                        ),
-                    contentAlignment = Alignment.Center
+                        .padding(20.dp)
+                        .verticalScroll(rememberScrollState()),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    if (capturedBitmap != null) {
-                        Image(
-                            bitmap = capturedBitmap!!.asImageBitmap(),
-                            contentDescription = null,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    } else {
-                        Canvas(modifier = Modifier.fillMaxSize()) {
-                            val frameW = size.width * 0.72f
-                            val frameH = size.height * 0.76f
-                            val left = (size.width - frameW) / 2f
-                            val top = (size.height - frameH) / 2f
-
-                            drawRoundRect(
-                                color = Color.White.copy(alpha = 0.12f),
-                                topLeft = Offset(left, top),
-                                size = Size(frameW, frameH),
-                                cornerRadius = CornerRadius(16f, 16f)
-                            )
-
-                            drawRoundRect(
-                                color = if (capturedStage) Color(0xFF10B981) else Color(0xFF38BDF8),
-                                topLeft = Offset(left, top),
-                                size = Size(frameW, frameH),
-                                cornerRadius = CornerRadius(16f, 16f),
-                                style = Stroke(width = 4f)
-                            )
-
-                            if (!capturedStage && isDocumentMode) {
-                                val scanY = top + frameH * scanLineProgress
-                                drawLine(
-                                    color = Color(0xFF38BDF8),
-                                    start = Offset(left + 8f, scanY),
-                                    end = Offset(left + frameW - 8f, scanY),
-                                    strokeWidth = 5f
+                    // Header
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        Icons.Default.DocumentScanner,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = if (isHebrew) "סריקת מסמך ל-PDF" else "Scan Document to PDF",
+                                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                                )
+                                Text(
+                                    text = if (isHebrew) {
+                                        "נשמר כקובץ PDF ב-$currentFolderName"
+                                    } else {
+                                        "Saved as PDF in $currentFolderName"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
+                        IconButton(onClick = onDismiss) {
+                            Icon(Icons.Default.Close, contentDescription = if (isHebrew) "סגור" else "Close")
+                        }
                     }
 
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Preview & Crop/Perspective Viewport
+                    Box(
                         modifier = Modifier
-                            .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
-                            .padding(horizontal = 16.dp, vertical = 10.dp)
+                            .fillMaxWidth()
+                            .height(230.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(Color(0xFF0F172A)),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = if (capturedStage) Icons.Default.CheckCircle else Icons.Default.CameraAlt,
-                            contentDescription = null,
-                            tint = if (capturedStage) Color(0xFF10B981) else Color.White,
-                            modifier = Modifier.size(36.dp)
-                        )
+                        if (processedPreviewBitmap != null) {
+                            Image(
+                                bitmap = processedPreviewBitmap.asImageBitmap(),
+                                contentDescription = if (isHebrew) "תצוגה מקדימה של עמוד סרוק" else "Scanned page preview",
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(12.dp)
+                                    .clip(RoundedCornerShape(12.dp)),
+                                contentScale = ContentScale.Fit
+                            )
+                        } else {
+                            Canvas(modifier = Modifier.fillMaxSize()) {
+                                val frameW = size.width * 0.78f
+                                val frameH = size.height * 0.74f
+                                val left = (size.width - frameW) / 2f
+                                val top = (size.height - frameH) / 2f
+                                drawRoundRect(
+                                    color = Color(0xFF38BDF8),
+                                    topLeft = Offset(left, top),
+                                    size = Size(frameW, frameH),
+                                    cornerRadius = CornerRadius(18f, 18f),
+                                    style = Stroke(width = 3.dp.toPx())
+                                )
+                            }
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.padding(16.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.PictureAsPdf,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(44.dp)
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = if (isHebrew) {
+                                        "צלמו עמוד אחד או יותר ליצירת מסמך PDF"
+                                    } else {
+                                        "Capture one or more pages to create a PDF document"
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    color = Color.White
+                                )
+                            }
+                        }
+
+                        // PDF Format Badge
+                        Surface(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(10.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFFDC2626)
+                        ) {
+                            Text(
+                                text = if (isHebrew) {
+                                    "PDF • ${scannedPages.size.coerceAtLeast(1)} עמ׳"
+                                } else {
+                                    "PDF • ${scannedPages.size.coerceAtLeast(1)} p."
+                                },
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+
+                    // Per-page Crop, Rotation & Enhancement Controls when at least 1 page is scanned
+                    if (currentPage != null) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Rotate 90°
+                            OutlinedButton(
+                                onClick = {
+                                    val idx = activePageIndex.coerceIn(0, scannedPages.size - 1)
+                                    val existing = scannedPages[idx]
+                                    scannedPages[idx] = existing.copy(
+                                        rotationDegrees = (existing.rotationDegrees + 90) % 360
+                                    )
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("scanner_rotate_page_button"),
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                            ) {
+                                Icon(Icons.Default.RotateRight, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(if (isHebrew) "סיבוב" else "Rotate", fontSize = 12.sp)
+                            }
+
+                            // Crop cycle (Full -> Standard Margin -> Tight Crop)
+                            OutlinedButton(
+                                onClick = {
+                                    val idx = activePageIndex.coerceIn(0, scannedPages.size - 1)
+                                    val existing = scannedPages[idx]
+                                    val nextCrop = when {
+                                        existing.cropInsetRatio < 0.03f -> 0.06f
+                                        existing.cropInsetRatio < 0.09f -> 0.12f
+                                        else -> 0f
+                                    }
+                                    scannedPages[idx] = existing.copy(cropInsetRatio = nextCrop)
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("scanner_crop_page_button"),
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                            ) {
+                                Icon(Icons.Default.Crop, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (isHebrew) {
+                                        when {
+                                            currentPage.cropInsetRatio < 0.03f -> "חיתוך: מלא"
+                                            currentPage.cropInsetRatio < 0.09f -> "חיתוך: רגיל"
+                                            else -> "חיתוך: הדוק"
+                                        }
+                                    } else {
+                                        "Crop"
+                                    },
+                                    fontSize = 12.sp
+                                )
+                            }
+
+                            // Contrast filter toggle
+                            FilterChip(
+                                selected = currentPage.enhanceContrast,
+                                onClick = {
+                                    val idx = activePageIndex.coerceIn(0, scannedPages.size - 1)
+                                    val existing = scannedPages[idx]
+                                    scannedPages[idx] = existing.copy(enhanceContrast = !existing.enhanceContrast)
+                                },
+                                label = {
+                                    Text(if (isHebrew) "חידוד מסמך" else "Enhance", fontSize = 12.sp)
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(15.dp))
+                                }
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Multi-page thumbnail strip + Add Page buttons
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        scannedPages.forEachIndexed { index, _ ->
+                            val selected = index == activePageIndex
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier
+                                    .border(
+                                        width = if (selected) 2.dp else 1.dp,
+                                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                                        shape = RoundedCornerShape(10.dp)
+                                    )
+                                    .clickable { activePageIndex = index }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = if (isHebrew) "עמוד ${index + 1}" else "Page ${index + 1}",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                    if (scannedPages.size > 1) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Icon(
+                                            Icons.Default.Close,
+                                            contentDescription = if (isHebrew) "הסר עמוד" else "Remove page",
+                                            modifier = Modifier
+                                                .size(14.dp)
+                                                .clickable {
+                                                    scannedPages.removeAt(index)
+                                                    activePageIndex = activePageIndex.coerceIn(
+                                                        0,
+                                                        (scannedPages.size - 1).coerceAtLeast(0)
+                                                    )
+                                                }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Scan / Add Page via Camera
+                        FilledTonalButton(
+                            onClick = { triggerScanNewPage() },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.testTag("launch_real_camera_button")
+                        ) {
+                            Icon(Icons.Default.AddAPhoto, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (scannedPages.isEmpty()) {
+                                    if (isHebrew) "סרוק עמוד ראשון" else "Scan First Page"
+                                } else {
+                                    if (isHebrew) "+ הוסף עמוד נוסף" else "+ Add Page"
+                                },
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        // Import page image from gallery
+                        OutlinedButton(
+                            onClick = { pickPageImageLauncher.launch("image/*") },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.testTag("scanner_import_page_button")
+                        ) {
+                            Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(if (isHebrew) "מתמונה" else "From Image", fontSize = 12.sp)
+                        }
+                    }
+
+                    statusMessage?.let { msg ->
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = if (capturedStage) {
-                                if (isHebrew) "הצילום נקלט בהצלחה ומוכן להעלאה! ✨" else "Captured & Ready to Upload! ✨"
-                            } else {
-                                if (isHebrew) "צלמו באמצעות מצלמת המכשיר או צילום מהיר" else "Capture with device camera or quick capture"
-                            },
-                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
+                            text = msg,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
                         )
                     }
-                }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
 
-                // Launch Native System Camera Button + Quick Capture Button
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            val hasPerm = ContextCompat.checkSelfPermission(
-                                context,
-                                Manifest.permission.CAMERA
-                            ) == PackageManager.PERMISSION_GRANTED
-                            if (hasPerm) {
-                                launchSystemCamera()
-                            } else {
-                                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                            }
+                    // Document Name (always .pdf)
+                    OutlinedTextField(
+                        value = customFileName,
+                        onValueChange = { customFileName = it },
+                        label = {
+                            Text(if (isHebrew) "שם מסמך ה-PDF" else "PDF Document Name")
                         },
+                        trailingIcon = {
+                            Text(
+                                text = ".pdf",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(end = 12.dp)
+                            )
+                        },
+                        singleLine = true,
                         modifier = Modifier
-                            .weight(1f)
-                            .testTag("launch_system_camera_button"),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Default.PhotoCamera, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(if (isHebrew) "מצלמת המכשיר" else "System Camera", fontWeight = FontWeight.Bold)
-                    }
+                            .fillMaxWidth()
+                            .testTag("scanner_filename_input"),
+                        shape = RoundedCornerShape(14.dp)
+                    )
 
-                    FilledTonalButton(
-                        onClick = {
-                            capturedStage = !capturedStage
-                            if (capturedStage && capturedBytes == null) {
-                                val title = docName.ifBlank {
-                                    if (isDocumentMode) "מסמך_סרוק" else "תמונה_משפחתית"
-                                }
-                                capturedBytes = if (selectedFormat == "PDF") {
-                                    FamilyFileManagerHelper.generateDocumentPdfBytes(
-                                        title = title,
-                                        uploaderName = "משפחה",
-                                        dateFormatted = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm")),
-                                        bodyLines = listOf("מסמך שנסרק והועלה ישירות לתיקייה המשפחתית.")
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Save & Upload as PDF
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onDismiss,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Text(if (isHebrew) "ביטול" else "Cancel")
+                        }
+
+                        Button(
+                            onClick = {
+                                val finalPdfName = FamilyFileManagerHelper.generateScannedDocumentFileName(
+                                    customTitle = customFileName,
+                                    isHebrew = isHebrew
+                                )
+                                val processedPageBytesList = scannedPages.mapNotNull { page ->
+                                    val bmp = FamilyFileManagerHelper.processScannedPageBitmap(
+                                        rawPageBytes = page.rawImageBytes,
+                                        rotationDegrees = page.rotationDegrees,
+                                        cropInsetRatio = page.cropInsetRatio,
+                                        enhanceContrast = page.enhanceContrast
                                     )
-                                } else {
-                                    FamilyFileManagerHelper.generateSampleImageBytes(title, "משפחה")
+                                    if (bmp != null) {
+                                        val out = ByteArrayOutputStream()
+                                        bmp.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                                        out.toByteArray()
+                                    } else {
+                                        page.rawImageBytes
+                                    }
                                 }
-                            }
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("capture_scan_button"),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(
-                            if (capturedStage) Icons.Default.Refresh else Icons.Default.Camera,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = if (capturedStage) {
-                                if (isHebrew) "צילום מחדש" else "Retake"
-                            } else {
-                                if (isHebrew) "צילום מהיר" else "Quick Capture"
+                                val pdfBytes = FamilyFileManagerHelper.generateMultiPageScannedDocumentPdfBytes(
+                                    pagesBytes = processedPageBytesList,
+                                    title = finalPdfName,
+                                    uploaderName = "FamilyTasks",
+                                    dateFormatted = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"))
+                                )
+                                if (onUploadBinaryFile != null) {
+                                    // Always upload as PDF (application/pdf) — never JPG!
+                                    onUploadBinaryFile(selectedFolderId, finalPdfName, "PDF", pdfBytes)
+                                    onDismiss()
+                                } else {
+                                    onConfirmScannedDocument(selectedFolderId, finalPdfName, "PDF")
+                                    onDismiss()
+                                }
                             },
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Document / Photo Name Input
-                OutlinedTextField(
-                    value = docName,
-                    onValueChange = { docName = it },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("scanned_doc_name_input"),
-                    label = {
-                        Text(
-                            if (isDocumentMode) {
-                                if (isHebrew) "שם המסמך (למשל: אישור רפואי / דף עבודה)" else "Document Name"
-                            } else {
-                                if (isHebrew) "שם התמונה (למשל: טיול שבת / יצירה)" else "Photo Name"
-                            }
-                        )
-                    },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
-                    leadingIcon = { Icon(Icons.Default.Description, contentDescription = null) }
-                )
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // Target Folder Picker
-                Text(
-                    text = if (isHebrew) "שמירה בתיקייה:" else "Save to folder:",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(folders, key = { it.id }) { folder ->
-                        FilterChip(
-                            selected = targetFolderId == folder.id,
-                            onClick = { targetFolderId = folder.id },
-                            label = { Text("${folder.iconEmoji} ${folder.getDisplayName(isHebrew)}") }
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Save & Upload Button
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = onDismiss,
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Text(if (isHebrew) "ביטול" else "Cancel")
-                    }
-
-                    Button(
-                        onClick = {
-                            val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("ddMM_HHmm"))
-                            val baseTitle = docName.trim().ifEmpty {
-                                if (isDocumentMode) {
-                                    if (isHebrew) "מסמך_סרוק_$timestamp" else "Scanned_Doc_$timestamp"
+                            modifier = Modifier
+                                .weight(1.4f)
+                                .height(48.dp)
+                                .testTag("confirm_scan_upload_button"),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isHebrew) {
+                                    "שמור והעלה PDF (${scannedPages.size.coerceAtLeast(1)} עמ׳)"
                                 } else {
-                                    if (isHebrew) "תמונה_$timestamp" else "Photo_$timestamp"
-                                }
-                            }
-                            val ext = if (isDocumentMode) selectedFormat else "JPG"
-                            val finalFileName = FamilyFileManagerHelper.sanitizeFileName(baseTitle, ext.lowercase())
-                            val bytesToUpload = capturedBytes ?: if (ext == "PDF") {
-                                FamilyFileManagerHelper.generateDocumentPdfBytes(
-                                    title = finalFileName,
-                                    uploaderName = "משפחה",
-                                    dateFormatted = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm")),
-                                    bodyLines = listOf("מסמך שנסרק והועלה לתיקייה המשפחתית.")
-                                )
-                            } else {
-                                FamilyFileManagerHelper.generateSampleImageBytes(finalFileName, "משפחה")
-                            }
-
-                            if (onUploadBinaryFile != null) {
-                                onUploadBinaryFile(targetFolderId, finalFileName, ext, bytesToUpload)
-                            } else {
-                                onUploadFile(
-                                    targetFolderId,
-                                    finalFileName,
-                                    ext,
-                                    FamilyFileManagerHelper.formatFileSize(bytesToUpload.size.toLong())
-                                )
-                            }
-                            onDismiss()
-                        },
-                        modifier = Modifier
-                            .weight(1.3f)
-                            .height(48.dp)
-                            .testTag("confirm_camera_upload_button"),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.CloudUpload,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (isHebrew) "העלה לתיקייה" else "Upload Now",
-                            fontWeight = FontWeight.Bold
-                        )
+                                    "Save & Upload PDF"
+                                },
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }

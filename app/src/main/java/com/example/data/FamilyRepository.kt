@@ -144,13 +144,12 @@ class FamilyRepository(
         private val persistedDocumentsByFamily = ConcurrentHashMap<String, List<FamilyDocument>>()
         private val persistedDriveConfigByFamily = ConcurrentHashMap<String, FamilyDriveConfig>()
 
-        fun defaultStarterFolders(familyId: String = ""): List<DocumentFolder> = listOf(
-            DocumentFolder("f_school", "לימודים ובית ספר", "School & Homework", "🎒", 0xFF1A73E8, familyId = familyId),
-            DocumentFolder("f_medical", "רפואה ובריאות", "Medical & Health", "🩺", 0xFFEA4335, familyId = familyId),
-            DocumentFolder("f_Artwork", "ציורים ויצירות ילדים", "Kids Artwork", "🎨", 0xFF9334E6, familyId = familyId),
-            DocumentFolder("f_home", "מסמכי הבית וחשבונות", "Household & Bills", "🏠", 0xFF34A853, familyId = familyId),
-            DocumentFolder("f_trips", "חופשות וטיולים", "Family Trips", "✈️", 0xFFFBBC04, familyId = familyId)
+        private val LEGACY_PREDEFINED_FOLDER_IDS = setOf(
+            "f_school", "f_medical", "f_Artwork", "f_artwork",
+            "f_home", "f_trips", "f_drawings", "f_general"
         )
+
+        fun defaultStarterFolders(familyId: String = ""): List<DocumentFolder> = emptyList()
     }
 
     private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -529,28 +528,11 @@ class FamilyRepository(
     )
     val schedulePeriods: StateFlow<List<SchedulePeriod>> = _schedulePeriods.asStateFlow()
 
-    // 8. Google Drive Shared Family Folders & Documents
-    private val _folders = MutableStateFlow(
-        listOf(
-            DocumentFolder("f_school", "לימודים ובית ספר", "School & Homework", "🎒", 0xFF1A73E8),
-            DocumentFolder("f_medical", "רפואה ובריאות", "Medical & Health", "🩺", 0xFFEA4335),
-            DocumentFolder("f_Artwork", "ציורים ויצירות ילדים", "Kids Artwork", "🎨", 0xFF9334E6),
-            DocumentFolder("f_home", "מסמכי הבית וחשבונות", "Household & Bills", "🏠", 0xFF34A853),
-            DocumentFolder("f_trips", "חופשות וטיולים", "Family Trips", "✈️", 0xFFFBBC04)
-        )
-    )
+    // 8. Google Drive Shared Family Folders & Documents (starts empty with no predefined folders or sample files)
+    private val _folders = MutableStateFlow<List<DocumentFolder>>(emptyList())
     val folders: StateFlow<List<DocumentFolder>> = _folders.asStateFlow()
 
-    private val _documents = MutableStateFlow(
-        listOf(
-            FamilyDocument("d1", "f_school", "חוזר_הורים_טיול_שנתי_נועם.pdf", "PDF", "1.2 MB", "m_mom", "12/05/2025"),
-            FamilyDocument("d2", "f_school", "רשימת_ספרי_לימוד_תשפו.pdf", "PDF", "840 KB", "m_dad", "10/05/2025"),
-            FamilyDocument("d3", "f_medical", "פנקס_חיסונים_מעודכן_דניאל.pdf", "PDF", "2.1 MB", "m_mom", "04/05/2025"),
-            FamilyDocument("d4", "f_Artwork", "ציור_משפחה_מאיה_שיעור_אמנות.jpg", "JPG", "3.4 MB", "m_kid2", "14/05/2025"),
-            FamilyDocument("d5", "f_home", "חשבון_חשמל_וארנונה_מאי.pdf", "PDF", "620 KB", "m_dad", "01/05/2025"),
-            FamilyDocument("d6", "f_trips", "כרטיסי_טיסה_ומלון_חופשת_קיץ.pdf", "PDF", "4.0 MB", "m_dad", "15/05/2025")
-        )
-    )
+    private val _documents = MutableStateFlow<List<FamilyDocument>>(emptyList())
     val documents: StateFlow<List<FamilyDocument>> = _documents.asStateFlow()
 
     // 9. Real-time Notification Banner & History Feed
@@ -581,7 +563,7 @@ class FamilyRepository(
     private val _activeBannerAlert = MutableStateFlow<FamilyNotificationAlert?>(null)
     val activeBannerAlert: StateFlow<FamilyNotificationAlert?> = _activeBannerAlert.asStateFlow()
 
-    private val _selectedFolderId = MutableStateFlow<String?>("f_school")
+    private val _selectedFolderId = MutableStateFlow<String?>(null)
     val selectedFolderId: StateFlow<String?> = _selectedFolderId.asStateFlow()
 
     private val _fileSortOption = MutableStateFlow(FileSortOption.DATE)
@@ -1770,6 +1752,10 @@ class FamilyRepository(
         _currentMember.value = creatorMember
         _tasks.value = emptyList()
         _schedulePeriods.value = emptyList()
+        _folders.value = emptyList()
+        _selectedFolderId.value = null
+        _documents.value = emptyList()
+        _familyDriveConfig.value = FamilyDriveConfig(familyId = newFamilyId)
         _pendingInvitations.value = emptyList()
 
         _cloudFamilyGroup.value = CloudFamilyGroup(
@@ -3349,14 +3335,25 @@ class FamilyRepository(
                     val remoteFolders = snapshot.documents.mapNotNull { doc ->
                         val data = doc.data ?: return@mapNotNull null
                         FamilyCloudFileTransferEngine.parseFolderDocument(doc.id, data, familyId)
+                    }.sortedBy { it.createdAtMillis }
+                    _folders.value = remoteFolders
+                    persistedFoldersByFamily[familyId] = remoteFolders
+                    if (_selectedFolderId.value != null && remoteFolders.none { it.id == _selectedFolderId.value }) {
+                        _selectedFolderId.value = null
                     }
-                    val starterMap = defaultStarterFolders(familyId).associateBy { it.id }.toMutableMap()
-                    for (rf in remoteFolders) {
-                        starterMap[rf.id] = rf
+                    if (remoteFolders.any {
+                            GoogleDriveFamilyService.isKnownAutoGeneratedDefaultFolder(
+                                folderId = it.id,
+                                driveFolderId = it.driveFolderId,
+                                driveRootFolderId = _familyDriveConfig.value.driveRootFolderId,
+                                createdByUid = it.createdByUid
+                            )
+                        }
+                    ) {
+                        repoScope.launch {
+                            cleanupEmptyAutoGeneratedDefaultFolders(familyId)
+                        }
                     }
-                    val merged = starterMap.values.sortedBy { it.createdAtMillis }
-                    _folders.value = merged
-                    persistedFoldersByFamily[familyId] = merged
                 }
         }
 
@@ -4927,16 +4924,14 @@ class FamilyRepository(
 
     private fun restorePersistedFileNavigationState(familyId: String) {
         val famId = familyId.ifBlank { "default" }
-        persistedFoldersByFamily[famId]?.let { cachedFolders ->
-            if (cachedFolders.isNotEmpty()) {
-                _folders.value = cachedFolders
-            }
-        }
-        persistedDocumentsByFamily[famId]?.let { cachedDocs ->
-            if (cachedDocs.isNotEmpty()) {
-                _documents.value = cachedDocs
-            }
-        }
+        val cachedFolders = persistedFoldersByFamily[famId]
+            ?.filterNot { it.id in LEGACY_PREDEFINED_FOLDER_IDS }
+            .orEmpty()
+        _folders.value = cachedFolders
+
+        val cachedDocs = persistedDocumentsByFamily[famId].orEmpty()
+        _documents.value = cachedDocs
+
         persistedDriveConfigByFamily[famId]?.let { cachedDrive ->
             _familyDriveConfig.value = cachedDrive
         }
@@ -4945,14 +4940,16 @@ class FamilyRepository(
                 ?.getString("selected_folder_$famId", null)
         }.getOrNull()
 
-        when {
-            fromPrefs == "__ROOT__" -> _selectedFolderId.value = null
-            !fromPrefs.isNullOrBlank() -> _selectedFolderId.value = fromPrefs
-            persistedSelectedFolderByFamily["$famId:hasExplicitRoot"] == "true" -> _selectedFolderId.value = null
+        val candidateFolderId = when {
+            fromPrefs == "__ROOT__" -> null
+            !fromPrefs.isNullOrBlank() && fromPrefs !in LEGACY_PREDEFINED_FOLDER_IDS -> fromPrefs
+            persistedSelectedFolderByFamily["$famId:hasExplicitRoot"] == "true" -> null
             persistedSelectedFolderByFamily.containsKey("$famId:selected") -> {
-                _selectedFolderId.value = persistedSelectedFolderByFamily["$famId:selected"]
+                persistedSelectedFolderByFamily["$famId:selected"]?.takeIf { it !in LEGACY_PREDEFINED_FOLDER_IDS }
             }
+            else -> null
         }
+        _selectedFolderId.value = candidateFolderId?.takeIf { id -> cachedFolders.any { it.id == id } }
     }
 
     /**
@@ -5725,6 +5722,118 @@ class FamilyRepository(
     }
 
     /**
+     * Safe, idempotent cleanup of legacy automatically generated default folders (`f_school`, `f_medical`, etc.):
+     * - Identifies ONLY folders known with certainty to have been automatically generated by the application.
+     * - Never identifies or deletes folders based solely on a folder name.
+     * - Never deletes the authoritative FamilyTasks shared root folder.
+     * - Never deletes manually created folders, even if they have similar names.
+     * - Never deletes any folder containing files or subfolders (in local state, Firestore, or Google Drive).
+     * - Confirms each candidate folder is empty in Google Drive before deleting it in Drive.
+     * - Removes corresponding Firestore metadata ONLY after successful Drive deletion.
+     * - If automatic folder identification or emptiness check is uncertain, leaves the folder untouched.
+     */
+    suspend fun cleanupEmptyAutoGeneratedDefaultFolders(
+        targetFamilyId: String = _activeFamilyId.value
+    ): Int {
+        val famId = targetFamilyId.trim().ifBlank { _activeFamilyId.value }
+        val rootDriveId = _familyDriveConfig.value.driveRootFolderId.trim()
+        val accountEmail = _googleUserEmail.value ?: _currentMember.value.googleEmail
+        val currentFolders = _folders.value
+        val currentDocs = _documents.value
+
+        var deletedCount = 0
+        for (candidate in currentFolders) {
+            // 1. Must be positively identified as an application auto-generated default folder (never by name alone)
+            val isAutoGenerated = GoogleDriveFamilyService.isKnownAutoGeneratedDefaultFolder(
+                folderId = candidate.id,
+                driveFolderId = candidate.driveFolderId,
+                driveRootFolderId = rootDriveId,
+                createdByUid = candidate.createdByUid
+            )
+            if (!isAutoGenerated) continue
+
+            // 2. Never delete the authoritative FamilyTasks root folder
+            if (rootDriveId.isNotBlank() &&
+                (candidate.id == rootDriveId || candidate.driveFolderId == rootDriveId)
+            ) {
+                continue
+            }
+
+            // 3. Do not delete if any files or subfolders exist inside it in memory/Firestore
+            val hasFiles = currentDocs.any { doc ->
+                doc.folderId == candidate.id ||
+                    (candidate.driveFolderId.isNotBlank() &&
+                        (doc.folderId == candidate.driveFolderId || doc.driveParentFolderId == candidate.driveFolderId))
+            }
+            if (hasFiles) continue
+
+            val hasSubfolders = currentFolders.any { sub ->
+                sub.id != candidate.id && (
+                    sub.parentFolderId == candidate.id ||
+                        (candidate.driveFolderId.isNotBlank() &&
+                            (sub.parentFolderId == candidate.driveFolderId || sub.driveParentFolderId == candidate.driveFolderId))
+                    )
+            }
+            if (hasSubfolders) continue
+
+            // 4. Confirm the folder is empty in Google Drive and delete it from Google Drive BEFORE removing Firestore metadata
+            if (candidate.driveFolderId.isNotBlank()) {
+                val emptyCheck = GoogleDriveFamilyService.isDriveFolderConfirmedEmpty(
+                    context = appContext,
+                    accountEmail = accountEmail,
+                    familyId = famId,
+                    driveRootFolderId = rootDriveId,
+                    driveFolderId = candidate.driveFolderId
+                )
+                if (emptyCheck.isFailure || emptyCheck.getOrDefault(false) != true) {
+                    // Uncertain or non-empty in Drive -> leave untouched
+                    continue
+                }
+                val driveDel = GoogleDriveFamilyService.deleteItemInDrive(
+                    context = appContext,
+                    accountEmail = accountEmail,
+                    driveItemId = candidate.driveFolderId
+                )
+                if (driveDel.isFailure) {
+                    // Drive deletion did not succeed -> do not remove Firestore metadata
+                    continue
+                }
+            }
+
+            // 5. Remove Firestore metadata only after Drive deletion succeeded
+            val db = firestoreProvider()
+            if (db != null && authProvider()?.currentUser != null && famId.isNotBlank()) {
+                val firestoreDel = runCatching {
+                    db.collection("families").document(famId)
+                        .collection("folders").document(candidate.id)
+                        .delete()
+                        .await()
+                }
+                if (firestoreDel.isFailure) {
+                    continue
+                }
+            }
+
+            _folders.value = _folders.value.filterNot { it.id == candidate.id }
+            persistedFoldersByFamily[famId] = _folders.value
+            if (_selectedFolderId.value == candidate.id) {
+                _selectedFolderId.value = null
+            }
+            deletedCount++
+        }
+        return deletedCount
+    }
+
+    /**
+     * Injects a folder into repository state for unit/Robolectric testing of safe cleanup behavior.
+     */
+    internal fun injectFolderForTest(folder: DocumentFolder) {
+        val famId = folder.familyId.ifBlank { _activeFamilyId.value }
+        _folders.value = (_folders.value.filterNot { it.id == folder.id } + folder)
+        persistedFoldersByFamily[famId] = _folders.value
+    }
+
+    /**
      * Starts a tracked, asynchronous, cancellable file upload into [folderId].
      * Never marks a file as uploaded or adds it to [documents] until cloud upload
      * and Firestore metadata persistence succeed.
@@ -5737,7 +5846,7 @@ class FamilyRepository(
         thumbnailBase64: String? = null,
         onComplete: ((Result<FamilyDocument>) -> Unit)? = null
     ): String {
-        val resolvedFolderId = folderId?.takeIf { it.isNotBlank() } ?: "f_school"
+        val resolvedFolderId = folderId?.trim().orEmpty()
         val sizeBytes = rawBytes.size.toLong().coerceAtLeast(1L)
         val validation = FamilyFileManagerHelper.validateUploadCandidate(
             rawFileName = rawFileName,

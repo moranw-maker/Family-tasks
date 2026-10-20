@@ -933,7 +933,6 @@ class FamilyViewModel(
             createdByName = currentMember.value.name
         )
         repository.addFolder(folder)
-        repository.selectFolder(folder.id)
         closeAddFolderDialog()
         _snackbarMessage.value = "תיקייה חדשה נוצרה בתיקיית FamilyTasks המשותפת 📁"
     }
@@ -966,9 +965,7 @@ class FamilyViewModel(
         thumbnailBase64: String? = null
     ): String {
         val targetFolder = folderId?.takeIf { it.isNotBlank() }
-            ?: selectedFolderId.value
-            ?: folders.value.firstOrNull()?.id
-            ?: "f_school"
+            ?: selectedFolderId.value.orEmpty()
         return repository.startFileUpload(
             folderId = targetFolder,
             rawFileName = fileName,
@@ -987,7 +984,7 @@ class FamilyViewModel(
     }
 
     fun simulateUploadFileToDrive(folderId: String, fileName: String, extension: String, sizeFormatted: String) {
-        val targetFolder = folderId.ifBlank { selectedFolderId.value ?: "f_school" }
+        val targetFolder = folderId.ifBlank { selectedFolderId.value.orEmpty() }
         val ext = com.example.files.FamilyFileManagerHelper.extractExtension(fileName, extension)
         val payloadBytes = when {
             ext == "PDF" -> com.example.files.FamilyFileManagerHelper.generateDocumentPdfBytes(
@@ -1035,7 +1032,11 @@ class FamilyViewModel(
 
     fun moveDocumentToFolder(documentId: String, targetFolderId: String) {
         if (repository.moveDocumentToFolder(documentId, targetFolderId)) {
-            val folderName = folders.value.find { it.id == targetFolderId }?.nameHe ?: "תיקייה"
+            val folderName = if (targetFolderId.isBlank()) {
+                "תיקיית FamilyTasks הראשית"
+            } else {
+                folders.value.find { it.id == targetFolderId }?.nameHe ?: "תיקייה"
+            }
             _snackbarMessage.value = "הקובץ הועבר אל \"$folderName\" ב-Google Drive ✓"
         }
     }
