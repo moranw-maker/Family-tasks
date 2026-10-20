@@ -440,6 +440,7 @@ service cloud.firestore {
       match /notification_dispatches/{dispatchId} {
         allow read, write: if false;
       }
+<<<<<<< HEAD
 
       // -----------------------------------------------------------------------
       // 2g. Shared Family Folders (/families/{familyId}/folders/{folderId})
@@ -521,6 +522,8 @@ service cloud.firestore {
           allow read, write: if false;
         }
       }
+=======
+>>>>>>> 320e60b23f369c15ccec4e8f269a67497376db6b
     }
 
     // =========================================================================
