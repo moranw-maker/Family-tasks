@@ -70,34 +70,7 @@ fun CalendarScreen(
     }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        floatingActionButton = {
-            // Role-aware interface: only PARENT users can create tasks
-            if (currentMember.isParent) {
-                ExtendedFloatingActionButton(
-                    onClick = onAddNewTask,
-                    shape = RoundedCornerShape(18.dp),
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 3.dp),
-                    modifier = Modifier
-                        .height(46.dp)
-                        .testTag("calendar_add_task_fab")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (isHebrew) "משימה לתאריך" else "Add Task",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp
-                    )
-                }
-            }
-        }
+        containerColor = MaterialTheme.colorScheme.background
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -257,7 +230,8 @@ fun CalendarScreen(
                             selectedTaskForSheet = clickedTask
                         },
                         onToggleTask = onToggleTask,
-                        onApproveTask = onApproveTask
+                        onApproveTask = onApproveTask,
+                        onAddNewTask = onAddNewTask
                     )
                 }
                 CalendarViewMode.WEEK -> {
@@ -273,7 +247,8 @@ fun CalendarScreen(
                         onDateSelect = onDateSelect,
                         onTaskClick = { selectedTaskForSheet = it },
                         onToggleTask = onToggleTask,
-                        onApproveTask = onApproveTask
+                        onApproveTask = onApproveTask,
+                        onAddNewTask = onAddNewTask
                     )
                 }
                 CalendarViewMode.DAY -> {
@@ -287,7 +262,8 @@ fun CalendarScreen(
                         taskSyncStates = taskSyncStates,
                         onTaskClick = { selectedTaskForSheet = it },
                         onToggleTask = onToggleTask,
-                        onApproveTask = onApproveTask
+                        onApproveTask = onApproveTask,
+                        onAddNewTask = onAddNewTask
                     )
                 }
             }
@@ -367,7 +343,8 @@ fun MonthCalendarView(
     onDateSelect: (LocalDate) -> Unit,
     onTaskClick: (FamilyTask) -> Unit,
     onToggleTask: (String) -> Unit,
-    onApproveTask: (String) -> Unit
+    onApproveTask: (String) -> Unit,
+    onAddNewTask: () -> Unit = {}
 ) {
     val daysOfWeekLabels = if (firstDayOfWeek == FirstDayOfWeek.SUNDAY) {
         if (isHebrew) listOf("א׳", "ב׳", "ג׳", "ד׳", "ה׳", "ו׳", "ש׳")
@@ -488,6 +465,7 @@ fun MonthCalendarView(
                 onTaskClick = onTaskClick,
                 onToggleTask = onToggleTask,
                 onApproveTask = onApproveTask,
+                onAddNewTask = onAddNewTask,
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
@@ -644,6 +622,7 @@ private fun SelectedDayAgendaSection(
     onTaskClick: (FamilyTask) -> Unit,
     onToggleTask: (String) -> Unit,
     onApproveTask: (String) -> Unit,
+    onAddNewTask: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val locale = if (isHebrew) Locale.forLanguageTag("he") else Locale.ENGLISH
@@ -674,21 +653,55 @@ private fun SelectedDayAgendaSection(
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
                 ),
-                modifier = Modifier.testTag("calendar_selected_date_header")
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("calendar_selected_date_header")
             )
 
-            Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text(
-                    text = if (isHebrew) "${tasks.size} משימות" else "${tasks.size} tasks",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.SemiBold
-                    ),
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                )
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant
+                ) {
+                    Text(
+                        text = if (isHebrew) "${tasks.size} משימות" else "${tasks.size} tasks",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.SemiBold
+                        ),
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+
+                if (currentMember.isParent) {
+                    Button(
+                        onClick = onAddNewTask,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier
+                            .height(32.dp)
+                            .testTag("calendar_add_task_fab")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (isHebrew) "משימה לתאריך" else "Add Task",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
             }
         }
 
@@ -947,7 +960,8 @@ fun WeekCalendarView(
     onDateSelect: (LocalDate) -> Unit,
     onTaskClick: (FamilyTask) -> Unit,
     onToggleTask: (String) -> Unit,
-    onApproveTask: (String) -> Unit
+    onApproveTask: (String) -> Unit,
+    onAddNewTask: () -> Unit = {}
 ) {
     val dayOffset = if (firstDayOfWeek == FirstDayOfWeek.SUNDAY) {
         selectedDate.dayOfWeek.value % 7
@@ -1022,6 +1036,7 @@ fun WeekCalendarView(
             onTaskClick = onTaskClick,
             onToggleTask = onToggleTask,
             onApproveTask = onApproveTask,
+            onAddNewTask = onAddNewTask,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
@@ -1040,7 +1055,8 @@ fun DayCalendarView(
     taskSyncStates: Map<String, TaskCompletionSyncState>,
     onTaskClick: (FamilyTask) -> Unit,
     onToggleTask: (String) -> Unit,
-    onApproveTask: (String) -> Unit
+    onApproveTask: (String) -> Unit,
+    onAddNewTask: () -> Unit = {}
 ) {
     val dayTasks = remember(tasks, selectedDate) {
         tasks.filter { it.dateEpochDay == selectedDate.toEpochDay() }
@@ -1070,13 +1086,47 @@ fun DayCalendarView(
             .fillMaxSize()
             .padding(horizontal = 14.dp, vertical = 8.dp)
     ) {
-        Text(
-            text = dayTitle,
-            style = MaterialTheme.typography.titleMedium.copy(
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = dayTitle,
+                style = MaterialTheme.typography.titleMedium.copy(
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                ),
+                modifier = Modifier.weight(1f)
             )
-        )
+
+            if (currentMember.isParent) {
+                Button(
+                    onClick = onAddNewTask,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier
+                        .height(32.dp)
+                        .testTag("calendar_add_task_fab")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = null,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (isHebrew) "משימה לתאריך" else "Add Task",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        }
 
         Spacer(modifier = Modifier.height(8.dp))
 

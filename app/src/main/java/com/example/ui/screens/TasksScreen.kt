@@ -343,7 +343,78 @@ fun TasksScreen(
                 }
             }
 
-            // 3. Role-Appropriate Action / Status Bar (PARENT can create tasks; CHILD views assigned tasks)
+            // 2b. Compact Horizontal Points Leader Row near the top of the Tasks screen
+            item {
+                Surface(
+                    onClick = onOpenRewards,
+                    shape = RoundedCornerShape(14.dp),
+                    color = PastelPurpleBackground,
+                    border = BorderStroke(1.dp, PastelPurpleBorder),
+                    tonalElevation = 1.dp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("achievement_champion_card")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Surface(
+                                shape = CircleShape,
+                                color = PastelPurpleBorder.copy(alpha = 0.5f),
+                                modifier = Modifier.size(30.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.WorkspacePremium,
+                                        contentDescription = null,
+                                        tint = PastelPurpleDark,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                            Text(
+                                text = if (isHebrew) "מוביל הנקודות:" else "Points Leader:",
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = PastelPurpleDark
+                                )
+                            )
+                            Text(
+                                text = "${topChampion.avatarEmoji} ${topChampion.name}",
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            )
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = PastelPurpleBorder.copy(alpha = 0.45f)
+                        ) {
+                            Text(
+                                text = "${topChampion.earnedPoints} ${if (isHebrew) "נק׳" else "pts"}",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    color = PastelPurpleDark,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 3. Role-Appropriate Action Header (PARENT can create tasks; CHILD views assigned tasks)
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -377,50 +448,6 @@ fun TasksScreen(
                                 fontSize = 13.sp,
                                 color = Color.White
                             )
-                        }
-                    }
-                }
-
-                if (!currentMember.isParent) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = PastelGreenBackground,
-                        border = BorderStroke(1.dp, PastelGreenBorder),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("child_role_info_banner")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.VerifiedUser,
-                                contentDescription = null,
-                                tint = PastelGreenDark,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Column {
-                                Text(
-                                    text = if (isHebrew)
-                                        "מחובר כילד/ה (${currentMember.name})"
-                                    else
-                                        "Signed in as Child (${currentMember.name})",
-                                    style = MaterialTheme.typography.labelMedium.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = PastelGreenDark
-                                    )
-                                )
-                                Text(
-                                    text = if (isHebrew)
-                                        "סמנו כבוצע את המשימות שמשויכות אליכם כדי לשלוח לאישור הורה ולצבור נקודות"
-                                    else
-                                        "Complete tasks assigned to you to submit for parent approval",
-                                    style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
-                                )
-                            }
                         }
                     }
                 }
@@ -680,61 +707,6 @@ fun TasksScreen(
                     )
                 }
             }
-
-            // 7. Compact Soft-Lavender Household Champion Card
-            item {
-                Surface(
-                    onClick = onOpenRewards,
-                    shape = RoundedCornerShape(18.dp),
-                    color = PastelPurpleBackground,
-                    border = BorderStroke(1.dp, PastelPurpleBorder),
-                    tonalElevation = 1.dp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("achievement_champion_card")
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column {
-                            Text(
-                                text = if (isHebrew) "מוביל הנקודות במשפחה" else "Household Points Leader",
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = PastelPurpleDark
-                                )
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "${topChampion.avatarEmoji} ${topChampion.name} • ${topChampion.earnedPoints} ${if (isHebrew) "נקודות" else "points"}",
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    color = TextSecondary,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            )
-                        }
-
-                        Surface(
-                            shape = CircleShape,
-                            color = PastelPurpleBorder.copy(alpha = 0.5f),
-                            modifier = Modifier.size(38.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Default.WorkspacePremium,
-                                    contentDescription = null,
-                                    tint = PastelPurpleDark,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -942,6 +914,19 @@ private fun TaskItemCardModern(
                             ),
                             modifier = Modifier.testTag(statusTag)
                         )
+
+                        if (task.recurrence.isRecurring) {
+                            Text(text = "•", color = TextSecondary, fontSize = 11.sp)
+                            Text(
+                                text = "🔁 ${task.recurrence.getDisplayName(isHebrew)}",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.SemiBold
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
 
                         if (assignedMember != null) {
                             Text(text = "•", color = TextSecondary, fontSize = 11.sp)

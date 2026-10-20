@@ -174,76 +174,81 @@ fun GoogleOnboardingScreen(
                     textAlign = TextAlign.Center
                 )
 
-                Spacer(modifier = Modifier.height(6.dp))
+                if (!isRestoringSessionOrProfile) {
+                    Spacer(modifier = Modifier.height(6.dp))
 
-                Text(
-                    text = if (isHebrew) {
-                        when {
-                            isRestoringSessionOrProfile -> "משחזר את החיבור והפרופיל המשפחתי שלך..."
-                            !isGoogleSignedIn -> "ניהול משימות, מערכת שעות ופרסים לכל המשפחה.\nהתחברו עם חשבון Google כדי ליצור משפחה או להצטרף עם קוד הזמנה."
-                            else -> "מחובר כעת בתור: ${authenticatedDisplayName.ifBlank { authenticatedEmail }}\nבחרו האם ליצור משפחה חדשה או להצטרף למשפחה קיימת."
-                        }
-                    } else {
-                        when {
-                            isRestoringSessionOrProfile -> "Restoring your session and family profile..."
-                            !isGoogleSignedIn -> "Sign in with Google to create a new family or join an existing family with an invitation code."
-                            else -> "Signed in as ${authenticatedDisplayName.ifBlank { authenticatedEmail }}.\nChoose whether to create a family or join with an invite code."
-                        }
-                    },
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        color = TextSecondary,
-                        lineHeight = 20.sp
-                    ),
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 8.dp)
-                )
+                    Text(
+                        text = if (isHebrew) {
+                            if (!isGoogleSignedIn) {
+                                "ניהול משימות, מערכת שעות ופרסים לכל המשפחה.\nהתחברו עם חשבון Google כדי ליצור משפחה או להצטרף עם קוד הזמנה."
+                            } else {
+                                "מחובר כעת בתור: ${authenticatedDisplayName.ifBlank { authenticatedEmail }}\nבחרו האם ליצור משפחה חדשה או להצטרף למשפחה קיימת."
+                            }
+                        } else {
+                            if (!isGoogleSignedIn) {
+                                "Sign in with Google to create a new family or join an existing family with an invitation code."
+                            } else {
+                                "Signed in as ${authenticatedDisplayName.ifBlank { authenticatedEmail }}.\nChoose whether to create a family or join with an invite code."
+                            }
+                        },
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            color = TextSecondary,
+                            lineHeight = 20.sp
+                        ),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 8.dp)
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
 
             // =========================================================================
             // STATE 1: Startup State Machine Loading (Auth / Profile / Family Membership)
+            // Elegant Material 3 horizontal LinearProgressIndicator (real progress when measurable,
+            // indeterminate otherwise, without unnecessary loading text).
             // =========================================================================
             if (isRestoringSessionOrProfile) {
-                val statusSubtitle = when (startupState) {
-                    is StartupState.LoadingAuthentication ->
-                        if (isHebrew) "מאמת חיבור קיים לחשבון Google..." else "Restoring Google authentication session..."
-                    is StartupState.LoadingUserProfile ->
-                        if (isHebrew) "טוען פרופיל אישי מ-Firestore..." else "Loading your persistent user profile..."
-                    is StartupState.LoadingFamilyMembership ->
-                        if (isHebrew) "טוען נתוני משפחה מ-Firestore..." else "Loading your family membership..."
-                    else ->
-                        if (isHebrew) "בודק חברות במשפחה ב-Firestore..." else "Checking family membership..."
+                val measurableProgress: Float? = when (startupState) {
+                    is StartupState.LoadingAuthentication -> 0.35f
+                    is StartupState.LoadingUserProfile -> 0.68f
+                    is StartupState.LoadingFamilyMembership -> 0.92f
+                    else -> null
                 }
 
-                Surface(
-                    shape = RoundedCornerShape(24.dp),
-                    color = Color.White,
-                    border = BorderStroke(1.dp, OutlineLight),
-                    shadowElevation = 4.dp,
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .testTag("checking_membership_card")
+                        .padding(horizontal = 16.dp, vertical = 24.dp)
+                        .testTag("checking_membership_card"),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(28.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
-                    ) {
-                        CircularProgressIndicator(
-                            color = VibrantActionBlue,
-                            modifier = Modifier.size(40.dp)
+                    if (measurableProgress != null) {
+                        val animatedProgress by androidx.compose.animation.core.animateFloatAsState(
+                            targetValue = measurableProgress,
+                            label = "startupProgress"
                         )
-                        Text(
-                            text = statusSubtitle,
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimary
-                            ),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.testTag("startup_loading_status_text")
+                        LinearProgressIndicator(
+                            progress = { animatedProgress },
+                            color = VibrantActionBlue,
+                            trackColor = VibrantActionBlue.copy(alpha = 0.16f),
+                            strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
+                            modifier = Modifier
+                                .fillMaxWidth(0.82f)
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                                .testTag("startup_linear_progress")
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            color = VibrantActionBlue,
+                            trackColor = VibrantActionBlue.copy(alpha = 0.16f),
+                            strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
+                            modifier = Modifier
+                                .fillMaxWidth(0.82f)
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                                .testTag("startup_linear_progress")
                         )
                     }
                 }

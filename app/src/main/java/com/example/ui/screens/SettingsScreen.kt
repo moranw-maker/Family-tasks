@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -185,6 +186,48 @@ fun SettingsScreen(
                             text = if (isHebrew) "פתח לוח ניהול משפחה והזמנות" else "Open Family & Invitations Dashboard",
                             fontWeight = FontWeight.Bold
                         )
+                    }
+                } else {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = PastelGreenBackground,
+                        border = BorderStroke(1.dp, PastelGreenBorder),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("child_role_info_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.VerifiedUser,
+                                contentDescription = null,
+                                tint = PastelGreenDark,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = if (isHebrew)
+                                        "מחובר כילד/ה (${currentMember.name})"
+                                    else
+                                        "Signed in as Child (${currentMember.name})",
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = PastelGreenDark
+                                    )
+                                )
+                                Text(
+                                    text = if (isHebrew)
+                                        "משויך למשפחת $familyName • סמנו משימות כבוצע לשליחה לאישור הורה וצבירת נקודות"
+                                    else
+                                        "Connected to $familyName • Complete tasks to submit for parent approval",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
+                                )
+                            }
+                        }
                     }
                 }
             }

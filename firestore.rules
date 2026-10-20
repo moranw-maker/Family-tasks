@@ -434,6 +434,14 @@ service cloud.firestore {
       }
 
       // -----------------------------------------------------------------------
+      // 2e-2. Family Alarm Clock (/families/{familyId}/alarms/{alarmId})
+      // -----------------------------------------------------------------------
+      match /alarms/{alarmId} {
+        allow get, list: if isFamilyMember(familyId);
+        allow create, update, delete: if isFamilyMember(familyId);
+      }
+
+      // -----------------------------------------------------------------------
       // 2f. Server-Side Notification Dispatches (/families/{familyId}/notification_dispatches/{dispatchId})
       // Managed exclusively by Firebase Cloud Functions (Admin SDK) for idempotency.
       // -----------------------------------------------------------------------

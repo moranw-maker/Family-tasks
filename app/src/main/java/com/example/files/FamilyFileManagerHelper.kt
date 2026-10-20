@@ -725,23 +725,85 @@ object FamilyFileManagerHelper {
     }
 
     /**
-     * Generates a compact JPEG thumbnail Base64 string so image thumbnails render immediately
-     * in Grid and List views across all family devices.
+     * Generates a high-clarity JPEG preview Base64 string (EXIF-rotated, up to 720px on longest edge)
+     * so image thumbnails and full-screen previews render immediately and crisply across all family devices,
+     * while staying comfortably under Firestore document limits.
      */
-    fun createCompactThumbnailBase64(imageBytes: ByteArray, maxDimension: Int = 180): String? {
+    fun createCompactThumbnailBase64(imageBytes: ByteArray, maxDimension: Int = 720): String? {
         return runCatching {
-            val decoded = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size) ?: return null
+            val decoded = decodeImageBitmapWithCorrectOrientation(imageBytes, maxDimension = maxDimension)
+                ?: return null
+            val out = ByteArrayOutputStream()
+            decoded.compress(Bitmap.CompressFormat.JPEG, 70, out)
+            val encoded = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+            if (encoded.length <= 280_000) {
+                encoded
+            } else {
+                val smaller = decodeImageBitmapWithCorrectOrientation(imageBytes, maxDimension = 480)
+                    ?: decoded
+                val smallOut = ByteArrayOutputStream()
+                smaller.compress(Bitmap.CompressFormat.JPEG, 62, smallOut)
+                Base64.encodeToString(smallOut.toByteArray(), Base64.NO_WRAP)
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * Decodes raw image bytes (JPG, PNG, WEBP) into a [Bitmap] while preserving EXIF orientation
+     * and aspect ratio.
+     */
+    fun decodeImageBitmapWithCorrectOrientation(
+        imageBytes: ByteArray,
+        maxDimension: Int = 2048
+    ): Bitmap? {
+        if (imageBytes.isEmpty()) return null
+        return runCatching {
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, boundsOpts)
+            var sampleSize = 1
+            while (
+                boundsOpts.outWidth > 0 && boundsOpts.outHeight > 0 &&
+                (boundsOpts.outWidth / sampleSize > maxDimension || boundsOpts.outHeight / sampleSize > maxDimension)
+            ) {
+                sampleSize *= 2
+            }
+            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            val rawBitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, decodeOpts)
+                ?: return null
+
+            val orientation = runCatching {
+                android.media.ExifInterface(java.io.ByteArrayInputStream(imageBytes)).getAttributeInt(
+                    android.media.ExifInterface.TAG_ORIENTATION,
+                    android.media.ExifInterface.ORIENTATION_NORMAL
+                )
+            }.getOrDefault(android.media.ExifInterface.ORIENTATION_NORMAL)
+
+            val matrix = android.graphics.Matrix()
+            when (orientation) {
+                android.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                android.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                android.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                android.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
+                android.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
+            }
+            val upright = if (!matrix.isIdentity) {
+                Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
+            } else {
+                rawBitmap
+            }
+
             val ratio = minOf(
-                maxDimension.toFloat() / decoded.width.coerceAtLeast(1),
-                maxDimension.toFloat() / decoded.height.coerceAtLeast(1),
+                maxDimension.toFloat() / upright.width.coerceAtLeast(1),
+                maxDimension.toFloat() / upright.height.coerceAtLeast(1),
                 1f
             )
-            val targetW = (decoded.width * ratio).toInt().coerceAtLeast(1)
-            val targetH = (decoded.height * ratio).toInt().coerceAtLeast(1)
-            val scaled = Bitmap.createScaledBitmap(decoded, targetW, targetH, true)
-            val out = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 70, out)
-            Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+            if (ratio < 1f) {
+                val targetW = (upright.width * ratio).toInt().coerceAtLeast(1)
+                val targetH = (upright.height * ratio).toInt().coerceAtLeast(1)
+                Bitmap.createScaledBitmap(upright, targetW, targetH, true)
+            } else {
+                upright
+            }
         }.getOrNull()
     }
 
@@ -898,7 +960,8 @@ object FamilyFileManagerHelper {
 
     /**
      * Ensures a valid local cache file exists for [doc] (either already downloaded/cached, or materialized
-     * from [downloadedBytes] or a valid document representation) and returns its secure `FileProvider` [Uri].
+     * from [downloadedBytes] or shared preview) and returns its secure `FileProvider` [Uri].
+     * Never writes a fake sample card for real images onto the local cache file.
      */
     fun ensureCachedFileAndGetSecureUri(
         context: Context,
@@ -926,11 +989,7 @@ object FamilyFileManagerHelper {
                     val fromThumb = doc.thumbnailBase64?.takeIf { it.isNotBlank() }?.let {
                         runCatching { Base64.decode(it, Base64.DEFAULT) }.getOrNull()
                     }
-                    if (fromThumb != null && fromThumb.isNotEmpty()) {
-                        fromThumb
-                    } else {
-                        generateSampleImageBytes(doc.name, doc.uploadedByName.ifBlank { "תמונה משפחתית" })
-                    }
+                    fromThumb ?: ByteArray(0)
                 }
                 else -> {
                     val textContent = buildString {
@@ -947,7 +1006,9 @@ object FamilyFileManagerHelper {
                     textContent.toByteArray(Charsets.UTF_8)
                 }
             }
-            FileOutputStream(targetFile).use { it.write(fallbackBytes) }
+            if (fallbackBytes.isNotEmpty()) {
+                FileOutputStream(targetFile).use { it.write(fallbackBytes) }
+            }
         }
 
         val authority = "${context.packageName}.fileprovider"

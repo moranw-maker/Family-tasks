@@ -1049,10 +1049,15 @@ object GoogleDriveFamilyService {
         fileBytes: ByteArray,
         callerUid: String,
         callerName: String,
+        context: Context? = null,
+        accountEmail: String? = null,
         simulatedStepDelayMs: Long = 0L,
         onProgress: (Float) -> Unit
     ): Result<FamilyDocument> {
         currentCoroutineContext().ensureActive()
+        if (context != null && !hasActiveAccessToken() && !accountEmail.isNullOrBlank()) {
+            requestDriveAuthorization(context, accountEmail)
+        }
         onProgress(0.15f)
         if (simulatedStepDelayMs > 0L) delay(simulatedStepDelayMs)
 
@@ -1241,11 +1246,16 @@ object GoogleDriveFamilyService {
      * Downloads the binary contents of a file directly from Google Drive.
      */
     suspend fun downloadFileBytesFromDrive(
-        driveFileId: String
+        driveFileId: String,
+        context: Context? = null,
+        accountEmail: String? = null
     ): Result<ByteArray> {
         val cleanId = driveFileId.trim()
         if (cleanId.isBlank()) {
             return Result.failure(IllegalArgumentException("מזהה הקובץ ב-Google Drive חסר."))
+        }
+        if (context != null && !hasActiveAccessToken() && !accountEmail.isNullOrBlank()) {
+            requestDriveAuthorization(context, accountEmail)
         }
         if (simulatedUnauthorizedDriveIds.contains(cleanId) && !pickerAuthorizedDriveIds.contains(cleanId)) {
             return Result.failure(

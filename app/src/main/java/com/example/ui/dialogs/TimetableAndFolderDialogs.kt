@@ -100,6 +100,90 @@ fun AddPeriodDialog(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
+                Text(
+                    text = if (isHebrew) "יום לימודים:" else "School Day:",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    SchoolDay.values().forEach { day ->
+                        val isSelected = day == selectedDay
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(horizontal = 2.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { selectedDay = day }
+                        ) {
+                            Box(
+                                modifier = Modifier.padding(vertical = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = if (isHebrew) day.shortHe else day.getDisplayName(false).take(3),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) androidx.compose.ui.graphics.Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = if (isHebrew) "שעה במערכת (1-7):" else "Period Number (1-7):",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    (1..7).forEach { idx ->
+                        val isSelected = idx == periodIndex
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(horizontal = 2.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    periodIndex = idx
+                                    val defaultStartMin = 8 * 60 + (idx - 1) * 50
+                                    val defaultEndMin = defaultStartMin + 45
+                                    startTime = "%02d:%02d".format(defaultStartMin / 60, defaultStartMin % 60)
+                                    endTime = "%02d:%02d".format(defaultEndMin / 60, defaultEndMin % 60)
+                                }
+                        ) {
+                            Box(
+                                modifier = Modifier.padding(vertical = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "$idx",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) androidx.compose.ui.graphics.Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),

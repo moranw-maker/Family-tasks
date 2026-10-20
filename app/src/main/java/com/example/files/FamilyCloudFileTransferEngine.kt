@@ -1,6 +1,7 @@
 package com.example.files
 
 import android.content.Context
+import android.util.Base64
 import com.example.model.DocumentFolder
 import com.example.model.FamilyDocument
 import com.example.model.FamilyDriveConfig
@@ -8,9 +9,11 @@ import com.example.model.GOOGLE_DRIVE_ROOT_FOLDER_NAME
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -218,6 +221,7 @@ object FamilyCloudFileTransferEngine {
         val storagePath = (data["storagePath"] as? String)?.trim().orEmpty()
         val contentPreviewHe = (data["contentPreviewHe"] as? String).orEmpty()
         val contentPreviewEn = (data["contentPreviewEn"] as? String).orEmpty()
+        val thumbnailBase64 = (data["thumbnailBase64"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
 
         return FamilyDocument(
             id = docId,
@@ -240,7 +244,7 @@ object FamilyCloudFileTransferEngine {
             mimeType = mimeType,
             storagePath = storagePath,
             uploadedAtMillis = uploadedAtMillis,
-            thumbnailBase64 = null,
+            thumbnailBase64 = thumbnailBase64,
             chunkCount = 0,
             driveFileId = driveFileId,
             driveParentFolderId = driveParentFolderId
@@ -248,8 +252,8 @@ object FamilyCloudFileTransferEngine {
     }
 
     /**
-     * Builds the non-binary Firestore index payload for a Google Drive file.
-     * Never writes Base64 image blobs or binary chunks to Firestore.
+     * Builds the Firestore index payload for a Google Drive file, including `driveFileId`, `mimeType`,
+     * and optional `thumbnailBase64` preview so cross-account family members can preview shared images.
      */
     fun buildFileFirestoreMap(
         doc: FamilyDocument,
@@ -273,12 +277,12 @@ object FamilyCloudFileTransferEngine {
             LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"))
         }
 
-        return mapOf(
+        val map = mutableMapOf<String, Any?>(
             "id" to doc.id,
             "driveFileId" to driveFileId,
             "driveParentFolderId" to doc.driveParentFolderId.ifBlank { doc.folderId },
             "familyId" to familyId,
-            "folderId" to doc.folderId.ifBlank { "f_school" },
+            "folderId" to doc.folderId,
             "name" to safeName,
             "extension" to ext,
             "mimeType" to doc.mimeType.ifBlank { FamilyDocument.defaultMimeTypeForExtension(ext) },
@@ -296,17 +300,18 @@ object FamilyCloudFileTransferEngine {
             "driveUrl" to webViewLink,
             "storagePath" to storagePath
         )
+        val thumb = doc.thumbnailBase64?.trim()
+        if (!thumb.isNullOrEmpty() && thumb.length <= 350_000) {
+            map["thumbnailBase64"] = thumb
+        }
+        return map
     }
 
     /**
-     * Uploads [fileBytes] exclusively to the family's shared `FamilyTasks` folder in Google Drive
-     * and records non-binary index metadata in `/families/{familyId}/files/{doc.id}`.
-     *
-     * Reliability invariants:
-     * - Reports progress via [onProgress] (`0.0f..1.0f`).
-     * - Never writes Firestore metadata until the Google Drive upload succeeds.
-     * - If cancelled or if metadata persistence fails, deletes the partially uploaded Google Drive file.
-     * - Never uses Firebase Cloud Storage or Firestore binary chunks.
+     * Uploads [fileBytes] to the family's shared `FamilyTasks` folder in Google Drive
+     * using the uploader's authorized Google account ([context] + [callerEmail]), and records
+     * metadata (including the real `driveFileId` and EXIF-corrected `thumbnailBase64` preview for images)
+     * in `/families/{familyId}/files/{doc.id}`.
      */
     suspend fun uploadBinaryAndPersistMetadata(
         context: Context?,
@@ -334,6 +339,7 @@ object FamilyCloudFileTransferEngine {
             onProgress(0.10f)
 
             // 1. Upload actual binary bytes to Google Drive inside the shared FamilyTasks folder
+            // CRITICAL: Pass context and callerEmail so the real Google Drive REST API is invoked!
             val effectiveRootId = rootDriveFolderId.trim()
                 .ifBlank { driveRootFolderId.trim() }
                 .ifBlank { GoogleDriveFamilyService.getRegisteredRootFolderIdForFamily(familyId).orEmpty() }
@@ -352,14 +358,25 @@ object FamilyCloudFileTransferEngine {
                 fileBytes = fileBytes,
                 callerUid = callerUid,
                 callerName = callerName,
+                context = context,
+                accountEmail = callerEmail,
                 simulatedStepDelayMs = simulatedStepDelayMs,
                 onProgress = onProgress
             )
             val driveDoc = driveUploadRes.getOrThrow()
             uploadedDriveFileId = driveDoc.driveFileId
 
-            // 2. Write temporary local cache file for instant preview / FileProvider opening
+            // 2. Ensure a high-clarity EXIF-oriented preview is generated for JPG/PNG/WEBP images
             currentCoroutineContext().ensureActive()
+            val extUpper = FamilyFileManagerHelper.extractExtension(doc.name, doc.extension)
+            val resolvedThumbnail = doc.thumbnailBase64?.takeIf { it.isNotBlank() }
+                ?: driveDoc.thumbnailBase64?.takeIf { it.isNotBlank() }
+                ?: if (extUpper in setOf("JPG", "JPEG", "PNG", "WEBP") && fileBytes.isNotEmpty()) {
+                    FamilyFileManagerHelper.createCompactThumbnailBase64(fileBytes, maxDimension = 720)
+                } else {
+                    null
+                }
+
             val preparedDoc = doc.copy(
                 id = doc.id,
                 familyId = familyId,
@@ -373,13 +390,14 @@ object FamilyCloudFileTransferEngine {
                 driveFileUrl = driveDoc.driveFileUrl,
                 webViewLink = driveDoc.driveUrl,
                 isDriveSynced = true,
+                thumbnailBase64 = resolvedThumbnail,
                 chunkCount = 0
             )
             if (context != null && fileBytes.isNotEmpty()) {
                 FamilyFileManagerHelper.writeBytesToCachedFile(context, preparedDoc, fileBytes)
             }
 
-            // 3. Commit non-binary index metadata to /families/{familyId}/files/{fileId}
+            // 3. Commit index metadata to /families/{familyId}/files/{fileId}
             currentCoroutineContext().ensureActive()
             if (db != null && familyId.isNotBlank()) {
                 val payload = buildFileFirestoreMap(
@@ -399,12 +417,22 @@ object FamilyCloudFileTransferEngine {
             Result.success(preparedDoc)
         } catch (ce: CancellationException) {
             if (!uploadedDriveFileId.isNullOrBlank()) {
-                GoogleDriveFamilyService.deleteItemInDrive(uploadedDriveFileId)
+                GoogleDriveFamilyService.deleteItemInDrive(
+                    driveItemId = uploadedDriveFileId,
+                    context = context,
+                    accountEmail = callerEmail
+                )
             }
             throw ce
         } catch (e: Exception) {
             if (!uploadedDriveFileId.isNullOrBlank()) {
-                runCatching { GoogleDriveFamilyService.deleteItemInDrive(uploadedDriveFileId) }
+                runCatching {
+                    GoogleDriveFamilyService.deleteItemInDrive(
+                        driveItemId = uploadedDriveFileId,
+                        context = context,
+                        accountEmail = callerEmail
+                    )
+                }
             }
             Result.failure(e)
         }
@@ -416,7 +444,7 @@ object FamilyCloudFileTransferEngine {
     ) {
         val driveId = doc.driveFileId.ifBlank { doc.id }
         runCatching {
-            GoogleDriveFamilyService.deleteItemInDrive(driveId)
+            GoogleDriveFamilyService.deleteItemInDrive(driveId, context = context)
         }
         if (context != null) {
             runCatching {
@@ -446,8 +474,9 @@ object FamilyCloudFileTransferEngine {
     }
 
     /**
-     * Downloads the binary bytes for [doc] from Google Drive (or returns from temporary local cache)
-     * so any family member (PARENT or CHILD) can open, preview, edit, download, or share the file.
+     * Downloads the binary bytes for [doc] from Google Drive using the current viewer's authorized
+     * Google account ([context] + [callerEmail]), or returns from local cache / shared preview
+     * so every authorized family member (PARENT or CHILD) can view, download, open, or share the file.
      */
     suspend fun fetchDocumentBytes(
         context: Context?,
@@ -455,27 +484,81 @@ object FamilyCloudFileTransferEngine {
         familyId: String,
         doc: FamilyDocument,
         callerEmail: String? = null
-    ): ByteArray? {
-        // 1. Check temporary local cache first
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        // 1. Check temporary local cache first (only if non-empty)
         if (context != null) {
             val cachedFile = FamilyFileManagerHelper.getCachedFileForDocument(context, doc)
             if (cachedFile.exists() && cachedFile.length() > 0L) {
-                return runCatching { cachedFile.readBytes() }.getOrNull()
+                val cachedBytes = runCatching { cachedFile.readBytes() }.getOrNull()
+                if (cachedBytes != null && cachedBytes.isNotEmpty()) {
+                    return@withContext cachedBytes
+                }
             }
         }
 
-        // 2. Download directly from Google Drive
-        val driveFileId = doc.driveFileId.ifBlank { doc.id }
-        val fromDrive = GoogleDriveFamilyService.downloadFileBytesFromDrive(driveFileId).getOrNull()
+        // 2. Download directly from Google Drive using the viewer's authorized Google account!
+        // Also extract the Drive file ID from driveUrl if driveFileId was stored as a doc_ key in older uploads.
+        val extractedUrlDriveId = extractDriveIdFromUrl(doc.driveUrl)
+            ?: extractDriveIdFromUrl(doc.driveFileUrl)
+            ?: extractDriveIdFromUrl(doc.webViewLink)
+        val driveFileId = when {
+            doc.driveFileId.isNotBlank() && !doc.driveFileId.startsWith("doc_") -> doc.driveFileId.trim()
+            !extractedUrlDriveId.isNullOrBlank() -> extractedUrlDriveId
+            doc.driveFileId.isNotBlank() -> doc.driveFileId.trim()
+            else -> doc.id
+        }
+
+        val fromDrive = GoogleDriveFamilyService.downloadFileBytesFromDrive(
+            driveFileId = driveFileId,
+            context = context,
+            accountEmail = callerEmail
+        ).getOrNull()
+
         if (fromDrive != null && fromDrive.isNotEmpty()) {
             if (context != null) {
                 runCatching {
                     FamilyFileManagerHelper.writeBytesToCachedFile(context, doc, fromDrive)
                 }
             }
-            return fromDrive
+            return@withContext fromDrive
         }
 
-        return null
+        // 3. If the file is an image and has a shared preview in Firestore (`thumbnailBase64`),
+        // decode and cache those JPEG bytes so cross-device family members see the actual image
+        // immediately even if `drive.file` per-file consent was created by the other member.
+        if (doc.isImageFile) {
+            val b64 = doc.thumbnailBase64?.takeIf { it.isNotBlank() } ?: run {
+                // Also check live Firestore doc in case thumbnailBase64 was present there
+                if (db != null && familyId.isNotBlank() && doc.id.isNotBlank()) {
+                    runCatching {
+                        val snap = db.collection("families").document(familyId)
+                            .collection("files").document(doc.id)
+                            .get()
+                            .await()
+                        snap.getString("thumbnailBase64")?.takeIf { it.isNotBlank() }
+                    }.getOrNull()
+                } else null
+            }
+            if (!b64.isNullOrBlank()) {
+                val thumbBytes = runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
+                if (thumbBytes != null && thumbBytes.isNotEmpty()) {
+                    if (context != null) {
+                        runCatching {
+                            FamilyFileManagerHelper.writeBytesToCachedFile(context, doc, thumbBytes)
+                        }
+                    }
+                    return@withContext thumbBytes
+                }
+            }
+        }
+
+        null
+    }
+
+    private fun extractDriveIdFromUrl(url: String): String? {
+        if (url.isBlank()) return null
+        val match = Regex("/d/([a-zA-Z0-9_-]{10,})").find(url)
+            ?: Regex("[?&]id=([a-zA-Z0-9_-]{10,})").find(url)
+        return match?.groupValues?.getOrNull(1)
     }
 }

@@ -1,5 +1,6 @@
 package com.example.model
 
+import java.time.LocalDate
 import java.util.UUID
 
 enum class AppScreen {
@@ -439,9 +440,37 @@ enum class TaskRecurrence(val labelHe: String, val labelEn: String) {
     ONCE("חד-פעמי", "One-time"),
     DAILY("יומי", "Daily"),
     WEEKLY("שבועי", "Weekly"),
+    BIWEEKLY("דו-שבועי", "Bi-weekly"),
+    MONTHLY("חודשי", "Monthly"),
     SCHOOL_DAYS("ימי לימודים (א׳-ו׳)", "School Days");
 
     fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
+
+    val isRecurring: Boolean
+        get() = this != ONCE
+
+    /**
+     * Computes the next scheduled epoch day for this recurrence rule after [currentEpochDay].
+     * Returns `null` for [ONCE].
+     */
+    fun nextOccurrenceEpochDay(currentEpochDay: Long): Long? {
+        val currentDate = LocalDate.ofEpochDay(currentEpochDay)
+        val nextDate = when (this) {
+            ONCE -> null
+            DAILY -> currentDate.plusDays(1)
+            WEEKLY -> currentDate.plusWeeks(1)
+            BIWEEKLY -> currentDate.plusWeeks(2)
+            MONTHLY -> currentDate.plusMonths(1)
+            SCHOOL_DAYS -> {
+                var candidate = currentDate.plusDays(1)
+                while (candidate.dayOfWeek == java.time.DayOfWeek.SATURDAY) {
+                    candidate = candidate.plusDays(1)
+                }
+                candidate
+            }
+        }
+        return nextDate?.toEpochDay()
+    }
 }
 
 enum class TaskCategory(val labelHe: String, val labelEn: String, val emoji: String) {
@@ -565,7 +594,11 @@ data class SchedulePeriod(
     val endTime: String,
     val colorHex: Long = 0xFF1A73E8,
     val tenMinuteAlertEnabled: Boolean = true,
-    val isAlertEnabled: Boolean = tenMinuteAlertEnabled
+    val isAlertEnabled: Boolean = tenMinuteAlertEnabled,
+    val subjectNameEn: String = subjectName,
+    val iconEmoji: String = "📚",
+    val reminderMinutesBefore: Int = 10,
+    val equipmentNotes: String = ""
 )
 
 enum class FileSortOption(val labelHe: String, val labelEn: String) {
@@ -733,6 +766,9 @@ data class FamilyDocument(
     val isPdfFile: Boolean
         get() = extension.uppercase() == "PDF"
 
+    val isTextFile: Boolean
+        get() = extension.uppercase() == "TXT"
+
     val isOfficeOrArchiveFile: Boolean
         get() = extension.uppercase() in setOf("DOC", "DOCX", "XLS", "XLSX", "PPT", "PPTX", "TXT", "ZIP")
 
@@ -829,3 +865,57 @@ data class CloudFamilyGroup(
     val lastSyncedEpochMillis: Long = System.currentTimeMillis(),
     val syncedMembersCount: Int = 4
 )
+
+/**
+ * Shared family wake-up / school / reminder alarm clock entry.
+ * Supports personal alarms and parent-created alarms for children with real local Android
+ * AlarmManager scheduling, device acknowledgement, custom audio, vibration, snooze, and volume.
+ */
+data class FamilyAlarm(
+    val id: String = "alarm_${UUID.randomUUID().toString().take(8)}",
+    val familyId: String = "",
+    val title: String,
+    val hour: Int,
+    val minute: Int,
+    val assignedMemberId: String = "",
+    val assignedMemberName: String = "",
+    val daysOfWeek: List<SchoolDay> = listOf(
+        SchoolDay.SUNDAY,
+        SchoolDay.MONDAY,
+        SchoolDay.TUESDAY,
+        SchoolDay.WEDNESDAY,
+        SchoolDay.THURSDAY,
+        SchoolDay.FRIDAY
+    ),
+    val isEnabled: Boolean = true,
+    val ringtoneEmoji: String = "⏰",
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val createdByMemberId: String = "",
+    val createdByMemberName: String = "",
+    val isPersonal: Boolean = false,
+    val soundType: String = "SYSTEM_ALARM", // SYSTEM_ALARM, SYSTEM_NOTIFICATION, SYSTEM_RINGTONE, CUSTOM_URI
+    val customSoundUri: String = "",
+    val customSoundTitle: String = "",
+    val vibrateEnabled: Boolean = true,
+    val snoozeDurationMinutes: Int = 5,
+    val volumePercent: Int = 85,
+    val scheduleStatus: String = "SCHEDULED_LOCALLY", // SCHEDULED_LOCALLY, PENDING_TARGET_DEVICE, EXACT_PERMISSION_NEEDED, DISABLED
+    val acknowledgedByMemberId: String = "",
+    val acknowledgedByDeviceName: String = "",
+    val acknowledgedAtMillis: Long = 0L,
+    val nextTriggerAtMillis: Long = 0L
+) {
+    val timeFormatted: String
+        get() = String.format(java.util.Locale.US, "%02d:%02d", hour.coerceIn(0, 23), minute.coerceIn(0, 59))
+
+    val formattedTime24h: String
+        get() = timeFormatted
+
+    val isConfirmedOnTargetDevice: Boolean
+        get() = isEnabled && (
+            scheduleStatus == "SCHEDULED_LOCALLY" &&
+                (assignedMemberId.isBlank() || acknowledgedByMemberId == assignedMemberId || isPersonal)
+        )
+}
+
+

@@ -35,6 +35,7 @@ class FamilyViewModel(
     val rewards: StateFlow<List<RewardItem>> = repository.rewards
     val localRoomTasksFlow: Flow<List<Task>> = repository.localRoomTasksFlow
     val schedulePeriods: StateFlow<List<SchedulePeriod>> = repository.schedulePeriods
+    val familyAlarms: StateFlow<List<FamilyAlarm>> = repository.familyAlarms
     val folders: StateFlow<List<DocumentFolder>> = repository.folders
     val documents: StateFlow<List<FamilyDocument>> = repository.documents
     val notifications: StateFlow<List<FamilyNotificationAlert>> = repository.notifications
@@ -849,6 +850,24 @@ class FamilyViewModel(
 
     fun testTenMinuteAlert(period: SchedulePeriod, childName: String) {
         repository.triggerTenMinuteClassAlertPreview(period, childName)
+    }
+
+    // --- Family Alarm Clock Operations ---
+
+    fun saveFamilyAlarm(alarm: FamilyAlarm) {
+        if (repository.addOrUpdateFamilyAlarm(alarm)) {
+            _snackbarMessage.value = "שעון מעורר משפחתי נשמר (${alarm.formattedTime24h}) ⏰"
+        }
+    }
+
+    fun toggleFamilyAlarm(alarmId: String) {
+        repository.toggleFamilyAlarm(alarmId)
+    }
+
+    fun deleteFamilyAlarm(alarmId: String) {
+        if (repository.deleteFamilyAlarm(alarmId)) {
+            _snackbarMessage.value = "השעון המעורר הוסר"
+        }
     }
 
     // --- Shared Family Folders & Files Operations (Google Drive FamilyTasks) ---

@@ -331,6 +331,43 @@ fun AddTaskDialog(
                     }
                 }
 
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Recurrence Selection (One-time, Daily, School Days, Weekly, Bi-weekly, Monthly)
+                Text(
+                    text = if (isHebrew) "תדירות משימה חוזרת 🔁:" else "Recurrence 🔁:",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("task_recurrence_selector")
+                ) {
+                    items(TaskRecurrence.values()) { rec ->
+                        val isSelected = rec == selectedRecurrence
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { selectedRecurrence = rec }
+                                .testTag("task_recurrence_chip_${rec.name}")
+                        ) {
+                            Text(
+                                text = rec.getDisplayName(isHebrew),
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                                ),
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+                            )
+                        }
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(20.dp))
 
                 // Submit Button

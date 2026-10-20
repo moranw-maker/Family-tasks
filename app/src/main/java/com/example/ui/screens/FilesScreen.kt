@@ -973,9 +973,12 @@ fun FilesScreen(
                 fileToRename = target
             },
             onDelete = {
-                val target = file
+                val targetId = file.id
                 previewFile = null
-                fileToDeleteConfirm = target
+                onDeleteFile(targetId)
+            },
+            onRequestDriveAccess = {
+                onRequestSharedFolderPicker()
             },
             onShowToast = onShowToast
         )
@@ -1427,8 +1430,7 @@ private fun EmptyFilesWorkspaceView(
         Text(
             text = when {
                 isSearchActive -> if (isHebrew) "לא נמצאו תוצאות חיפוש" else "No matching files or folders"
-                isSubfolder -> if (isHebrew) "התיקייה \"${folderName.orEmpty()}\" ריקה" else "Folder \"${folderName.orEmpty()}\" is empty"
-                else -> if (isHebrew) "מנהל הקבצים המשפחתי ריק" else "Family File Manager is Empty"
+                else -> if (isHebrew) "עדיין אין כאן קבצים או תיקיות" else "No files or folders here yet"
             },
             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
             textAlign = TextAlign.Center
@@ -1441,9 +1443,9 @@ private fun EmptyFilesWorkspaceView(
                 if (isHebrew) "נסו לחפש מילה אחרת או נקו את תיבת החיפוש." else "Try a different search term."
             } else {
                 if (isHebrew) {
-                    "לחצו על כפתור ה-+ כדי לצלם תמונה (JPG), לסרוק מסמך (PDF), להעלות קובץ או ליצור תיקייה חדשה."
+                    "לחצו על + כדי להוסיף קובץ או ליצור תיקייה."
                 } else {
-                    "Tap the + button to take a photo (JPG), scan a document (PDF), upload a file, or create a new folder."
+                    "Tap + to add a file or create a folder."
                 }
             },
             style = MaterialTheme.typography.bodyMedium,

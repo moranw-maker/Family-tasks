@@ -1170,9 +1170,107 @@ class ExampleRobolectricTest {
             repository.folders.value.any { it.id == manualSameNameFolder.id }
         )
     }
+
+    @Test
+    fun `test family alarm clock local scheduling target device acknowledgement snooze and bounded thumbnails`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = FamilyRepository(context = context)
+
+        // 1. Parent creates an alarm assigned to Child ("m_kid1"):
+        //    While Parent ("m_dad") is the active profile on this device, the alarm is NOT claimed as scheduled
+        //    on the child's device until the child's device actually receives and registers it locally!
+        val parentMember = repository.members.value.first { it.id == "m_dad" }
+        val childMember = repository.members.value.first { it.id == "m_kid1" }
+        repository.switchCurrentMember(parentMember)
+
+        val parentCreatedChildAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_for_kid1_morning",
+            title = "השכמה לבית ספר",
+            hour = 7,
+            minute = 15,
+            daysOfWeek = com.example.model.SchoolDay.entries.toList(), // Sunday - Friday
+            assignedMemberId = childMember.id,
+            assignedMemberName = childMember.name,
+            isEnabled = true,
+            createdByMemberId = parentMember.id,
+            createdByMemberName = parentMember.name,
+            soundType = "CUSTOM_URI",
+            customSoundUri = "content://media/internal/audio/media/42",
+            customSoundTitle = "ציפורים בבוקר.mp3",
+            vibrateEnabled = true,
+            snoozeDurationMinutes = 10,
+            volumePercent = 90
+        )
+        assertTrue(repository.addOrUpdateFamilyAlarm(parentCreatedChildAlarm))
+
+        val savedOnParentDevice = repository.familyAlarms.value.first { it.id == "alarm_for_kid1_morning" }
+        assertFalse(
+            "Parent-created alarm for child must NOT claim remote device scheduling before child device acknowledges it",
+            savedOnParentDevice.isConfirmedOnTargetDevice
+        )
+        assertEquals(
+            "PENDING_TARGET_DEVICE",
+            savedOnParentDevice.scheduleStatus
+        )
+        assertEquals("CUSTOM_URI", savedOnParentDevice.soundType)
+        assertEquals("ציפורים בבוקר.mp3", savedOnParentDevice.customSoundTitle)
+        assertEquals(10, savedOnParentDevice.snoozeDurationMinutes)
+        assertEquals(90, savedOnParentDevice.volumePercent)
+
+        // 2. When Child's device syncs/activates as m_kid1, FamilyAlarmScheduler registers the alarm locally
+        //    with Android AlarmManager and updates status to SCHEDULED_LOCALLY (or EXACT_PERMISSION_NEEDED).
+        val shouldScheduleForChild = com.example.notifications.FamilyAlarmScheduler.shouldScheduleOnDevice(
+            alarm = savedOnParentDevice,
+            currentMemberId = childMember.id
+        )
+        assertTrue("Child device must recognize alarm assigned to childMember", shouldScheduleForChild)
+
+        val syncResults = com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
+            context = context,
+            alarms = repository.familyAlarms.value,
+            currentMemberId = childMember.id
+        )
+        val localScheduleResult = syncResults[savedOnParentDevice.id]
+        assertNotNull("Child device sync must schedule the assigned alarm", localScheduleResult)
+        assertTrue(
+            "Local scheduling on child device must produce SCHEDULED_LOCALLY or EXACT_PERMISSION_NEEDED",
+            localScheduleResult!!.statusCode == "SCHEDULED_LOCALLY" ||
+                localScheduleResult.statusCode == "EXACT_PERMISSION_NEEDED"
+        )
+        assertTrue("Next trigger timestamp must be in the future", localScheduleResult.nextTriggerAtMillis > System.currentTimeMillis())
+
+        // Verify persisted for boot restoration
+        val restoredCount = com.example.notifications.FamilyAlarmScheduler.restoreAlarmsOnBoot(context)
+        assertTrue("Boot restoration must restore at least 1 persisted local alarm", restoredCount >= 1)
+
+        // Verify snooze scheduling
+        val snoozeTriggerAt = com.example.notifications.FamilyAlarmScheduler.scheduleSnoozeAlarm(
+            context = context,
+            alarmId = savedOnParentDevice.id,
+            title = savedOnParentDevice.title,
+            soundType = savedOnParentDevice.soundType,
+            customSoundUri = savedOnParentDevice.customSoundUri,
+            vibrateEnabled = savedOnParentDevice.vibrateEnabled,
+            snoozeMinutes = savedOnParentDevice.snoozeDurationMinutes,
+            volumePercent = savedOnParentDevice.volumePercent
+        )
+        assertTrue(snoozeTriggerAt > System.currentTimeMillis() + 9 * 60_000L)
+
+        // Cancel local alarm
+        com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(context, savedOnParentDevice.id)
+
+        // 3. Verify Friday is supported in SchoolDay for the 6-day Israeli school week (Sunday-Friday)
+        assertEquals(6, com.example.model.SchoolDay.entries.size)
+        assertTrue(com.example.model.SchoolDay.entries.contains(com.example.model.SchoolDay.FRIDAY))
+
+        // 4. Verify bounded Firestore thumbnail respects Firestore document size limits (< 150KB Base64)
+        val sampleImgBytes = com.example.files.FamilyFileManagerHelper.generateSampleImageBytes("תמונה_משפחתית.jpg", "אבא")
+        val boundedThumbnail = com.example.files.FamilyFileManagerHelper.createCompactThumbnailBase64(sampleImgBytes)
+        assertNotNull(boundedThumbnail)
+        assertTrue(
+            "Firestore thumbnailBase64 must remain strictly bounded well below Firestore 1MB limit",
+            boundedThumbnail!!.length < 180_000
+        )
+    }
 }
-
-
-
-
 

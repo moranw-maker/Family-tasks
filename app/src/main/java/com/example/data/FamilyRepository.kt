@@ -528,6 +528,49 @@ class FamilyRepository(
     )
     val schedulePeriods: StateFlow<List<SchedulePeriod>> = _schedulePeriods.asStateFlow()
 
+    // 7b. Shared Family Alarm Clocks (Wake-up, School Departure, Reminders)
+    private val _familyAlarms = MutableStateFlow(
+        listOf(
+            FamilyAlarm(
+                id = "alarm_wakeup",
+                title = "השכמה לבית הספר",
+                hour = 6,
+                minute = 45,
+                assignedMemberId = "",
+                assignedMemberName = "כל המשפחה",
+                daysOfWeek = listOf(
+                    SchoolDay.SUNDAY,
+                    SchoolDay.MONDAY,
+                    SchoolDay.TUESDAY,
+                    SchoolDay.WEDNESDAY,
+                    SchoolDay.THURSDAY,
+                    SchoolDay.FRIDAY
+                ),
+                isEnabled = true,
+                ringtoneEmoji = "⏰"
+            ),
+            FamilyAlarm(
+                id = "alarm_school_bus",
+                title = "יציאה להסעה / לבית הספר",
+                hour = 7,
+                minute = 30,
+                assignedMemberId = "",
+                assignedMemberName = "כל המשפחה",
+                daysOfWeek = listOf(
+                    SchoolDay.SUNDAY,
+                    SchoolDay.MONDAY,
+                    SchoolDay.TUESDAY,
+                    SchoolDay.WEDNESDAY,
+                    SchoolDay.THURSDAY,
+                    SchoolDay.FRIDAY
+                ),
+                isEnabled = true,
+                ringtoneEmoji = "🎒"
+            )
+        )
+    )
+    val familyAlarms: StateFlow<List<FamilyAlarm>> = _familyAlarms.asStateFlow()
+
     // 8. Google Drive Shared Family Folders & Documents (starts empty with no predefined folders or sample files)
     private val _folders = MutableStateFlow<List<DocumentFolder>>(emptyList())
     val folders: StateFlow<List<DocumentFolder>> = _folders.asStateFlow()
@@ -3391,6 +3434,138 @@ class FamilyRepository(
                     }
                 }
         }
+
+        // 7. Real-time School Timetable Listener (/families/{familyId}/schedule)
+        runCatching {
+            familyRef.collection("schedule")
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null || snapshot == null) return@addSnapshotListener
+                    val remotePeriods = snapshot.documents.mapNotNull { doc ->
+                        val subjectName = doc.getString("subjectName") ?: return@mapNotNull null
+                        val childId = doc.getString("childId").orEmpty()
+                        val dayStr = doc.getString("day") ?: SchoolDay.SUNDAY.name
+                        val day = runCatching { SchoolDay.valueOf(dayStr) }.getOrDefault(SchoolDay.SUNDAY)
+                        val periodIndex = (doc.getLong("periodIndex") ?: 1L).toInt().coerceIn(1, 10)
+                        val startTime = doc.getString("startTime") ?: "08:00"
+                        val endTime = doc.getString("endTime") ?: "08:45"
+                        val roomNumber = doc.getString("roomNumber").orEmpty()
+                        val teacherName = doc.getString("teacherName").orEmpty()
+                        val colorHex = doc.getLong("colorHex") ?: 0xFF1A73E8L
+                        val iconEmoji = doc.getString("iconEmoji") ?: "📚"
+                        val reminderMins = (doc.getLong("reminderMinutesBefore") ?: 10L).toInt()
+                        val isAlertEnabled = doc.getBoolean("isAlertEnabled") ?: true
+                        val equipmentNotes = doc.getString("equipmentNotes").orEmpty()
+                        SchedulePeriod(
+                            id = doc.id,
+                            childId = childId,
+                            day = day,
+                            periodIndex = periodIndex,
+                            subjectName = subjectName,
+                            subjectNameEn = doc.getString("subjectNameEn") ?: subjectName,
+                            roomNumber = roomNumber,
+                            teacherName = teacherName,
+                            startTime = startTime,
+                            endTime = endTime,
+                            colorHex = colorHex,
+                            iconEmoji = iconEmoji,
+                            reminderMinutesBefore = reminderMins,
+                            isAlertEnabled = isAlertEnabled,
+                            equipmentNotes = equipmentNotes
+                        )
+                    }.sortedWith(compareBy({ it.day.index }, { it.periodIndex }))
+                    if (remotePeriods.isNotEmpty() || _isGoogleSignedIn.value) {
+                        _schedulePeriods.value = remotePeriods
+                    }
+                }
+        }
+
+        // 8. Real-time Shared Family Alarms Listener (/families/{familyId}/alarms)
+        runCatching {
+            familyRef.collection("alarms")
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null || snapshot == null) return@addSnapshotListener
+                    val currentMemberId = _currentMember.value.id
+                    val deviceModelLabel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
+                    val remoteAlarms = snapshot.documents.mapNotNull { doc ->
+                        val title = doc.getString("title") ?: return@mapNotNull null
+                        val hour = (doc.getLong("hour") ?: 7L).toInt().coerceIn(0, 23)
+                        val minute = (doc.getLong("minute") ?: 0L).toInt().coerceIn(0, 59)
+                        val assignedMemberId = doc.getString("assignedMemberId").orEmpty()
+                        val assignedMemberName = doc.getString("assignedMemberName").orEmpty()
+                        val rawDays = (doc.get("daysOfWeek") as? List<*>)?.mapNotNull { d ->
+                            (d as? String)?.let { runCatching { SchoolDay.valueOf(it) }.getOrNull() }
+                        } ?: SchoolDay.entries
+                        val isEnabled = doc.getBoolean("isEnabled") ?: true
+                        val emoji = doc.getString("ringtoneEmoji") ?: "⏰"
+                        FamilyAlarm(
+                            id = doc.id,
+                            familyId = familyId,
+                            title = title,
+                            hour = hour,
+                            minute = minute,
+                            assignedMemberId = assignedMemberId,
+                            assignedMemberName = assignedMemberName,
+                            daysOfWeek = rawDays,
+                            isEnabled = isEnabled,
+                            ringtoneEmoji = emoji,
+                            createdAtMillis = doc.getLong("createdAtMillis") ?: 0L,
+                            createdByMemberId = doc.getString("createdByMemberId").orEmpty(),
+                            createdByMemberName = doc.getString("createdByMemberName").orEmpty(),
+                            isPersonal = doc.getBoolean("isPersonal") ?: false,
+                            soundType = doc.getString("soundType") ?: "SYSTEM_ALARM",
+                            customSoundUri = doc.getString("customSoundUri").orEmpty(),
+                            customSoundTitle = doc.getString("customSoundTitle").orEmpty(),
+                            vibrateEnabled = doc.getBoolean("vibrateEnabled") ?: true,
+                            snoozeDurationMinutes = (doc.getLong("snoozeDurationMinutes") ?: 5L).toInt().coerceIn(1, 60),
+                            volumePercent = (doc.getLong("volumePercent") ?: 85L).toInt().coerceIn(10, 100),
+                            scheduleStatus = doc.getString("scheduleStatus") ?: if (isEnabled) "SCHEDULED_LOCALLY" else "DISABLED",
+                            acknowledgedByMemberId = doc.getString("acknowledgedByMemberId").orEmpty(),
+                            acknowledgedByDeviceName = doc.getString("acknowledgedByDeviceName").orEmpty(),
+                            acknowledgedAtMillis = doc.getLong("acknowledgedAtMillis") ?: 0L,
+                            nextTriggerAtMillis = doc.getLong("nextTriggerAtMillis") ?: 0L
+                        )
+                    }.sortedWith(compareBy({ it.hour }, { it.minute }))
+
+                    val ctx = appContext
+                    val syncedAlarms = if (ctx != null) {
+                        val localResults = com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
+                            context = ctx,
+                            alarms = remoteAlarms,
+                            currentMemberId = currentMemberId
+                        )
+                        remoteAlarms.map { alarm ->
+                            val localRes = localResults[alarm.id]
+                            if (localRes != null && localRes.isScheduled) {
+                                val needsAckWrite = alarm.scheduleStatus != localRes.statusCode ||
+                                    (alarm.assignedMemberId.isNotBlank() && alarm.acknowledgedByMemberId != currentMemberId)
+                                val updatedAlarm = alarm.copy(
+                                    scheduleStatus = localRes.statusCode,
+                                    acknowledgedByMemberId = currentMemberId.ifBlank { alarm.acknowledgedByMemberId },
+                                    acknowledgedByDeviceName = deviceModelLabel,
+                                    acknowledgedAtMillis = if (alarm.acknowledgedAtMillis > 0L && !needsAckWrite) {
+                                        alarm.acknowledgedAtMillis
+                                    } else {
+                                        System.currentTimeMillis()
+                                    },
+                                    nextTriggerAtMillis = localRes.nextTriggerAtMillis
+                                )
+                                if (needsAckWrite) {
+                                    acknowledgeAlarmOnTargetDeviceInFirestore(familyId, updatedAlarm)
+                                }
+                                updatedAlarm
+                            } else {
+                                alarm
+                            }
+                        }
+                    } else {
+                        remoteAlarms
+                    }
+
+                    if (syncedAlarms.isNotEmpty() || _isGoogleSignedIn.value) {
+                        _familyAlarms.value = syncedAlarms
+                    }
+                }
+        }
     }
 
     fun detachFirestoreListeners() {
@@ -4414,6 +4589,10 @@ class FamilyRepository(
         _taskSyncStates.value = _taskSyncStates.value + (taskId to finalSyncState)
         _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
 
+        if (updatedTask.isCompleted && updatedTask.approvedByParent && !previousTask.isCompleted) {
+            spawnNextRecurringOccurrenceIfNeeded(updatedTask)
+        }
+
         repoScope.launch {
             runCatching {
                 taskDao?.upsertTask(updatedTask.toCoreTask(resolvedFamilyId))
@@ -4422,6 +4601,34 @@ class FamilyRepository(
 
         emitTaskCompletionNotificationIfNeeded(updatedTask, isParentApprovalEvent = false)
         return Result.success(updatedTask)
+    }
+
+    /**
+     * When a recurring task ([TaskRecurrence.isRecurring]) is completed and approved, automatically
+     * generates and persists the next occurrence for its next scheduled date if one does not already exist.
+     */
+    private fun spawnNextRecurringOccurrenceIfNeeded(completedTask: FamilyTask) {
+        if (!completedTask.recurrence.isRecurring) return
+        val nextEpochDay = completedTask.recurrence.nextOccurrenceEpochDay(completedTask.dateEpochDay) ?: return
+        val alreadyExists = _tasks.value.any { existing ->
+            !existing.isCompleted &&
+                existing.title == completedTask.title &&
+                existing.assignedToMemberId == completedTask.assignedToMemberId &&
+                existing.dateEpochDay == nextEpochDay
+        }
+        if (alreadyExists) return
+
+        val nextTask = completedTask.copy(
+            id = "t_${UUID.randomUUID().toString().take(8)}",
+            dateEpochDay = nextEpochDay,
+            isCompleted = false,
+            approvedByParent = false,
+            completedAtMillis = null,
+            completedByMemberId = null,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _tasks.value = listOf(nextTask) + _tasks.value
+        pushTaskToFirestoreOrQueue(nextTask, isDelete = false)
     }
 
     fun toggleTaskCompletion(taskId: String): Boolean {
@@ -4567,6 +4774,9 @@ class FamilyRepository(
                 }
                 _taskSyncStates.value = _taskSyncStates.value + (taskId to finalSyncState)
                 _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
+                if (updatedTask.isCompleted && updatedTask.approvedByParent && !previousTask.isCompleted) {
+                    spawnNextRecurringOccurrenceIfNeeded(updatedTask)
+                }
                 runCatching {
                     taskDao?.upsertTask(updatedTask.toCoreTask(resolvedFamilyId))
                 }
@@ -4733,6 +4943,9 @@ class FamilyRepository(
 
         _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVED_APPROVED)
         _tasks.value = _tasks.value.map { if (it.id == taskId) approvedTask else it }
+        if (!wasAlreadyApproved) {
+            spawnNextRecurringOccurrenceIfNeeded(approvedTask)
+        }
         emitTaskCompletionNotificationIfNeeded(approvedTask, isParentApprovalEvent = true)
         return Result.success(approvedTask)
     }
@@ -4847,12 +5060,13 @@ class FamilyRepository(
         return true
     }
 
-    // --- School Timetable Operations (PARENT only for mutations) ---
+    // --- School Timetable Operations (PARENT only for mutations, synced to Firestore /families/{familyId}/schedule) ---
 
     fun addSchedulePeriod(period: SchedulePeriod): Boolean {
         if (!_currentMember.value.isParent) return false
         _schedulePeriods.value = (_schedulePeriods.value + period)
             .sortedWith(compareBy({ it.day.index }, { it.periodIndex }))
+        persistSchedulePeriodInFirestore(period, isDelete = false)
         return true
     }
 
@@ -4861,24 +5075,230 @@ class FamilyRepository(
         _schedulePeriods.value = _schedulePeriods.value.map {
             if (it.id == period.id) period else it
         }.sortedWith(compareBy({ it.day.index }, { it.periodIndex }))
+        persistSchedulePeriodInFirestore(period, isDelete = false)
         return true
     }
 
     fun deleteSchedulePeriod(periodId: String): Boolean {
         if (!_currentMember.value.isParent) return false
+        val target = _schedulePeriods.value.find { it.id == periodId }
         _schedulePeriods.value = _schedulePeriods.value.filterNot { it.id == periodId }
+        if (target != null) {
+            persistSchedulePeriodInFirestore(target, isDelete = true)
+        }
         return true
+    }
+
+    private fun persistSchedulePeriodInFirestore(period: SchedulePeriod, isDelete: Boolean) {
+        val db = firestoreProvider() ?: return
+        val authUser = authProvider()?.currentUser ?: return
+        val familyId = _activeFamilyId.value.takeIf { it.isNotBlank() } ?: return
+        repoScope.launch {
+            runCatching {
+                val docRef = db.collection("families").document(familyId)
+                    .collection("schedule").document(period.id)
+                if (isDelete) {
+                    docRef.delete().await()
+                } else {
+                    val map = mapOf(
+                        "id" to period.id,
+                        "familyId" to familyId,
+                        "childId" to period.childId,
+                        "day" to period.day.name,
+                        "periodIndex" to period.periodIndex,
+                        "startTime" to period.startTime,
+                        "endTime" to period.endTime,
+                        "subjectName" to period.subjectName,
+                        "subjectNameEn" to period.subjectNameEn,
+                        "roomNumber" to period.roomNumber,
+                        "teacherName" to period.teacherName,
+                        "colorHex" to period.colorHex,
+                        "iconEmoji" to period.iconEmoji,
+                        "reminderMinutesBefore" to period.reminderMinutesBefore,
+                        "isAlertEnabled" to period.isAlertEnabled,
+                        "equipmentNotes" to period.equipmentNotes,
+                        "updatedByUid" to authUser.uid,
+                        "updatedAt" to System.currentTimeMillis()
+                    )
+                    docRef.set(map, SetOptions.merge()).await()
+                }
+            }
+        }
     }
 
     fun triggerTenMinuteClassAlertPreview(period: SchedulePeriod, childName: String) {
         val child = _members.value.find { it.id == period.childId }
         pushAlert(
-            title = "התראת שיעור בעוד 10 דקות! 🔔",
+            title = "התראת שיעור בעוד ${period.reminderMinutesBefore} דקות! 🔔",
             message = "$childName: השיעור \"${period.subjectName}\" מתחיל ב-${period.startTime} (${period.roomNumber})",
             targetName = childName,
             targetEmoji = child?.avatarEmoji ?: "🎒",
             reason = AlertReason.UPCOMING_CLASS
         )
+    }
+
+    // --- Shared Family Alarm Clock Operations (/families/{familyId}/alarms) ---
+
+    fun addOrUpdateFamilyAlarm(alarm: FamilyAlarm): Boolean {
+        val current = _currentMember.value
+        val deviceModelLabel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
+        val isTargetedToAnotherMember = alarm.assignedMemberId.isNotBlank() && alarm.assignedMemberId != current.id
+
+        val scheduledAlarm = when {
+            !alarm.isEnabled -> {
+                appContext?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, alarm.id) }
+                alarm.copy(
+                    familyId = _activeFamilyId.value,
+                    hour = alarm.hour.coerceIn(0, 23),
+                    minute = alarm.minute.coerceIn(0, 59),
+                    scheduleStatus = "DISABLED",
+                    nextTriggerAtMillis = 0L
+                )
+            }
+            isTargetedToAnotherMember -> {
+                // Created/updated by parent for a child's device: do NOT claim local scheduling succeeded on child's device yet!
+                appContext?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, alarm.id) }
+                alarm.copy(
+                    familyId = _activeFamilyId.value,
+                    hour = alarm.hour.coerceIn(0, 23),
+                    minute = alarm.minute.coerceIn(0, 59),
+                    createdByMemberId = alarm.createdByMemberId.ifBlank { current.id },
+                    createdByMemberName = alarm.createdByMemberName.ifBlank { current.name },
+                    scheduleStatus = "PENDING_TARGET_DEVICE",
+                    acknowledgedByMemberId = "",
+                    acknowledgedByDeviceName = "",
+                    acknowledgedAtMillis = 0L,
+                    nextTriggerAtMillis = com.example.notifications.FamilyAlarmScheduler.computeNextTriggerAtMillis(alarm)
+                )
+            }
+            else -> {
+                // Personal alarm or alarm assigned to the current device's member (or whole family)
+                val localRes = appContext?.let {
+                    com.example.notifications.FamilyAlarmScheduler.scheduleLocalAlarm(it, alarm)
+                }
+                val nextTrigger = localRes?.nextTriggerAtMillis
+                    ?: com.example.notifications.FamilyAlarmScheduler.computeNextTriggerAtMillis(alarm)
+                val status = localRes?.statusCode ?: "SCHEDULED_LOCALLY"
+                alarm.copy(
+                    familyId = _activeFamilyId.value,
+                    hour = alarm.hour.coerceIn(0, 23),
+                    minute = alarm.minute.coerceIn(0, 59),
+                    createdByMemberId = alarm.createdByMemberId.ifBlank { current.id },
+                    createdByMemberName = alarm.createdByMemberName.ifBlank { current.name },
+                    scheduleStatus = status,
+                    acknowledgedByMemberId = current.id,
+                    acknowledgedByDeviceName = deviceModelLabel,
+                    acknowledgedAtMillis = System.currentTimeMillis(),
+                    nextTriggerAtMillis = nextTrigger
+                )
+            }
+        }
+
+        val existingIdx = _familyAlarms.value.indexOfFirst { it.id == scheduledAlarm.id }
+        _familyAlarms.value = if (existingIdx >= 0) {
+            _familyAlarms.value.map { if (it.id == scheduledAlarm.id) scheduledAlarm else it }
+        } else {
+            (_familyAlarms.value + scheduledAlarm)
+        }.sortedWith(compareBy({ it.hour }, { it.minute }))
+
+        appContext?.let {
+            com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
+                context = it,
+                alarms = _familyAlarms.value,
+                currentMemberId = current.id
+            )
+        }
+        persistFamilyAlarmInFirestore(scheduledAlarm, isDelete = false)
+        return true
+    }
+
+    fun toggleFamilyAlarm(alarmId: String): Boolean {
+        val target = _familyAlarms.value.find { it.id == alarmId } ?: return false
+        return addOrUpdateFamilyAlarm(target.copy(isEnabled = !target.isEnabled))
+    }
+
+    fun deleteFamilyAlarm(alarmId: String): Boolean {
+        val target = _familyAlarms.value.find { it.id == alarmId } ?: return false
+        appContext?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, alarmId) }
+        _familyAlarms.value = _familyAlarms.value.filterNot { it.id == alarmId }
+        appContext?.let {
+            com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
+                context = it,
+                alarms = _familyAlarms.value,
+                currentMemberId = _currentMember.value.id
+            )
+        }
+        persistFamilyAlarmInFirestore(target, isDelete = true)
+        return true
+    }
+
+    private fun acknowledgeAlarmOnTargetDeviceInFirestore(familyId: String, alarm: FamilyAlarm) {
+        val db = firestoreProvider() ?: return
+        val authUser = authProvider()?.currentUser ?: return
+        if (familyId.isBlank()) return
+        repoScope.launch {
+            runCatching {
+                db.collection("families").document(familyId)
+                    .collection("alarms").document(alarm.id)
+                    .update(
+                        mapOf(
+                            "scheduleStatus" to alarm.scheduleStatus,
+                            "acknowledgedByMemberId" to alarm.acknowledgedByMemberId,
+                            "acknowledgedByDeviceName" to alarm.acknowledgedByDeviceName,
+                            "acknowledgedAtMillis" to alarm.acknowledgedAtMillis,
+                            "nextTriggerAtMillis" to alarm.nextTriggerAtMillis,
+                            "updatedByUid" to authUser.uid,
+                            "updatedAt" to System.currentTimeMillis()
+                        )
+                    ).await()
+            }
+        }
+    }
+
+    private fun persistFamilyAlarmInFirestore(alarm: FamilyAlarm, isDelete: Boolean) {
+        val db = firestoreProvider() ?: return
+        val authUser = authProvider()?.currentUser ?: return
+        val familyId = _activeFamilyId.value.takeIf { it.isNotBlank() } ?: return
+        repoScope.launch {
+            runCatching {
+                val docRef = db.collection("families").document(familyId)
+                    .collection("alarms").document(alarm.id)
+                if (isDelete) {
+                    docRef.delete().await()
+                } else {
+                    val map = mapOf(
+                        "id" to alarm.id,
+                        "familyId" to familyId,
+                        "title" to alarm.title,
+                        "hour" to alarm.hour,
+                        "minute" to alarm.minute,
+                        "assignedMemberId" to alarm.assignedMemberId,
+                        "assignedMemberName" to alarm.assignedMemberName,
+                        "daysOfWeek" to alarm.daysOfWeek.map { it.name },
+                        "isEnabled" to alarm.isEnabled,
+                        "ringtoneEmoji" to alarm.ringtoneEmoji,
+                        "createdAtMillis" to alarm.createdAtMillis,
+                        "createdByMemberId" to alarm.createdByMemberId,
+                        "createdByMemberName" to alarm.createdByMemberName,
+                        "isPersonal" to alarm.isPersonal,
+                        "soundType" to alarm.soundType,
+                        "customSoundUri" to alarm.customSoundUri,
+                        "customSoundTitle" to alarm.customSoundTitle,
+                        "vibrateEnabled" to alarm.vibrateEnabled,
+                        "snoozeDurationMinutes" to alarm.snoozeDurationMinutes,
+                        "volumePercent" to alarm.volumePercent,
+                        "scheduleStatus" to alarm.scheduleStatus,
+                        "acknowledgedByMemberId" to alarm.acknowledgedByMemberId,
+                        "acknowledgedByDeviceName" to alarm.acknowledgedByDeviceName,
+                        "acknowledgedAtMillis" to alarm.acknowledgedAtMillis,
+                        "nextTriggerAtMillis" to alarm.nextTriggerAtMillis,
+                        "updatedByUid" to authUser.uid,
+                        "updatedAt" to System.currentTimeMillis()
+                    )
+                    docRef.set(map, SetOptions.merge()).await()
+                }
+            }
+        }
     }
 
     // --- Shared Family Folders & Files Manager (V1.0.0) ---

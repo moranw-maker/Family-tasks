@@ -59,6 +59,7 @@ fun FamilyTasksApp(
     val currentMember by viewModel.currentMember.collectAsStateWithLifecycle()
     val tasks by viewModel.tasks.collectAsStateWithLifecycle()
     val schedulePeriods by viewModel.schedulePeriods.collectAsStateWithLifecycle()
+    val familyAlarms by viewModel.familyAlarms.collectAsStateWithLifecycle()
     val folders by viewModel.folders.collectAsStateWithLifecycle()
     val documents by viewModel.documents.collectAsStateWithLifecycle()
     val notifications by viewModel.notifications.collectAsStateWithLifecycle()
@@ -329,6 +330,7 @@ fun FamilyTasksApp(
                                             currentMember = currentMember,
                                             timetableViewMode = timetableViewMode,
                                             isHebrew = isHebrew,
+                                            familyAlarms = familyAlarms,
                                             onSelectChild = { viewModel.selectChildForTimetable(it) },
                                             onViewModeChange = { viewModel.setTimetableViewMode(it) },
                                             onAddPeriod = { viewModel.openAddPeriodDialog(null) },
@@ -336,7 +338,11 @@ fun FamilyTasksApp(
                                             onDeletePeriod = { viewModel.deleteSchedulePeriod(it) },
                                             onTestAlert = { period, childName ->
                                                 viewModel.testTenMinuteAlert(period, childName)
-                                            }
+                                            },
+                                            onSaveAlarm = { viewModel.saveFamilyAlarm(it) },
+                                            onToggleAlarm = { viewModel.toggleFamilyAlarm(it) },
+                                            onDeleteAlarm = { viewModel.deleteFamilyAlarm(it) },
+                                            onShowToast = { viewModel.showToastMessage(it) }
                                         )
                                     }
 
@@ -689,6 +695,9 @@ fun FamilyTasksApp(
                         FilePreviewDialog(
                             file = doc,
                             isHebrew = isHebrew,
+                            fileBytesProvider = { docToFetch ->
+                                viewModel.fetchDocumentBytes(docToFetch)
+                            },
                             onDismiss = { fileToPreview = null },
                             onRename = {
                                 fileToPreview = null
@@ -736,7 +745,6 @@ private fun FamilyBottomNavBar(
         if (isParent) {
             add(NavBarItem(AppScreen.ADMIN_DASHBOARD, if (isHebrew) "משפחה" else "Family", Icons.Filled.AdminPanelSettings, Icons.Outlined.AdminPanelSettings, "nav_admin"))
         }
-        add(NavBarItem(AppScreen.SETTINGS, if (isHebrew) "הגדרות" else "Settings", Icons.Filled.Settings, Icons.Outlined.Settings, "nav_settings"))
     }
 
     Surface(
