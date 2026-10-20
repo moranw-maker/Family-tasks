@@ -2155,7 +2155,6 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         assertEquals("Only phone token should remain after tablet logout", listOf(phoneToken), remainingTokens)
     }
 
-<<<<<<< HEAD
     @Test
     fun testV100_sharedFamilyFileManager_googleDriveRootSetupEqualParentChildPermissionsNoFirestoreChunksAndCrossFamilyIsolation() = runBlocking {
         val ts = System.currentTimeMillis()
@@ -2467,8 +2466,6 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         assertTrue("Stranger from another family must be denied deleting Family A files", strangerDeleteFamilyAFile.isFailure)
     }
 
-=======
->>>>>>> 320e60b23f369c15ccec4e8f269a67497376db6b
     private val activeRepos = mutableListOf<FamilyRepository>()
 
     private fun repo(): FamilyRepository {

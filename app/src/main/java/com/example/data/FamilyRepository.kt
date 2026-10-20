@@ -2633,11 +2633,7 @@ class FamilyRepository(
                     }
                     Pair(roleValue, txIdentity)
                 }.await().let { (committedRoleValue, committedIdentity) ->
-<<<<<<< HEAD
                     // 4. Save user's active familyId, validated role, familyIdentity, and verified Google email
-=======
-                    // 4. Save user's active familyId, validated role, and familyIdentity now that memberRef is committed
->>>>>>> 320e60b23f369c15ccec4e8f269a67497376db6b
                     val userDocData = mutableMapOf<String, Any>(
                         "uid" to uid,
                         "email" to email,

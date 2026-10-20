@@ -38,7 +38,6 @@
             android:name="com.google.firebase.messaging.default_notification_icon"
             android:resource="@drawable/ic_notification" />
 
-<<<<<<< HEAD
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -49,8 +48,6 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-=======
->>>>>>> 320e60b23f369c15ccec4e8f269a67497376db6b
         <service
             android:name=".notifications.FamilyMessagingService"
             android:exported="false">

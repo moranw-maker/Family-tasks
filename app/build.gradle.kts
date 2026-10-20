@@ -134,15 +134,10 @@ dependencies {
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
   // Firestore cloud data synchronization & Firebase Cloud Messaging (FCM)
-<<<<<<< HEAD
   // Note: Actual family files and folders are stored exclusively in Google Drive (FamilyTasks folder).
   implementation(libs.firebase.firestore)
   implementation(libs.firebase.messaging)
   // implementation(libs.firebase.storage)
-=======
-  implementation(libs.firebase.firestore)
-  implementation(libs.firebase.messaging)
->>>>>>> 320e60b23f369c15ccec4e8f269a67497376db6b
 
   // Firebase Auth, Google Sign-In via Credential Manager, and Google Drive OAuth Authorization
   implementation(libs.firebase.auth)

@@ -173,7 +173,6 @@ class FamilyViewModel(
                 }
             }
         }
-<<<<<<< HEAD
         viewModelScope.launch {
             repository.driveOperationMessage.collect { msg ->
                 if (!msg.isNullOrBlank()) {
@@ -182,8 +181,6 @@ class FamilyViewModel(
                 }
             }
         }
-=======
->>>>>>> 320e60b23f369c15ccec4e8f269a67497376db6b
     }
 
     /**

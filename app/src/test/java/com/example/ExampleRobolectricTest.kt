@@ -659,7 +659,6 @@ class ExampleRobolectricTest {
         assertTrue("First presentation of eventKey must succeed", com.example.notifications.FcmTokenManager.markEventDispatchedIfNew(eventKey))
         assertFalse("Duplicate presentation of same eventKey must be suppressed", com.example.notifications.FcmTokenManager.markEventDispatchedIfNew(eventKey))
     }
-<<<<<<< HEAD
 
     @Test
     fun `test shared file manager duplicate filenames sanitization and storage path safety`() {
@@ -1001,14 +1000,9 @@ class ExampleRobolectricTest {
             restartedRepository.documents.value.any { it.id == parentDoc.id }
         )
     }
-=======
->>>>>>> 320e60b23f369c15ccec4e8f269a67497376db6b
 }
 
 
 
 
-<<<<<<< HEAD
 
-=======
->>>>>>> 320e60b23f369c15ccec4e8f269a67497376db6b
