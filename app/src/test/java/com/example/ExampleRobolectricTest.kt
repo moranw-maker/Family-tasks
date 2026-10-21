@@ -1540,6 +1540,327 @@ class ExampleRobolectricTest {
         com.example.notifications.FamilyAlarmReceiver.stopActiveRinging(context)
         com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(context, childLocalAlarm.id)
     }
+
+    @Test
+    fun `test remote alarm deletion tombstone cancels child local alarm stops active ringing and tracks target confirmation`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = FamilyRepository(context)
+
+        val parentMember = repository.members.value.first { it.id == "m_dad" }
+        val childMember = repository.members.value.first { it.id == "m_kid1" }
+
+        // 1. Parent creates an alarm assigned to the child
+        repository.switchCurrentMember(parentMember)
+        val childAssignedAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_remote_delete_sync_test",
+            title = "השכמה לבית ספר",
+            hour = 7,
+            minute = 10,
+            assignedMemberId = childMember.id,
+            assignedToMemberId = childMember.id,
+            assignedMemberName = childMember.name,
+            createdByMemberId = parentMember.id,
+            createdByMemberName = parentMember.name,
+            createdByRole = "PARENT",
+            isPersonal = false,
+            isEnabled = true
+        )
+        assertTrue(repository.addOrUpdateFamilyAlarm(childAssignedAlarm))
+
+        // 2. Simulate the child's device syncing and scheduling the alarm locally
+        com.example.notifications.FamilyAlarmScheduler.syncAllDeviceAlarms(
+            context = context,
+            alarms = repository.familyAlarms.value,
+            currentMemberId = childMember.id,
+            currentAuthUid = childMember.id,
+            currentMemberName = childMember.name,
+            isChildDevice = true
+        )
+        assertTrue(
+            "Assigned alarm must be scheduled in AlarmManager on child's device",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, childAssignedAlarm.id)
+        )
+        assertTrue(
+            "Assigned alarm must be persisted in local device alarm storage",
+            com.example.notifications.FamilyAlarmScheduler.loadPersistedAlarms(context).any { it.id == childAssignedAlarm.id }
+        )
+
+        // Also simulate a snoozed PendingIntent and active ringing for this alarm on child's device
+        com.example.notifications.FamilyAlarmScheduler.scheduleSnoozeAlarm(
+            context = context,
+            alarmId = childAssignedAlarm.id,
+            title = childAssignedAlarm.title,
+            soundType = childAssignedAlarm.soundType,
+            customSoundUri = "",
+            vibrateEnabled = true,
+            snoozeMinutes = 5,
+            volumePercent = 80
+        )
+        com.example.notifications.FamilyAlarmRingingService.startRingingService(
+            context = context,
+            alarmId = childAssignedAlarm.id,
+            title = childAssignedAlarm.title,
+            hour = childAssignedAlarm.hour,
+            minute = childAssignedAlarm.minute,
+            soundType = childAssignedAlarm.soundType,
+            customSoundUri = "",
+            vibrateEnabled = true,
+            snoozeMinutes = 5,
+            volumePercent = 80
+        )
+        assertEquals(
+            childAssignedAlarm.id,
+            com.example.notifications.FamilyAlarmRingingService.activeRingingAlarm.value?.alarmId
+        )
+
+        // 3. Parent deletes the alarm -> removed from active list, and since target is remote child,
+        //    creates a pending cloud deletion notice until child device confirms cancellation
+        assertTrue(repository.deleteFamilyAlarm(childAssignedAlarm.id))
+        assertFalse(
+            "Deleted alarm must be removed from active familyAlarms list",
+            repository.familyAlarms.value.any { it.id == childAssignedAlarm.id }
+        )
+        val pendingNotice = repository.deletedAlarmNotices.value.find { it.alarmId == childAssignedAlarm.id }
+        assertNotNull("Parent must see pending target cancellation notice when deleting remote child alarm", pendingNotice)
+        assertFalse(
+            "Remote child alarm deletion must not claim immediate target cancellation before child device confirms",
+            pendingNotice!!.isConfirmedCancelledOnTarget
+        )
+
+        // 4. Child device receives the tombstone / updated alarm list -> cancels AlarmManager PendingIntent,
+        //    cancels snooze, stops active ringing, and purges persisted local alarm state
+        val purgedIds = com.example.notifications.FamilyAlarmScheduler.syncAllDeviceAlarms(
+            context = context,
+            alarms = repository.familyAlarms.value,
+            currentMemberId = childMember.id,
+            currentAuthUid = childMember.id,
+            currentMemberName = childMember.name,
+            isChildDevice = true,
+            deletedAlarmIds = setOf(childAssignedAlarm.id)
+        )
+        assertTrue("Child device sync must report the deleted alarm ID as purged", childAssignedAlarm.id in purgedIds)
+        assertFalse(
+            "Deleted alarm PendingIntent must be cancelled in AlarmManager",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, childAssignedAlarm.id)
+        )
+        assertNull(
+            "Active ringing for the deleted alarm must stop immediately",
+            com.example.notifications.FamilyAlarmRingingService.activeRingingAlarm.value
+        )
+        assertFalse(
+            "Deleted alarm must be removed from persisted local alarm cache",
+            com.example.notifications.FamilyAlarmScheduler.loadPersistedAlarms(context).any { it.id == childAssignedAlarm.id }
+        )
+        assertTrue(
+            "Deleted alarm ID must be recorded in local tombstone set so startup never recreates it",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmTombstoned(context, childAssignedAlarm.id)
+        )
+
+        // 5. Verify full-screen alarm notification includes fullScreenIntent and Dismiss/Snooze actions
+        val alarmNotif = com.example.notifications.FamilyAlarmRingingService.buildStaticAlarmNotification(
+            context = context,
+            alarmId = "test_fullscreen_notif",
+            title = "בדיקת מסך מלא",
+            timeFormatted = "07:30",
+            hour = 7,
+            minute = 30,
+            soundType = com.example.notifications.AlarmAudioController.SOUND_MELODY_ENERGETIC,
+            customUri = "",
+            vibrateEnabled = true,
+            snoozeMinutes = 5,
+            volumePercent = 85
+        )
+        assertNotNull("Alarm notification must configure fullScreenIntent", alarmNotif.fullScreenIntent)
+        assertEquals(android.app.Notification.CATEGORY_ALARM, alarmNotif.category)
+        assertEquals("Alarm notification must include Snooze and Dismiss actions", 2, alarmNotif.actions.size)
+    }
+
+    @Test
+    fun `test premium sunrise alarm ringing screen label resolution notification actions snooze dismiss and recurring preservation`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Verify alarm label resolution: custom labels preserved, blank/generic labels default to "בוקר טוב!"
+        assertEquals(
+            "בוקר טוב רועי!",
+            com.example.notifications.FamilyAlarmRingingActivity.resolveAlarmDisplayLabel("בוקר טוב רועי!")
+        )
+        assertEquals(
+            "בוקר טוב!",
+            com.example.notifications.FamilyAlarmRingingActivity.resolveAlarmDisplayLabel("")
+        )
+        assertEquals(
+            "בוקר טוב!",
+            com.example.notifications.FamilyAlarmRingingActivity.resolveAlarmDisplayLabel("   ")
+        )
+        assertEquals(
+            "בוקר טוב!",
+            com.example.notifications.FamilyAlarmRingingActivity.resolveAlarmDisplayLabel("שעון מעורר")
+        )
+        assertEquals(
+            "בוקר טוב!",
+            com.example.notifications.FamilyAlarmRingingActivity.resolveAlarmDisplayLabel("שעון מעורר משפחתי")
+        )
+        assertEquals(
+            "☀️ הגיע הזמן להתחיל את היום",
+            com.example.notifications.FamilyAlarmRingingActivity.MORNING_PILL_MESSAGE_HE
+        )
+
+        // 2. Schedule a recurring alarm for 07:00 ("בוקר טוב רועי!") with 5-minute snooze
+        val recurringAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_sunrise_roey_0700",
+            title = "בוקר טוב רועי!",
+            hour = 7,
+            minute = 0,
+            daysOfWeek = com.example.model.SchoolDay.allWeekDays,
+            isEnabled = true,
+            soundType = com.example.notifications.AlarmAudioController.SOUND_MELODY_ENERGETIC,
+            vibrateEnabled = true,
+            snoozeDurationMinutes = 5,
+            volumePercent = 85,
+            isPersonal = true
+        )
+        val scheduleRes = com.example.notifications.FamilyAlarmScheduler.scheduleLocalAlarm(context, recurringAlarm)
+        assertTrue("Recurring alarm must be scheduled in AlarmManager", scheduleRes.isScheduled)
+        assertTrue(
+            "Recurring alarm PendingIntent must exist in AlarmManager",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, recurringAlarm.id)
+        )
+
+        // 3. Trigger the alarm via FamilyAlarmReceiver -> starts ringing service & preserves next recurring occurrence
+        val triggerIntent = com.example.notifications.FamilyAlarmScheduler.buildTriggerBroadcastIntent(
+            context = context,
+            alarm = recurringAlarm,
+            isSnooze = false
+        )
+        com.example.notifications.FamilyAlarmReceiver().onReceive(context, triggerIntent)
+
+        val activeRinging = com.example.notifications.FamilyAlarmRingingService.activeRingingAlarm.value
+        assertNotNull("Triggering alarm must set activeRingingAlarm state", activeRinging)
+        assertEquals("07:00", activeRinging?.timeFormatted)
+        assertEquals("בוקר טוב רועי!", activeRinging?.title)
+        assertEquals(5, activeRinging?.snoozeMinutes)
+        assertTrue(
+            "Next recurring occurrence must remain scheduled in AlarmManager when alarm triggers",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, recurringAlarm.id)
+        )
+
+        // 4. Launch FamilyAlarmRingingActivity via createLaunchIntent and verify lock-screen activity creation
+        val launchIntent = com.example.notifications.FamilyAlarmRingingActivity.createLaunchIntent(
+            context = context,
+            alarmId = recurringAlarm.id,
+            title = recurringAlarm.title,
+            hour = recurringAlarm.hour,
+            minute = recurringAlarm.minute,
+            snoozeMinutes = recurringAlarm.snoozeDurationMinutes
+        )
+        val activityController = org.robolectric.Robolectric.buildActivity(
+            com.example.notifications.FamilyAlarmRingingActivity::class.java,
+            launchIntent
+        ).create().start().resume()
+        val activity = activityController.get()
+        assertNotNull("FamilyAlarmRingingActivity must instantiate and resume over lock screen", activity)
+        assertEquals(
+            "בוקר טוב רועי!",
+            activity.intent.getStringExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_TITLE)
+        )
+        assertEquals(
+            7,
+            activity.intent.getIntExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_HOUR, -1)
+        )
+        assertEquals(
+            0,
+            activity.intent.getIntExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_MINUTE, -1)
+        )
+
+        // 5. Verify full-screen alarm notification content & actions
+        val notification = com.example.notifications.FamilyAlarmRingingService.buildStaticAlarmNotification(
+            context = context,
+            alarmId = recurringAlarm.id,
+            title = recurringAlarm.title,
+            timeFormatted = "07:00",
+            hour = 7,
+            minute = 0,
+            soundType = recurringAlarm.soundType,
+            customUri = "",
+            vibrateEnabled = true,
+            snoozeMinutes = 5,
+            volumePercent = 85
+        )
+        assertNotNull("Full-screen intent must be configured on alarm notification", notification.fullScreenIntent)
+        assertEquals(android.app.Notification.CATEGORY_ALARM, notification.category)
+        assertEquals(android.app.Notification.VISIBILITY_PUBLIC, notification.visibility)
+        val notifTitle = notification.extras.getCharSequence(android.app.Notification.EXTRA_TITLE)?.toString().orEmpty()
+        val notifText = notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT)?.toString().orEmpty()
+        assertTrue("Notification title must include 07:00", notifTitle.contains("07:00"))
+        assertTrue("Notification title must include alarm label", notifTitle.contains("בוקר טוב רועי!"))
+        assertTrue("Notification text must include morning message", notifText.contains("הגיע הזמן להתחיל את היום"))
+        assertEquals("Notification must provide Snooze and Dismiss actions", 2, notification.actions.size)
+        assertTrue("First action must be Snooze (נודניק)", notification.actions[0].title.toString().contains("נודניק"))
+        assertEquals("כיבוי", notification.actions[1].title.toString())
+
+        // 6. Test Snooze via notification broadcast action (ACTION_SNOOZE_FAMILY_ALARM)
+        val snoozeBroadcast = android.content.Intent(context, com.example.notifications.FamilyAlarmReceiver::class.java).apply {
+            action = com.example.notifications.FamilyAlarmScheduler.ACTION_SNOOZE_FAMILY_ALARM
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_ID, recurringAlarm.id)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_TITLE, recurringAlarm.title)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_SNOOZE_MINUTES, 5)
+        }
+        com.example.notifications.FamilyAlarmReceiver().onReceive(context, snoozeBroadcast)
+
+        assertNull(
+            "Snooze must stop current active ringing state immediately",
+            com.example.notifications.FamilyAlarmRingingService.activeRingingAlarm.value
+        )
+        assertTrue(
+            "Snooze must schedule a snooze PendingIntent in AlarmManager",
+            com.example.notifications.FamilyAlarmScheduler.isSnoozeLocallyScheduled(context, recurringAlarm.id)
+        )
+        assertTrue(
+            "Snooze must preserve the original recurring alarm schedule",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, recurringAlarm.id)
+        )
+
+        // 7. Re-trigger at snooze time and test Dismiss ("כיבוי")
+        com.example.notifications.FamilyAlarmReceiver.clearRecentTrigger(recurringAlarm.id)
+        val snoozeTriggerIntent = com.example.notifications.FamilyAlarmScheduler.buildTriggerBroadcastIntent(
+            context = context,
+            alarm = recurringAlarm,
+            isSnooze = true
+        )
+        com.example.notifications.FamilyAlarmReceiver().onReceive(context, snoozeTriggerIntent)
+        assertNotNull(
+            "Snooze trigger must re-activate ringing state",
+            com.example.notifications.FamilyAlarmRingingService.activeRingingAlarm.value
+        )
+
+        val dismissBroadcast = android.content.Intent(context, com.example.notifications.FamilyAlarmReceiver::class.java).apply {
+            action = com.example.notifications.FamilyAlarmScheduler.ACTION_DISMISS_FAMILY_ALARM
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_ID, recurringAlarm.id)
+        }
+        com.example.notifications.FamilyAlarmReceiver().onReceive(context, dismissBroadcast)
+
+        assertNull(
+            "Dismiss must immediately stop active ringing state",
+            com.example.notifications.FamilyAlarmRingingService.activeRingingAlarm.value
+        )
+        assertFalse(
+            "Dismiss must cancel any pending snooze PendingIntent",
+            com.example.notifications.FamilyAlarmScheduler.isSnoozeLocallyScheduled(context, recurringAlarm.id)
+        )
+        assertTrue(
+            "Dismiss must record dismissal deduplication to prevent duplicate ringing",
+            com.example.notifications.FamilyAlarmReceiver.wasRecentlyDismissed(recurringAlarm.id)
+        )
+        assertTrue(
+            "Dismiss must preserve the next scheduled occurrence for recurring alarms",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, recurringAlarm.id)
+        )
+
+        activityController.pause().stop().destroy()
+        com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(context, recurringAlarm.id)
+    }
 }
+
+
 
 

@@ -1,13 +1,18 @@
 package com.example.notifications
 
+import android.Manifest
 import android.app.AlarmManager
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.model.FamilyAlarm
 import com.example.model.SchoolDay
@@ -86,6 +91,7 @@ object FamilyAlarmScheduler {
 
     private const val PREFS_NAME = "family_tasks_local_alarms_prefs"
     private const val KEY_PERSISTED_ALARMS = "persisted_alarms_json"
+    private const val KEY_DELETED_ALARM_IDS = "deleted_alarm_ids_csv"
     private const val KEY_CURRENT_MEMBER_ID = "current_member_id"
 
     const val DIAGNOSTIC_ALARM_ID = "diag_alarm_15s"
@@ -132,7 +138,7 @@ object FamilyAlarmScheduler {
         currentMemberName: String = "",
         isChildDevice: Boolean = false
     ): Boolean {
-        if (!alarm.isEnabled) return false
+        if (!alarm.isEnabled || alarm.isDeleted || alarm.scheduleStatus == FamilyAlarm.STATUS_DELETED) return false
         if (currentMemberId.isBlank() && currentAuthUid.isBlank()) return false
 
         val targetId = alarm.effectiveAssignedMemberId
@@ -153,6 +159,59 @@ object FamilyAlarmScheduler {
             runCatching { alarmManager.canScheduleExactAlarms() }.getOrDefault(false)
         } else {
             true
+        }
+    }
+
+    fun hasNotificationPermission(context: Context): Boolean {
+        val appCtx = context.applicationContext ?: context
+        val runtimeGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                appCtx,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+        val channelsEnabled = runCatching {
+            NotificationManagerCompat.from(appCtx).areNotificationsEnabled()
+        }.getOrDefault(true)
+        return runtimeGranted && channelsEnabled
+    }
+
+    fun canUseFullScreenIntent(context: Context): Boolean {
+        val appCtx = context.applicationContext ?: context
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val nm = appCtx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return true
+            runCatching { nm.canUseFullScreenIntent() }.getOrDefault(true)
+        } else {
+            true
+        }
+    }
+
+    fun openFullScreenIntentSettings(context: Context) {
+        val appCtx = context.applicationContext ?: context
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val launched = runCatching {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
+                    data = Uri.parse("package:${appCtx.packageName}")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                appCtx.startActivity(intent)
+                true
+            }.getOrDefault(false)
+            if (launched) return
+        }
+        openNotificationSettings(appCtx)
+    }
+
+    fun openNotificationSettings(context: Context) {
+        val appCtx = context.applicationContext ?: context
+        runCatching {
+            val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, appCtx.packageName)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            appCtx.startActivity(intent)
         }
     }
 
@@ -289,6 +348,15 @@ object FamilyAlarmScheduler {
         nowMillis: Long = System.currentTimeMillis()
     ): LocalAlarmScheduleResult {
         val appCtx = context.applicationContext ?: context
+        if (alarm.isDeleted || alarm.scheduleStatus == FamilyAlarm.STATUS_DELETED) {
+            markAlarmDeletedAndCancel(appCtx, alarm.id)
+            return LocalAlarmScheduleResult(
+                isScheduled = false,
+                isExact = false,
+                nextTriggerAtMillis = 0L,
+                statusCode = FamilyAlarm.STATUS_DELETED
+            )
+        }
         if (!alarm.isEnabled) {
             cancelLocalAlarm(appCtx, alarm.id)
             return LocalAlarmScheduleResult(
@@ -318,10 +386,16 @@ object FamilyAlarmScheduler {
             alarmId = alarm.id,
             triggerAtMillis = triggerAtMillis,
             pendingIntent = pendingIntent,
-            requestCodeSalt = 10
+            requestCodeSalt = 10,
+            alarmTitle = alarm.title,
+            alarmHour = alarm.hour,
+            alarmMinute = alarm.minute,
+            snoozeMinutes = alarm.snoozeDurationMinutes
         )
 
         if (scheduledSuccessfully) {
+            clearDeletedAlarmId(appCtx, alarm.id)
+            upsertPersistedAlarmForBootRestore(appCtx, alarm.copy(nextTriggerAtMillis = triggerAtMillis))
             armInProcessWatchdog(
                 context = appCtx,
                 alarm = alarm,
@@ -403,7 +477,11 @@ object FamilyAlarmScheduler {
             alarmId = DIAGNOSTIC_ALARM_ID,
             triggerAtMillis = triggerAtMillis,
             pendingIntent = pendingIntent,
-            requestCodeSalt = 12
+            requestCodeSalt = 12,
+            alarmTitle = diagAlarm.title,
+            alarmHour = diagAlarm.hour,
+            alarmMinute = diagAlarm.minute,
+            snoozeMinutes = diagAlarm.snoozeDurationMinutes
         )
 
         if (scheduledSuccessfully) {
@@ -520,6 +598,24 @@ object FamilyAlarmScheduler {
         }.getOrDefault(false)
     }
 
+    fun isSnoozeLocallyScheduled(context: Context, alarmId: String): Boolean {
+        val appCtx = context.applicationContext ?: context
+        return runCatching {
+            val snoozeIntent = Intent(appCtx, FamilyAlarmReceiver::class.java).apply {
+                action = ACTION_TRIGGER_FAMILY_ALARM
+                data = Uri.parse("familytasks://alarm_snooze/$alarmId")
+                addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
+            }
+            val existingPi = PendingIntent.getBroadcast(
+                appCtx,
+                requestCodeForAlarm(alarmId, 1),
+                snoozeIntent,
+                PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+            )
+            existingPi != null
+        }.getOrDefault(false)
+    }
+
     private data class AlarmRegistrationOutcome(
         val scheduledSuccessfully: Boolean,
         val scheduledExact: Boolean,
@@ -533,16 +629,25 @@ object FamilyAlarmScheduler {
         alarmId: String,
         triggerAtMillis: Long,
         pendingIntent: PendingIntent,
-        requestCodeSalt: Int
+        requestCodeSalt: Int,
+        alarmTitle: String = "בוקר טוב!",
+        alarmHour: Int = 7,
+        alarmMinute: Int = 0,
+        snoozeMinutes: Int = 5
     ): AlarmRegistrationOutcome {
-        val showIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val showPendingIntent = PendingIntent.getActivity(
-            context,
-            requestCodeForAlarm(alarmId, requestCodeSalt),
-            showIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val showIntent = FamilyAlarmRingingActivity.createLaunchIntent(
+            context = context,
+            alarmId = alarmId,
+            title = alarmTitle,
+            hour = alarmHour,
+            minute = alarmMinute,
+            snoozeMinutes = snoozeMinutes
+        )
+        val showPendingIntent = buildActivityPendingIntentWithBal(
+            context = context,
+            requestCode = requestCodeForAlarm(alarmId, requestCodeSalt),
+            intent = showIntent,
+            flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
         var lastError = ""
@@ -684,7 +789,11 @@ object FamilyAlarmScheduler {
             alarmId = alarmId,
             triggerAtMillis = triggerAtMillis,
             pendingIntent = pendingIntent,
-            requestCodeSalt = 11
+            requestCodeSalt = 11,
+            alarmTitle = title,
+            alarmHour = tempAlarm.hour,
+            alarmMinute = tempAlarm.minute,
+            snoozeMinutes = safeMinutes
         )
         if (scheduled) {
             armInProcessWatchdog(
@@ -699,17 +808,50 @@ object FamilyAlarmScheduler {
     }
 
     /**
-     * Cancels a previously scheduled local alarm, any pending snooze, and any active ringing for [alarmId].
+     * Cancels only a pending snooze alarm for [alarmId] without cancelling the recurring alarm
+     * schedule or removing the alarm from persisted boot-restore storage.
+     */
+    fun cancelPendingSnoozeOnly(context: Context, alarmId: String) {
+        if (alarmId.isBlank()) return
+        val appCtx = context.applicationContext ?: context
+        synchronized(watchdogLock) {
+            activeWatchdogJobs.remove("$alarmId:snooze")?.cancel()
+        }
+        val alarmManager = appCtx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        runCatching {
+            val snoozeIntent = Intent(appCtx, FamilyAlarmReceiver::class.java).apply {
+                action = ACTION_TRIGGER_FAMILY_ALARM
+                data = Uri.parse("familytasks://alarm_snooze/$alarmId")
+                addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
+            }
+            val snoozePi = PendingIntent.getBroadcast(
+                appCtx,
+                requestCodeForAlarm(alarmId, 1),
+                snoozeIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            alarmManager.cancel(snoozePi)
+            snoozePi.cancel()
+        }
+    }
+
+    /**
+     * Cancels a previously scheduled local alarm, any pending snooze, and any active ringing for [alarmId],
+     * and removes it from persisted local boot-restore storage.
      */
     fun cancelLocalAlarm(context: Context, alarmId: String) {
+        if (alarmId.isBlank()) return
         val appCtx = context.applicationContext ?: context
         synchronized(watchdogLock) {
             activeWatchdogJobs.remove(alarmId)?.cancel()
             activeWatchdogJobs.remove("$alarmId:snooze")?.cancel()
         }
+        FamilyAlarmReceiver.clearRecentTrigger(alarmId)
         if (FamilyAlarmRingingService.activeRingingAlarm.value?.alarmId == alarmId) {
             FamilyAlarmRingingService.dismissActiveAlarm(appCtx, alarmId)
         }
+        removePersistedAlarmFromBootRestore(appCtx, alarmId)
+
         val alarmManager = appCtx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
         runCatching {
             val intent = Intent(appCtx, FamilyAlarmReceiver::class.java).apply {
@@ -743,6 +885,151 @@ object FamilyAlarmScheduler {
     }
 
     /**
+     * Creates an Activity [PendingIntent] with Android 14+ (API 34+) Background Activity Launch (BAL)
+     * privileges enabled so full-screen / lock-screen alarm activities can start reliably.
+     */
+    fun buildActivityPendingIntentWithBal(
+        context: Context,
+        requestCode: Int,
+        intent: Intent,
+        flags: Int
+    ): PendingIntent {
+        val optionsBundle = buildBalCreatorActivityOptionsBundle()
+        return if (optionsBundle != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
+            runCatching {
+                PendingIntent.getActivity(context, requestCode, intent, flags, optionsBundle)
+            }.getOrElse {
+                PendingIntent.getActivity(context, requestCode, intent, flags)
+            }
+        } else {
+            PendingIntent.getActivity(context, requestCode, intent, flags)
+        }
+    }
+
+    fun buildBalCreatorActivityOptionsBundle(): android.os.Bundle? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return null
+        return runCatching {
+            val options = android.app.ActivityOptions.makeBasic()
+            // MODE_BACKGROUND_ACTIVITY_START_ALLOWED = 1 on API 34+
+            runCatching {
+                val method = android.app.ActivityOptions::class.java.getMethod(
+                    "setPendingIntentCreatorBackgroundActivityStartMode",
+                    Int::class.javaPrimitiveType
+                )
+                method.invoke(options, 1)
+            }
+            runCatching {
+                val method = android.app.ActivityOptions::class.java.getMethod(
+                    "setPendingIntentBackgroundActivityStartMode",
+                    Int::class.javaPrimitiveType
+                )
+                method.invoke(options, 1)
+            }
+            options.toBundle()
+        }.getOrNull()
+    }
+
+    fun buildBalSenderActivityOptionsBundle(): android.os.Bundle? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return null
+        return runCatching {
+            val options = android.app.ActivityOptions.makeBasic()
+            runCatching {
+                val method = android.app.ActivityOptions::class.java.getMethod(
+                    "setPendingIntentBackgroundActivityStartMode",
+                    Int::class.javaPrimitiveType
+                )
+                method.invoke(options, 1)
+            }
+            options.toBundle()
+        }.getOrNull()
+    }
+
+    /**
+     * Marks [alarmId] as deleted in local persistence and cancels its AlarmManager PendingIntent,
+     * any pending snooze PendingIntent, and active ringing if [alarmId] is currently ringing.
+     */
+    fun markAlarmDeletedAndCancel(context: Context, alarmId: String) {
+        if (alarmId.isBlank()) return
+        val appCtx = context.applicationContext ?: context
+        recordDeletedAlarmId(appCtx, alarmId)
+        cancelLocalAlarm(appCtx, alarmId)
+    }
+
+    fun getPersistedDeletedAlarmIds(context: Context): Set<String> {
+        val appCtx = context.applicationContext ?: context
+        return runCatching {
+            val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.getString(KEY_DELETED_ALARM_IDS, "")
+                .orEmpty()
+                .split(",")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .toSet()
+        }.getOrDefault(emptySet())
+    }
+
+    fun isAlarmTombstoned(context: Context, alarmId: String): Boolean {
+        if (alarmId.isBlank()) return false
+        return alarmId in getPersistedDeletedAlarmIds(context)
+    }
+
+    fun clearDeletedAlarmId(context: Context, alarmId: String) {
+        if (alarmId.isBlank()) return
+        val appCtx = context.applicationContext ?: context
+        runCatching {
+            val current = getPersistedDeletedAlarmIds(appCtx).toMutableSet()
+            if (current.remove(alarmId)) {
+                appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_DELETED_ALARM_IDS, current.toList().takeLast(200).joinToString(","))
+                    .apply()
+            }
+        }
+    }
+
+    private fun recordDeletedAlarmId(context: Context, alarmId: String) {
+        if (alarmId.isBlank()) return
+        val appCtx = context.applicationContext ?: context
+        runCatching {
+            val current = getPersistedDeletedAlarmIds(appCtx).toMutableSet()
+            current.add(alarmId)
+            appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_DELETED_ALARM_IDS, current.toList().takeLast(200).joinToString(","))
+                .apply()
+        }
+    }
+
+    fun syncAllDeviceAlarms(
+        context: Context,
+        alarms: List<FamilyAlarm>,
+        currentMemberId: String,
+        currentAuthUid: String = "",
+        currentMemberName: String = "",
+        isChildDevice: Boolean = false,
+        deletedAlarmIds: Set<String> = emptySet()
+    ): Set<String> {
+        val appCtx = context.applicationContext ?: context
+        val previousIds = loadPersistedAlarms(appCtx).map { it.id }.toSet()
+        deletedAlarmIds.forEach { id ->
+            if (id.isNotBlank() && id != DIAGNOSTIC_ALARM_ID) {
+                markAlarmDeletedAndCancel(appCtx, id)
+            }
+        }
+        syncAlarmsForCurrentDevice(
+            context = appCtx,
+            alarms = alarms,
+            currentMemberId = currentMemberId,
+            currentAuthUid = currentAuthUid,
+            currentMemberName = currentMemberName,
+            isChildDevice = isChildDevice,
+            authoritativeRemoteSync = deletedAlarmIds.isNotEmpty()
+        )
+        val remainingIds = loadPersistedAlarms(appCtx).map { it.id }.toSet()
+        return (previousIds - remainingIds) + deletedAlarmIds
+    }
+
+    /**
      * Synchronizes all alarms for the current device member:
      * - Registers enabled alarms targeted at `currentMemberId` / `currentAuthUid` in [AlarmManager].
      * - Cancels alarms that were disabled, deleted, or assigned to a different member.
@@ -756,23 +1043,37 @@ object FamilyAlarmScheduler {
         currentMemberId: String,
         currentAuthUid: String = "",
         currentMemberName: String = "",
-        isChildDevice: Boolean = false
+        isChildDevice: Boolean = false,
+        authoritativeRemoteSync: Boolean = false
     ): Map<String, LocalAlarmScheduleResult> {
         val appCtx = context.applicationContext ?: context
+        val deletedIds = getPersistedDeletedAlarmIds(appCtx)
+        val activeAlarms = alarms.filter { !it.isDeleted && it.scheduleStatus != FamilyAlarm.STATUS_DELETED && it.id !in deletedIds }
         val previousAlarms = loadPersistedAlarms(appCtx)
-        val currentIds = alarms.map { it.id }.toSet()
+        val currentIds = activeAlarms.map { it.id }.toSet()
 
         // Cancel any removed alarms (never cancel the diagnostic test alarm)
         previousAlarms.forEach { old ->
             if (old.id !in currentIds && old.id != DIAGNOSTIC_ALARM_ID) {
-                cancelLocalAlarm(appCtx, old.id)
+                if (authoritativeRemoteSync) {
+                    markAlarmDeletedAndCancel(appCtx, old.id)
+                } else {
+                    cancelLocalAlarm(appCtx, old.id)
+                }
+            }
+        }
+
+        // Also cancel any explicitly tombstoned alarms passed in `alarms`
+        alarms.forEach { alarm ->
+            if ((alarm.isDeleted || alarm.scheduleStatus == FamilyAlarm.STATUS_DELETED) && alarm.id != DIAGNOSTIC_ALARM_ID) {
+                markAlarmDeletedAndCancel(appCtx, alarm.id)
             }
         }
 
         val results = mutableMapOf<String, LocalAlarmScheduleResult>()
         val alarmsForThisDevice = mutableListOf<FamilyAlarm>()
 
-        alarms.forEach { alarm ->
+        activeAlarms.forEach { alarm ->
             if (shouldScheduleOnDevice(
                     alarm = alarm,
                     currentMemberId = currentMemberId,
@@ -801,7 +1102,8 @@ object FamilyAlarmScheduler {
      */
     fun restoreAlarmsOnBoot(context: Context): Int {
         val appCtx = context.applicationContext ?: context
-        val persisted = loadPersistedAlarms(appCtx)
+        val deletedIds = getPersistedDeletedAlarmIds(appCtx)
+        val persisted = loadPersistedAlarms(appCtx).filter { it.id !in deletedIds && !it.isDeleted }
         var restoredCount = 0
         persisted.forEach { alarm ->
             if (alarm.isEnabled) {
@@ -907,14 +1209,37 @@ object FamilyAlarmScheduler {
         }
     }
 
+    private fun upsertPersistedAlarmForBootRestore(context: Context, alarm: FamilyAlarm) {
+        if (alarm.id == DIAGNOSTIC_ALARM_ID) return
+        val appCtx = context.applicationContext ?: context
+        val existing = loadPersistedAlarms(appCtx).filterNot { it.id == alarm.id }
+        val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val currentMemberId = prefs.getString(KEY_CURRENT_MEMBER_ID, "").orEmpty()
+        persistAlarmsForBootRestore(appCtx, existing + alarm, currentMemberId)
+    }
+
+    private fun removePersistedAlarmFromBootRestore(context: Context, alarmId: String) {
+        if (alarmId.isBlank()) return
+        val appCtx = context.applicationContext ?: context
+        val existing = loadPersistedAlarms(appCtx)
+        if (existing.any { it.id == alarmId }) {
+            val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val currentMemberId = prefs.getString(KEY_CURRENT_MEMBER_ID, "").orEmpty()
+            persistAlarmsForBootRestore(appCtx, existing.filterNot { it.id == alarmId }, currentMemberId)
+        }
+    }
+
     fun loadPersistedAlarms(context: Context): List<FamilyAlarm> {
         return runCatching {
+            val deletedIds = getPersistedDeletedAlarmIds(context)
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val raw = prefs.getString(KEY_PERSISTED_ALARMS, null) ?: return emptyList()
             val arr = JSONArray(raw)
             val list = mutableListOf<FamilyAlarm>()
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
+                val id = obj.optString("id")
+                if (id.isBlank() || id in deletedIds) continue
                 val daysCsv = obj.optString("daysOfWeek", "")
                 val days = daysCsv.split(",")
                     .mapNotNull { token ->
@@ -926,7 +1251,7 @@ object FamilyAlarmScheduler {
                 }
                 list.add(
                     FamilyAlarm(
-                        id = obj.optString("id"),
+                        id = id,
                         familyId = obj.optString("familyId"),
                         title = obj.optString("title", "שעון מעורר"),
                         hour = obj.optInt("hour", 7),

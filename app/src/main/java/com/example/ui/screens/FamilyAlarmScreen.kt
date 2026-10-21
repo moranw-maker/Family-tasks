@@ -85,6 +85,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.example.model.DeletedAlarmSyncNotice
 import com.example.model.FamilyAlarm
 import com.example.model.FamilyMember
 import com.example.model.SchoolDay
@@ -131,6 +140,8 @@ fun FamilyAlarmScreen(
     members: List<FamilyMember>,
     currentMember: FamilyMember,
     isHebrew: Boolean,
+    deletedAlarmNotices: List<DeletedAlarmSyncNotice> = emptyList(),
+    onDismissDeletedNotice: (String) -> Unit = {},
     onSaveAlarm: (FamilyAlarm) -> Unit,
     onToggleAlarm: (String) -> Unit,
     onDeleteAlarm: (String) -> Unit,
@@ -150,6 +161,8 @@ fun FamilyAlarmScreen(
     var alarmPendingDelete by remember { mutableStateOf<FamilyAlarm?>(null) }
 
     val hasExactPermission = remember(diagnosticState) { FamilyAlarmScheduler.canScheduleExactAlarms(context) }
+    val canUseFullScreen = remember(diagnosticState) { FamilyAlarmScheduler.canUseFullScreenIntent(context) }
+    val hasNotifications = remember(diagnosticState) { FamilyAlarmScheduler.hasNotificationPermission(context) }
     val isBatteryUnrestricted = remember { FamilyAlarmScheduler.isIgnoringBatteryOptimizations(context) }
 
     // Ensure any sound preview stops when leaving the screen
@@ -171,11 +184,11 @@ fun FamilyAlarmScreen(
                 contentColor = Color.White,
                 shadowElevation = 6.dp,
                 modifier = Modifier
-                    .height(48.dp)
+                    .defaultMinSize(minHeight = 48.dp)
                     .testTag("add_alarm_fab")
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 16.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -193,7 +206,7 @@ fun FamilyAlarmScreen(
             }
         }
     ) { innerPadding ->
-        Column(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
@@ -206,282 +219,382 @@ fun FamilyAlarmScreen(
                         )
                     )
                 )
-                .padding(horizontal = 14.dp, vertical = 6.dp)
                 .testTag("family_alarm_screen")
         ) {
-            // 1. Live Ringing Alarm Card (when an alarm is actively ringing on this device)
-            activeRingingAlarm?.let { ringing ->
-                ActiveRingingAlarmCard(
-                    ringing = ringing,
-                    isHebrew = isHebrew,
-                    onSnooze = {
-                        FamilyAlarmRingingService.snoozeActiveAlarm(context)
-                        onShowToast(
-                            if (isHebrew) "נודניק הופעל ל-${ringing.snoozeMinutes} דקות 💤"
-                            else "Snoozed for ${ringing.snoozeMinutes} minutes 💤"
-                        )
-                    },
-                    onDismiss = {
-                        FamilyAlarmRingingService.dismissActiveAlarm(context, ringing.alarmId)
-                        onShowToast(
-                            if (isHebrew) "השעון המעורר כובה ✓"
-                            else "Alarm dismissed ✓"
+            val isCompactScreen = maxWidth < 360.dp
+            val horizontalPad = if (isCompactScreen) 10.dp else 14.dp
+
+            LazyColumn(
+                contentPadding = PaddingValues(
+                    start = horizontalPad,
+                    end = horizontalPad,
+                    top = 8.dp,
+                    bottom = 112.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .widthIn(max = 640.dp)
+                    .align(Alignment.TopCenter)
+                    .testTag("family_alarms_list")
+            ) {
+                // 1. Live Ringing Alarm Card (when an alarm is actively ringing on this device)
+                activeRingingAlarm?.let { ringing ->
+                    item(key = "active_ringing_banner") {
+                        ActiveRingingAlarmCard(
+                            ringing = ringing,
+                            isHebrew = isHebrew,
+                            onSnooze = {
+                                FamilyAlarmRingingService.snoozeActiveAlarm(context)
+                                onShowToast(
+                                    if (isHebrew) "נודניק הופעל ל-${ringing.snoozeMinutes} דקות 💤"
+                                    else "Snoozed for ${ringing.snoozeMinutes} minutes 💤"
+                                )
+                            },
+                            onDismiss = {
+                                FamilyAlarmRingingService.dismissActiveAlarm(context, ringing.alarmId)
+                                onShowToast(
+                                    if (isHebrew) "השעון המעורר כובה ✓"
+                                    else "Alarm dismissed ✓"
+                                )
+                            }
                         )
                     }
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-            }
+                }
 
-            // 2. Quick Help Banner
-            ScreenHelpBanner(
-                title = if (isHebrew) "שעון מעורר משפחתי חכם" else "Smart Family Alarm Clock",
-                tips = if (isHebrew) listOf(
-                    "שעון הורה לילד: הורה יכול להגדיר שעון מעורר עבור הילד/ה שיצלצל במכשיר הילד בלבד.",
-                    "הרשאות עריכה: ילד יכול לערוך או למחוק רק שעונים שהוא יצר בעצמו. שעון שהוגדר ע״י הורה מוגן מפני כיבוי.",
-                    "שמע ועוצמה: ניתן לבחור מנגינות השכמה מובנות, צלילי מערכת או קובץ שמע אישי ולבדוק את העוצמה מראש."
-                ) else listOf(
-                    "Parent-to-Child Alarms: Parents can schedule wake-up alarms that ring directly on the child's device.",
-                    "Permissions: Children can manage their own alarms, while parent-assigned alarms are protected from tampering.",
-                    "Sound & Volume Preview: Test built-in melodies, system tones, or custom audio files before saving."
-                ),
-                isHebrew = isHebrew
-            )
+                // 2. Quick Help Banner
+                item(key = "alarm_help_banner") {
+                    ScreenHelpBanner(
+                        title = if (isHebrew) "שעון מעורר משפחתי חכם" else "Smart Family Alarm Clock",
+                        tips = if (isHebrew) listOf(
+                            "שעון הורה לילד: הורה יכול להגדיר שעון מעורר עבור הילד/ה שיצלצל במכשיר הילד בלבד.",
+                            "הרשאות עריכה: ילד יכול לערוך או למחוק רק שעונים שהוא יצר בעצמו. שעון שהוגדר ע״י הורה מוגן מפני כיבוי.",
+                            "שמע ועוצמה: ניתן לבחור מנגינות השכמה מובנות, צלילי מערכת או קובץ שמע אישי ולבדוק את העוצמה מראש."
+                        ) else listOf(
+                            "Parent-to-Child Alarms: Parents can schedule wake-up alarms that ring directly on the child's device.",
+                            "Permissions: Children can manage their own alarms, while parent-assigned alarms are protected from tampering.",
+                            "Sound & Volume Preview: Test built-in melodies, system tones, or custom audio files before saving."
+                        ),
+                        isHebrew = isHebrew
+                    )
+                }
 
-            Spacer(modifier = Modifier.height(6.dp))
-
-            // 3. Header & Device Readiness Card
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = GoogleBlueLight.copy(alpha = 0.72f),
-                border = BorderStroke(1.dp, GoogleBlue.copy(alpha = 0.25f)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                // 3. Header & Device Readiness Card
+                item(key = "alarm_header_readiness_card") {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = GoogleBlueLight.copy(alpha = 0.72f),
+                        border = BorderStroke(1.dp, GoogleBlue.copy(alpha = 0.25f)),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Alarm,
-                                contentDescription = null,
-                                tint = GoogleBlueDark,
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = if (isHebrew) "שעונים מעוררים והשכמה" else "Family & Personal Alarms",
-                                    style = MaterialTheme.typography.titleSmall.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = GoogleBlueDark
+                        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Alarm,
+                                        contentDescription = null,
+                                        tint = GoogleBlueDark,
+                                        modifier = Modifier.size(22.dp)
                                     )
-                                )
-                                Text(
-                                    text = if (isHebrew) {
-                                        if (currentMember.isParent) {
-                                            "מצב הורה: ניהול שעונים אישיים ושעוני השכמה למכשירי הילדים"
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = if (isHebrew) "שעונים מעוררים והשכמה" else "Family & Personal Alarms",
+                                            style = MaterialTheme.typography.titleSmall.copy(
+                                                fontWeight = FontWeight.Bold,
+                                                color = GoogleBlueDark
+                                            )
+                                        )
+                                        Text(
+                                            text = if (isHebrew) {
+                                                if (currentMember.isParent) {
+                                                    "מצב הורה: ניהול שעונים אישיים ושעוני השכמה למכשירי הילדים"
+                                                } else {
+                                                    "מצב ילד/ה (${currentMember.name}): שעונים אישיים ושעוני השכמה מההורים"
+                                                }
+                                            } else {
+                                                if (currentMember.isParent) {
+                                                    "Parent mode: Manage personal and child wake-up alarms"
+                                                } else {
+                                                    "Child mode (${currentMember.name}): Personal & parent-scheduled alarms"
+                                                }
+                                            },
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        )
+                                    }
+                                }
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    TextButton(
+                                        onClick = { showDeveloperDiagnostics = !showDeveloperDiagnostics },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                        modifier = Modifier
+                                            .defaultMinSize(minHeight = 40.dp)
+                                            .testTag("developer_alarm_diagnostics_toggle")
+                                    ) {
+                                        Text(
+                                            text = if (isHebrew) "אבחון 🛠️" else "Diag 🛠️",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = GoogleBlueDark
+                                        )
+                                    }
+
+                                    TextButton(
+                                        onClick = {
+                                            FamilyAlarmReceiver.stopActiveRinging(context)
+                                            onShowToast(
+                                                if (isHebrew) "כל צלצול פעיל הופסק" else "Stopped active alarm ringing"
+                                            )
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                        modifier = Modifier
+                                            .defaultMinSize(minHeight = 40.dp)
+                                            .testTag("stop_active_alarm_ringing_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.AlarmOff,
+                                            contentDescription = if (isHebrew) "השתק" else "Silence",
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = if (isHebrew) "השתק" else "Silence",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (showDeveloperDiagnostics) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                DeveloperAlarmDiagnosticsCard(
+                                    diagnosticState = diagnosticState,
+                                    isHebrew = isHebrew,
+                                    currentMemberName = currentMember.name,
+                                    onSchedule15sTest = {
+                                        val res = FamilyAlarmScheduler.scheduleDiagnostic15SecondAlarm(
+                                            context = context,
+                                            currentMemberName = currentMember.name
+                                        )
+                                        if (res.isScheduled) {
+                                            onShowToast(
+                                                if (isHebrew) "בדיקת צלצול אמיתית נקבעה ב-AlarmManager לעוד 15 שניות ⏱️"
+                                                else "Real 15-second AlarmManager test scheduled ⏱️"
+                                            )
                                         } else {
-                                            "מצב ילד/ה (${currentMember.name}): שעונים אישיים ושעוני השכמה מההורים"
-                                        }
-                                    } else {
-                                        if (currentMember.isParent) {
-                                            "Parent mode: Manage personal and child wake-up alarms"
-                                        } else {
-                                            "Child mode (${currentMember.name}): Personal & parent-scheduled alarms"
+                                            onShowToast(
+                                                if (isHebrew) "שגיאה בתזמון בדיקת 15 שניות: ${res.errorMessage}"
+                                                else "Failed to schedule 15s test: ${res.errorMessage}"
+                                            )
                                         }
                                     },
-                                    style = MaterialTheme.typography.labelSmall.copy(
+                                    onStopRinging = {
+                                        FamilyAlarmReceiver.stopActiveRinging(context)
+                                    },
+                                    onReset = {
+                                        FamilyAlarmScheduler.resetDiagnosticState(context)
+                                    }
+                                )
+                            }
+
+                            if (!hasExactPermission) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = PastelYellowBackground,
+                                    border = BorderStroke(1.dp, PastelYellowBorder),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = if (isHebrew)
+                                                "לצלצול בדקה המדויקת ב-Android 12+, אשרו הרשאת שעון מדויק"
+                                            else
+                                                "Allow exact alarm permission for minute-accurate triggers",
+                                            style = MaterialTheme.typography.labelSmall.copy(color = PastelYellowDark),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        TextButton(
+                                            onClick = { FamilyAlarmScheduler.openExactAlarmPermissionSettings(context) },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            modifier = Modifier.testTag("grant_exact_alarm_permission_button")
+                                        ) {
+                                            Text(
+                                                text = if (isHebrew) "אשר הרשאה" else "Grant",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (!canUseFullScreen) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = PastelYellowBackground,
+                                    border = BorderStroke(1.dp, PastelYellowBorder),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = if (isHebrew)
+                                                "להצגת מסך כיבוי אוטומטי מעל נעילת מסך, אשרו הרשאת התראה במסך מלא"
+                                            else
+                                                "Allow full-screen alarm display to show dismiss/snooze screen automatically",
+                                            style = MaterialTheme.typography.labelSmall.copy(color = PastelYellowDark),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        TextButton(
+                                            onClick = { FamilyAlarmScheduler.openFullScreenIntentSettings(context) },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            modifier = Modifier.testTag("grant_fullscreen_alarm_permission_button")
+                                        ) {
+                                            Text(
+                                                text = if (isHebrew) "אשר מסך מלא" else "Allow",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (!hasNotifications) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = PastelYellowBackground,
+                                    border = BorderStroke(1.dp, PastelYellowBorder),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = if (isHebrew)
+                                                "התראות כבויות — הפעילו התראות להצגת כפתורי כיבוי ונודניק מהירים"
+                                            else
+                                                "Notifications are disabled — enable for quick dismiss/snooze controls",
+                                            style = MaterialTheme.typography.labelSmall.copy(color = PastelYellowDark),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        TextButton(
+                                            onClick = { FamilyAlarmScheduler.openNotificationSettings(context) },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            modifier = Modifier.testTag("grant_alarm_notification_permission_button")
+                                        ) {
+                                            Text(
+                                                text = if (isHebrew) "הפעל התראות" else "Enable",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (!isBatteryUnrestricted) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = if (isHebrew)
+                                            "מומלץ להחריג מחיסכון בסוללה לצלצול אמין כשהמסך כבוי"
+                                        else
+                                            "Disable battery optimization for reliable lock-screen alarms",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        ),
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(
+                                        onClick = { FamilyAlarmScheduler.openBatteryOptimizationSettings(context) },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.testTag("open_battery_optimization_button")
+                                    ) {
+                                        Text(
+                                            text = if (isHebrew) "הגדרות סוללה" else "Battery",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3b. Recently Deleted Alarms Cloud vs Target Device Sync Notices
+                items(
+                    items = deletedAlarmNotices,
+                    key = { "deleted_notice_${it.alarmId}" }
+                ) { notice ->
+                    DeletedAlarmSyncNoticeCard(
+                        notice = notice,
+                        isHebrew = isHebrew,
+                        onDismiss = { onDismissDeletedNotice(notice.alarmId) }
+                    )
+                }
+
+                // 4. Alarms List or Empty State
+                if (alarms.isEmpty()) {
+                    item(key = "empty_alarms_state") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 36.dp, horizontal = 20.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(text = "⏰", fontSize = 52.sp)
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text(
+                                    text = if (isHebrew) "עדיין אין שעונים מעוררים מוגדרים" else "No family alarms configured yet",
+                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = if (isHebrew)
+                                        "לחצו על 'שעון מעורר חדש' למטה ליצירת שעון אישי או שעון לילד/ה"
+                                    else
+                                        "Tap 'Add Alarm' below to create a personal or child alarm",
+                                    style = MaterialTheme.typography.bodySmall.copy(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 )
                             }
                         }
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            TextButton(
-                                onClick = { showDeveloperDiagnostics = !showDeveloperDiagnostics },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                modifier = Modifier.testTag("developer_alarm_diagnostics_toggle")
-                            ) {
-                                Text(
-                                    text = if (isHebrew) "אבחון 🛠️" else "Diag 🛠️",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = GoogleBlueDark
-                                )
-                            }
-
-                            TextButton(
-                                onClick = {
-                                    FamilyAlarmReceiver.stopActiveRinging(context)
-                                    onShowToast(
-                                        if (isHebrew) "כל צלצול פעיל הופסק" else "Stopped active alarm ringing"
-                                    )
-                                },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                modifier = Modifier.testTag("stop_active_alarm_ringing_button")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.AlarmOff,
-                                    contentDescription = if (isHebrew) "השתק" else "Silence",
-                                    modifier = Modifier.size(15.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = if (isHebrew) "השתק" else "Silence",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
                     }
-
-                    if (showDeveloperDiagnostics) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        DeveloperAlarmDiagnosticsCard(
-                            diagnosticState = diagnosticState,
-                            isHebrew = isHebrew,
-                            currentMemberName = currentMember.name,
-                            onSchedule15sTest = {
-                                val res = FamilyAlarmScheduler.scheduleDiagnostic15SecondAlarm(
-                                    context = context,
-                                    currentMemberName = currentMember.name
-                                )
-                                if (res.isScheduled) {
-                                    onShowToast(
-                                        if (isHebrew) "בדיקת צלצול אמיתית נקבעה ב-AlarmManager לעוד 15 שניות ⏱️"
-                                        else "Real 15-second AlarmManager test scheduled ⏱️"
-                                    )
-                                } else {
-                                    onShowToast(
-                                        if (isHebrew) "שגיאה בתזמון בדיקת 15 שניות: ${res.errorMessage}"
-                                        else "Failed to schedule 15s test: ${res.errorMessage}"
-                                    )
-                                }
-                            },
-                            onStopRinging = {
-                                FamilyAlarmReceiver.stopActiveRinging(context)
-                            },
-                            onReset = {
-                                FamilyAlarmScheduler.resetDiagnosticState(context)
-                            }
-                        )
-                    }
-
-                    if (!hasExactPermission) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = PastelYellowBackground,
-                            border = BorderStroke(1.dp, PastelYellowBorder),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(
-                                    text = if (isHebrew)
-                                        "לצלצול בדקה המדויקת ב-Android 12+, אשרו הרשאת שעון מדויק"
-                                    else
-                                        "Allow exact alarm permission for minute-accurate triggers",
-                                    style = MaterialTheme.typography.labelSmall.copy(color = PastelYellowDark),
-                                    modifier = Modifier.weight(1f)
-                                )
-                                TextButton(
-                                    onClick = { FamilyAlarmScheduler.openExactAlarmPermissionSettings(context) },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                    modifier = Modifier.testTag("grant_exact_alarm_permission_button")
-                                ) {
-                                    Text(
-                                        text = if (isHebrew) "אשר הרשאה" else "Grant",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    if (!isBatteryUnrestricted) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = if (isHebrew)
-                                    "מומלץ להחריג מחיסכון בסוללה לצלצול אמין כשהמסך כבוי"
-                                else
-                                    "Disable battery optimization for reliable lock-screen alarms",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                ),
-                                modifier = Modifier.weight(1f)
-                            )
-                            TextButton(
-                                onClick = { FamilyAlarmScheduler.openBatteryOptimizationSettings(context) },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                modifier = Modifier.testTag("open_battery_optimization_button")
-                            ) {
-                                Text(
-                                    text = if (isHebrew) "הגדרות סוללה" else "Battery",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // 4. Alarms List or Empty State
-            if (alarms.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(32.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(text = "⏰", fontSize = 52.sp)
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            text = if (isHebrew) "עדיין אין שעונים מעוררים מוגדרים" else "No family alarms configured yet",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = if (isHebrew)
-                                "לחצו על 'שעון מעורר חדש' למטה ליצירת שעון אישי או שעון לילד/ה"
-                            else
-                                "Tap 'Add Alarm' below to create a personal or child alarm",
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        )
-                    }
-                }
-            } else {
-                LazyColumn(
-                    contentPadding = PaddingValues(bottom = 110.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("family_alarms_list")
-                ) {
+                } else {
                     items(alarms, key = { it.id }) { alarm ->
                         val targetId = alarm.effectiveAssignedMemberId
                         val assignedMember = members.find { it.id == targetId }
@@ -740,6 +853,78 @@ private fun ActiveRingingAlarmCard(
 }
 
 @Composable
+private fun DeletedAlarmSyncNoticeCard(
+    notice: DeletedAlarmSyncNotice,
+    isHebrew: Boolean,
+    onDismiss: () -> Unit
+) {
+    val isPendingRemoteCancel = notice.isRemoteTarget && !notice.isConfirmedCancelledOnTarget
+    val bgColor = if (isPendingRemoteCancel) PastelYellowBackground else PastelGreenBackground
+    val fgColor = if (isPendingRemoteCancel) PastelYellowDark else PastelGreenDark
+    val borderColor = if (isPendingRemoteCancel) PastelYellowBorder else PastelGreenDark.copy(alpha = 0.35f)
+
+    val statusText = if (isPendingRemoteCancel) {
+        if (isHebrew) {
+            "☁️ השעון (${notice.formattedTime} • ${notice.title}) נמחק מהענן — ממתין לאישור ביטול ממכשיר של ${notice.targetMemberName} (יבוטל אוטומטית כשהמכשיר מחובר)"
+        } else {
+            "☁️ Deleted in cloud (${notice.formattedTime} • ${notice.title}) — waiting for cancellation confirmation from ${notice.targetMemberName}'s device"
+        }
+    } else {
+        if (isHebrew) {
+            if (notice.isRemoteTarget) {
+                "✓ השעון (${notice.formattedTime} • ${notice.title}) נמחק מהענן ובוטל סופית במכשיר של ${notice.targetMemberName}"
+            } else {
+                "✓ השעון (${notice.formattedTime} • ${notice.title}) נמחק ובוטל ממכשיר זה"
+            }
+        } else {
+            if (notice.isRemoteTarget) {
+                "✓ Deleted in cloud and confirmed cancelled on ${notice.targetMemberName}'s device (${notice.formattedTime})"
+            } else {
+                "✓ Alarm deleted and cancelled on this device (${notice.formattedTime})"
+            }
+        }
+    }
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = bgColor,
+        border = BorderStroke(1.dp, borderColor),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("deleted_alarm_sync_notice_${notice.alarmId}")
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = statusText,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    color = fgColor
+                ),
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .size(32.dp)
+                    .testTag("dismiss_deleted_notice_${notice.alarmId}")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = if (isHebrew) "סגור הודעה" else "Dismiss notice",
+                    tint = fgColor,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
 private fun FamilyAlarmCard(
     alarm: FamilyAlarm,
     assignedMember: FamilyMember?,
@@ -752,7 +937,6 @@ private fun FamilyAlarmCard(
     onEdit: () -> Unit,
     onRequestDelete: () -> Unit
 ) {
-    val context = LocalContext.current
     val targetId = alarm.effectiveAssignedMemberId
     val isTargetedAtThisDevice = alarm.isTargetedAtDeviceMember(currentMember.id)
     val isRemoteTarget = alarm.isTargetedToAnotherMember() && !isTargetedAtThisDevice
@@ -856,188 +1040,195 @@ private fun FamilyAlarmCard(
             .clickable(enabled = canModify) { onEdit() }
             .testTag("family_alarm_card_${alarm.id}")
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val isCompactCard = maxWidth < 330.dp
+            val cardPadding = if (isCompactCard) 12.dp else 14.dp
+
+            Column(modifier = Modifier.padding(cardPadding)) {
                 Row(
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.weight(1f)
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(46.dp)
-                            .clip(CircleShape)
-                            .background(
-                                if (alarm.isEnabled) GoogleBlueLight else MaterialTheme.colorScheme.surfaceVariant
-                            ),
-                        contentAlignment = Alignment.Center
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(if (isCompactCard) 8.dp else 12.dp),
+                        modifier = Modifier.weight(1f)
                     ) {
-                        Text(text = alarm.ringtoneEmoji, fontSize = 22.sp)
-                    }
+                        Box(
+                            modifier = Modifier
+                                .size(if (isCompactCard) 40.dp else 46.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (alarm.isEnabled) GoogleBlueLight else MaterialTheme.colorScheme.surfaceVariant
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(text = alarm.ringtoneEmoji, fontSize = if (isCompactCard) 19.sp else 22.sp)
+                        }
 
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = alarm.formattedTime24h,
-                            style = MaterialTheme.typography.headlineSmall.copy(
-                                fontWeight = FontWeight.ExtraBold,
-                                color = if (alarm.isEnabled) MaterialTheme.colorScheme.onSurface
-                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = alarm.formattedTime24h,
+                                style = (if (isCompactCard) MaterialTheme.typography.titleLarge else MaterialTheme.typography.headlineSmall).copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (alarm.isEnabled) MaterialTheme.colorScheme.onSurface
+                                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
                             )
-                        )
-                        Text(
-                            text = alarm.title,
-                            style = MaterialTheme.typography.bodyMedium.copy(
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (alarm.isEnabled) MaterialTheme.colorScheme.onSurface
-                                else MaterialTheme.colorScheme.onSurfaceVariant
-                            ),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                            Text(
+                                text = alarm.title,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (alarm.isEnabled) MaterialTheme.colorScheme.onSurface
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                ),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
-                }
 
-                Switch(
-                    checked = alarm.isEnabled,
-                    enabled = canModify,
-                    onCheckedChange = { onToggle() },
-                    modifier = Modifier.testTag("toggle_alarm_${alarm.id}")
-                )
-            }
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            // Device Acknowledgement & Scheduling Status Pill
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = statusBg,
-                    modifier = Modifier.testTag("alarm_status_badge_${alarm.id}")
-                ) {
-                    Text(
-                        text = statusLabel,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = statusFg
-                        ),
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    Switch(
+                        checked = alarm.isEnabled,
+                        enabled = canModify,
+                        onCheckedChange = { onToggle() },
+                        modifier = Modifier.testTag("toggle_alarm_${alarm.id}")
                     )
                 }
 
-                if (!canModify) {
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Device Acknowledgement & Scheduling Status Pill (FlowRow wraps cleanly on narrow screens)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     Surface(
                         shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        modifier = Modifier.testTag("alarm_parent_locked_badge_${alarm.id}")
+                        color = statusBg,
+                        modifier = Modifier.testTag("alarm_status_badge_${alarm.id}")
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        Text(
+                            text = statusLabel,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = statusFg
+                            ),
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Lock,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(12.dp)
-                            )
-                            Text(
-                                text = if (isHebrew) "מנוהל ע״י הורה" else "Parent Managed",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            )
-                        }
+                        )
                     }
-                }
-            }
 
-            Spacer(modifier = Modifier.height(6.dp))
-
-            // Audio, Vibration, Snooze & Volume Summary
-            Text(
-                text = if (isHebrew) {
-                    "$soundLabel • עוצמה ${alarm.volumePercent}% • נודניק ${alarm.snoozeDurationMinutes} דק׳ • ${if (alarm.vibrateEnabled) "רטט פעיל" else "ללא רטט"}"
-                } else {
-                    "$soundLabel • Vol ${alarm.volumePercent}% • Snooze ${alarm.snoozeDurationMinutes}m • ${if (alarm.vibrateEnabled) "Vibrate" else "No vibrate"}"
-                },
-                style = MaterialTheme.typography.labelSmall.copy(
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                ),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                val daysText = when {
-                    alarm.daysOfWeek.size >= 7 ->
-                        if (isHebrew) "כל ימות השבוע (א׳-ש׳)" else "Every day (Sun-Sat)"
-                    alarm.daysOfWeek.size == 6 && SchoolDay.SATURDAY !in alarm.daysOfWeek ->
-                        if (isHebrew) "ימי לימודים (א׳-ו׳)" else "School days (Sun-Fri)"
-                    else ->
-                        alarm.daysOfWeek.joinToString(", ") {
-                            if (isHebrew) it.shortHe else it.getDisplayName(false).take(3)
-                        }
-                }
-
-                Text(
-                    text = "$ownershipDescription • $daysText",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.Medium
-                    ),
-                    modifier = Modifier.weight(1f)
-                )
-
-                if (canModify || canDelete) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        if (canModify) {
-                            IconButton(
-                                onClick = onEdit,
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .testTag("edit_alarm_${alarm.id}")
+                    if (!canModify) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.testTag("alarm_parent_locked_badge_${alarm.id}")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.Edit,
-                                    contentDescription = if (isHebrew) "עריכה" else "Edit",
-                                    tint = GoogleBlue,
-                                    modifier = Modifier.size(18.dp)
+                                    imageVector = Icons.Default.Lock,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Text(
+                                    text = if (isHebrew) "מנוהל ע״י הורה" else "Parent Managed",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                 )
                             }
                         }
+                    }
+                }
 
-                        if (canDelete) {
-                            IconButton(
-                                onClick = onRequestDelete,
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .testTag("delete_alarm_${alarm.id}")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.DeleteOutline,
-                                    contentDescription = if (isHebrew) "מחיקה" else "Delete",
-                                    tint = Color(0xFFD93025),
-                                    modifier = Modifier.size(18.dp)
-                                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Audio, Vibration, Snooze & Volume Summary
+                Text(
+                    text = if (isHebrew) {
+                        "$soundLabel • עוצמה ${alarm.volumePercent}% • נודניק ${alarm.snoozeDurationMinutes} דק׳ • ${if (alarm.vibrateEnabled) "רטט פעיל" else "ללא רטט"}"
+                    } else {
+                        "$soundLabel • Vol ${alarm.volumePercent}% • Snooze ${alarm.snoozeDurationMinutes}m • ${if (alarm.vibrateEnabled) "Vibrate" else "No vibrate"}"
+                    },
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    val daysText = when {
+                        alarm.daysOfWeek.size >= 7 ->
+                            if (isHebrew) "כל ימות השבוע (א׳-ש׳)" else "Every day (Sun-Sat)"
+                        alarm.daysOfWeek.size == 6 && SchoolDay.SATURDAY !in alarm.daysOfWeek ->
+                            if (isHebrew) "ימי לימודים (א׳-ו׳)" else "School days (Sun-Fri)"
+                        else ->
+                            alarm.daysOfWeek.joinToString(", ") {
+                                if (isHebrew) it.shortHe else it.getDisplayName(false).take(3)
+                            }
+                    }
+
+                    Text(
+                        text = "$ownershipDescription • $daysText",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.Medium
+                        ),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                    if (canModify || canDelete) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            if (canModify) {
+                                IconButton(
+                                    onClick = onEdit,
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .testTag("edit_alarm_${alarm.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = if (isHebrew) "עריכה" else "Edit",
+                                        tint = GoogleBlue,
+                                        modifier = Modifier.size(19.dp)
+                                    )
+                                }
+                            }
+
+                            if (canDelete) {
+                                IconButton(
+                                    onClick = onRequestDelete,
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .testTag("delete_alarm_${alarm.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = if (isHebrew) "מחיקה" else "Delete",
+                                        tint = Color(0xFFD93025),
+                                        modifier = Modifier.size(19.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1047,7 +1238,7 @@ private fun FamilyAlarmCard(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun AddOrEditFamilyAlarmDialog(
     alarmToEdit: FamilyAlarm?,
@@ -1148,6 +1339,11 @@ private fun AddOrEditFamilyAlarmDialog(
             AlarmAudioController.stopPreview(context)
             onDismiss()
         },
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        modifier = Modifier
+            .fillMaxWidth(0.94f)
+            .widthIn(max = 520.dp)
+            .padding(vertical = 12.dp),
         shape = RoundedCornerShape(24.dp),
         title = {
             Text(
@@ -1215,14 +1411,50 @@ private fun AddOrEditFamilyAlarmDialog(
                     )
                 }
 
-                Text(
-                    text = if (isHebrew) "ימים בשבוע:" else "Days of Week:",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
-                )
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = if (isHebrew) "ימים בשבוע:" else "Days of Week:",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TextButton(
+                            onClick = {
+                                selectedDays = SchoolDay.allWeekDays.filterNot { it == SchoolDay.SATURDAY }.toSet()
+                            },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(28.dp)
+                        ) {
+                            Text(
+                                text = if (isHebrew) "ימי לימודים (א׳-ו׳)" else "Sun-Fri",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        TextButton(
+                            onClick = {
+                                selectedDays = SchoolDay.allWeekDays.toSet()
+                            },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(28.dp)
+                        ) {
+                            Text(
+                                text = if (isHebrew) "כל השבוע" else "All Week",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     SchoolDay.allWeekDays.forEach { day ->
                         val isSelected = day in selectedDays
@@ -1230,6 +1462,8 @@ private fun AddOrEditFamilyAlarmDialog(
                             shape = RoundedCornerShape(10.dp),
                             color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.surfaceVariant,
                             modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 40.dp)
                                 .clip(RoundedCornerShape(10.dp))
                                 .clickable {
                                     selectedDays = if (isSelected && selectedDays.size > 1) {
@@ -1240,14 +1474,19 @@ private fun AddOrEditFamilyAlarmDialog(
                                 }
                                 .testTag("alarm_day_${day.name}")
                         ) {
-                            Text(
-                                text = if (isHebrew) day.shortHe else day.getDisplayName(false).take(2),
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
-                                ),
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
-                            )
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.padding(vertical = 8.dp, horizontal = 2.dp)
+                            ) {
+                                Text(
+                                    text = if (isHebrew) day.shortHe else day.getDisplayName(false).take(2),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                                    ),
+                                    maxLines = 1
+                                )
+                            }
                         }
                     }
                 }
@@ -1542,14 +1781,15 @@ private fun AddOrEditFamilyAlarmDialog(
                 }
 
                 // Snooze Duration Selector & Vibration Switch
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text(
                         text = if (isHebrew) "זמן נודניק (דק׳):" else "Snooze (min):",
-                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                        modifier = Modifier.align(Alignment.CenterVertically)
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         listOf(5, 10, 15).forEach { mins ->
@@ -1620,7 +1860,7 @@ private fun AddOrEditFamilyAlarmDialog(
 
                     val alarm = FamilyAlarm(
                         id = alarmToEdit?.id ?: "alarm_${System.currentTimeMillis()}",
-                        title = title.trim().ifBlank { if (isHebrew) "שעון מעורר" else "Alarm" },
+                        title = title.trim().ifBlank { if (isHebrew) "בוקר טוב!" else "Good Morning!" },
                         hour = hr,
                         minute = min,
                         assignedMemberId = effectiveTargetId,

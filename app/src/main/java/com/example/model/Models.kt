@@ -906,7 +906,9 @@ data class FamilyAlarm(
     val acknowledgedByDeviceName: String = "",
     val acknowledgedAtMillis: Long = 0L,
     val nextTriggerAtMillis: Long = 0L,
-    val lastScheduleError: String = ""
+    val lastScheduleError: String = "",
+    val isDeleted: Boolean = false,
+    val deletedAtMillis: Long = 0L
 ) {
     companion object {
         const val STATUS_SCHEDULED_LOCALLY = "SCHEDULED_LOCALLY"
@@ -914,6 +916,7 @@ data class FamilyAlarm(
         const val STATUS_EXACT_PERMISSION_NEEDED = "EXACT_PERMISSION_NEEDED"
         const val STATUS_SCHEDULE_ERROR = "SCHEDULE_ERROR"
         const val STATUS_DISABLED = "DISABLED"
+        const val STATUS_DELETED = "DELETED"
     }
 
     val effectiveAssignedMemberId: String
@@ -1029,6 +1032,24 @@ data class FamilyAlarm(
         return false
     }
 }
+
+/**
+ * Tracks a recently deleted alarm so the UI can distinguish "Deleted in cloud (awaiting target device)"
+ * from "Confirmed cancelled on target device" when a parent deletes a child-assigned alarm.
+ */
+data class DeletedAlarmSyncNotice(
+    val alarmId: String,
+    val title: String,
+    val formattedTime: String,
+    val targetMemberId: String,
+    val targetMemberName: String,
+    val isRemoteTarget: Boolean,
+    val isDeletedInCloud: Boolean = true,
+    val isConfirmedCancelledOnTarget: Boolean = false,
+    val deletedAtMillis: Long = System.currentTimeMillis(),
+    val confirmedAtMillis: Long = 0L
+)
+
 
 
 

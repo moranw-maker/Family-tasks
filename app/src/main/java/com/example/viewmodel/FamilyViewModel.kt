@@ -40,6 +40,7 @@ class FamilyViewModel(
     val localRoomTasksFlow: Flow<List<Task>> = repository.localRoomTasksFlow
     val schedulePeriods: StateFlow<List<SchedulePeriod>> = repository.schedulePeriods
     val familyAlarms: StateFlow<List<FamilyAlarm>> = repository.familyAlarms
+    val deletedAlarmNotices: StateFlow<List<DeletedAlarmSyncNotice>> = repository.deletedAlarmNotices
     val folders: StateFlow<List<DocumentFolder>> = repository.folders
     val documents: StateFlow<List<FamilyDocument>> = repository.documents
     val notifications: StateFlow<List<FamilyNotificationAlert>> = repository.notifications
@@ -869,9 +870,21 @@ class FamilyViewModel(
     }
 
     fun deleteFamilyAlarm(alarmId: String) {
+        val target = familyAlarms.value.find { it.id == alarmId }
+        val isRemoteChildTarget = target != null &&
+            target.isTargetedToAnotherMember() &&
+            !target.isTargetedAtDeviceMember(currentMember.value.id)
         if (repository.deleteFamilyAlarm(alarmId)) {
-            _snackbarMessage.value = "השעון המעורר הוסר"
+            _snackbarMessage.value = if (isRemoteChildTarget) {
+                "השעון המעורר נמחק מהענן — ממתין לאישור ביטול ממכשיר היעד ☁️"
+            } else {
+                "השעון המעורר נמחק ובוטל ממכשיר זה ✓"
+            }
         }
+    }
+
+    fun dismissDeletedAlarmNotice(alarmId: String) {
+        repository.dismissDeletedAlarmNotice(alarmId)
     }
 
     // --- Shared Family Folders & Files Operations (Google Drive FamilyTasks) ---

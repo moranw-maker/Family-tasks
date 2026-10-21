@@ -210,6 +210,9 @@ class FamilyRepository(
     private val locallyManagedAlarms = ConcurrentHashMap<String, FamilyAlarm>()
     private val explicitlyDeletedAlarmIds: MutableSet<String> =
         java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val knownRemoteAlarmIds: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val confirmedCancelledAlarmIdsByMember = ConcurrentHashMap<String, Set<String>>()
 
     /** Configurable hooks for testing file upload cancellation, progress, and retry behavior. */
     @Volatile
@@ -590,6 +593,9 @@ class FamilyRepository(
         )
     )
     val familyAlarms: StateFlow<List<FamilyAlarm>> = _familyAlarms.asStateFlow()
+
+    private val _deletedAlarmNotices = MutableStateFlow<List<DeletedAlarmSyncNotice>>(emptyList())
+    val deletedAlarmNotices: StateFlow<List<DeletedAlarmSyncNotice>> = _deletedAlarmNotices.asStateFlow()
 
     // 8. Google Drive Shared Family Folders & Documents (starts empty with no predefined folders or sample files)
     private val _folders = MutableStateFlow<List<DocumentFolder>>(emptyList())
@@ -3000,6 +3006,13 @@ class FamilyRepository(
                     _familyDriveConfig.value = parsedDriveConfig
                     persistedDriveConfigByFamily[familyId] = parsedDriveConfig
                 }
+                val familyDeletedAlarmIds = (snapshot.get("deletedAlarmIds") as? List<*>)
+                    ?.mapNotNull { it as? String }
+                    ?.filter { it.isNotBlank() }
+                    .orEmpty()
+                if (familyDeletedAlarmIds.isNotEmpty()) {
+                    reconcileRemoteDeletedAlarmIds(familyId, familyDeletedAlarmIds)
+                }
             }
         }
 
@@ -3280,6 +3293,25 @@ class FamilyRepository(
                         val colorHex = doc.getLong("colorHex")
                             ?: if (parsedRole == UserRole.PARENT) 0xFF1A73E8L else 0xFF34A853L
 
+                        val cancelledAlarmIds = (doc.get("cancelledAlarmIds") as? List<*>)
+                            ?.mapNotNull { it as? String }
+                            ?.filter { it.isNotBlank() }
+                            ?.toSet()
+                            .orEmpty()
+                        if (cancelledAlarmIds.isNotEmpty()) {
+                            confirmedCancelledAlarmIdsByMember[doc.id] = cancelledAlarmIds
+                            _deletedAlarmNotices.value = _deletedAlarmNotices.value.map { notice ->
+                                if (!notice.isConfirmedCancelledOnTarget && notice.alarmId in cancelledAlarmIds) {
+                                    notice.copy(
+                                        isConfirmedCancelledOnTarget = true,
+                                        confirmedAtMillis = System.currentTimeMillis()
+                                    )
+                                } else {
+                                    notice
+                                }
+                            }
+                        }
+
                         FamilyMember(
                             id = doc.id,
                             name = name,
@@ -3515,8 +3547,38 @@ class FamilyRepository(
                     val authUid = authProvider()?.currentUser?.uid.orEmpty()
                     val effectiveDeviceMemberId = authUid.ifBlank { currentMemberId }
                     val deviceModelLabel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
+                    val ctx = appContext
+
+                    // 1. Detect explicitly removed documents from Firestore snapshot diff
+                    val detectedDeletedIds = mutableSetOf<String>()
+                    runCatching {
+                        snapshot.documentChanges.forEach { change ->
+                            if (change.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
+                                val removedId = change.document.id
+                                if (removedId.isNotBlank()) {
+                                    detectedDeletedIds.add(removedId)
+                                }
+                            }
+                        }
+                    }
+
+                    val persistedLocalDeletedIds = if (ctx != null) {
+                        com.example.notifications.FamilyAlarmScheduler.getPersistedDeletedAlarmIds(ctx)
+                    } else {
+                        emptySet()
+                    }
+                    explicitlyDeletedAlarmIds.addAll(persistedLocalDeletedIds)
+
                     val remoteAlarms = snapshot.documents.mapNotNull { doc ->
-                        if (doc.id in explicitlyDeletedAlarmIds) return@mapNotNull null
+                        val isDocDeleted = (doc.getBoolean("isDeleted") ?: false) ||
+                            doc.getString("scheduleStatus") == FamilyAlarm.STATUS_DELETED
+                        if (isDocDeleted) {
+                            detectedDeletedIds.add(doc.id)
+                            return@mapNotNull null
+                        }
+                        if (doc.id in explicitlyDeletedAlarmIds || doc.id in detectedDeletedIds) {
+                            return@mapNotNull null
+                        }
                         val title = doc.getString("title") ?: return@mapNotNull null
                         val hour = (doc.getLong("hour") ?: 7L).toInt().coerceIn(0, 23)
                         val minute = (doc.getLong("minute") ?: 0L).toInt().coerceIn(0, 59)
@@ -3568,17 +3630,51 @@ class FamilyRepository(
                         )
                     }
 
-                    // Merge any locally created/modified alarms whose Firestore write is still in flight
                     val remoteIds = remoteAlarms.map { it.id }.toSet()
+
+                    // 2. Any alarm ID that was previously observed in Firestore `remoteAlarms` (or persisted on disk from a previous session)
+                    //    and is now absent from `remoteIds` (and not a brand-new unpushed local write) was deleted in Firestore!
+                    synchronized(knownRemoteAlarmIds) {
+                        knownRemoteAlarmIds.forEach { prevRemoteId ->
+                            if (prevRemoteId !in remoteIds) {
+                                detectedDeletedIds.add(prevRemoteId)
+                            }
+                        }
+                        knownRemoteAlarmIds.clear()
+                        knownRemoteAlarmIds.addAll(remoteIds)
+                    }
+
+                    if (ctx != null) {
+                        val persistedOnDisk = com.example.notifications.FamilyAlarmScheduler.loadPersistedAlarms(ctx)
+                        persistedOnDisk.forEach { diskAlarm ->
+                            if (diskAlarm.id !in remoteIds && diskAlarm.id !in locallyManagedAlarms.keys) {
+                                detectedDeletedIds.add(diskAlarm.id)
+                            }
+                        }
+                    }
+
+                    // Once an alarm is observed in Firestore `remoteIds`, it is no longer a pending local-only write
+                    remoteIds.forEach { syncedId ->
+                        locallyManagedAlarms.remove(syncedId)
+                    }
+                    // Also remove starter demo alarms once connected to Firestore
+                    locallyManagedAlarms.remove("alarm_wakeup")
+                    locallyManagedAlarms.remove("alarm_school_bus")
+
+                    if (detectedDeletedIds.isNotEmpty()) {
+                        reconcileRemoteDeletedAlarmIds(familyId, detectedDeletedIds)
+                    }
+
+                    // Merge ONLY brand-new locally created/modified alarms whose Firestore write is still in flight
                     val pendingLocalOnly = locallyManagedAlarms.values.filter { local ->
                         local.id !in remoteIds &&
                             local.id !in explicitlyDeletedAlarmIds &&
+                            local.id !in detectedDeletedIds &&
                             (local.familyId.isBlank() || local.familyId == familyId)
                     }
                     val mergedAlarms = (remoteAlarms + pendingLocalOnly)
                         .sortedWith(compareBy({ it.hour }, { it.minute }))
 
-                    val ctx = appContext
                     val syncedAlarms = if (ctx != null) {
                         val localResults = com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
                             context = ctx,
@@ -3586,7 +3682,8 @@ class FamilyRepository(
                             currentMemberId = currentMemberId,
                             currentAuthUid = authUid,
                             currentMemberName = currentMember.name,
-                            isChildDevice = !currentMember.isParent
+                            isChildDevice = !currentMember.isParent,
+                            authoritativeRemoteSync = true
                         )
                         mergedAlarms.map { alarm ->
                             val localRes = localResults[alarm.id]
@@ -3606,7 +3703,8 @@ class FamilyRepository(
                                     nextTriggerAtMillis = localRes.nextTriggerAtMillis,
                                     lastScheduleError = localRes.errorMessage
                                 )
-                                locallyManagedAlarms[updatedAlarm.id] = updatedAlarm
+                                // IMPORTANT: Do NOT put remote alarms back into locallyManagedAlarms here,
+                                // otherwise deleting the alarm from another device would resurrect it from locallyManagedAlarms!
                                 if (needsAckWrite) {
                                     acknowledgeAlarmOnTargetDeviceInFirestore(familyId, updatedAlarm)
                                 }
@@ -3619,9 +3717,7 @@ class FamilyRepository(
                         mergedAlarms
                     }
 
-                    if (syncedAlarms.isNotEmpty() || _isGoogleSignedIn.value) {
-                        _familyAlarms.value = syncedAlarms
-                    }
+                    _familyAlarms.value = syncedAlarms
                 }
         }
     }
@@ -5209,7 +5305,12 @@ class FamilyRepository(
         val deviceModelLabel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
         val familyId = _activeFamilyId.value
 
-        val currentAlarms = _familyAlarms.value
+        val persistedDeleted = com.example.notifications.FamilyAlarmScheduler.getPersistedDeletedAlarmIds(ctx)
+        explicitlyDeletedAlarmIds.addAll(persistedDeleted)
+
+        val currentAlarms = _familyAlarms.value.filterNot {
+            it.id in explicitlyDeletedAlarmIds || it.isDeleted || it.scheduleStatus == FamilyAlarm.STATUS_DELETED
+        }
         val localResults = com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
             context = ctx,
             alarms = currentAlarms,
@@ -5236,7 +5337,6 @@ class FamilyRepository(
                     nextTriggerAtMillis = localRes.nextTriggerAtMillis,
                     lastScheduleError = localRes.errorMessage
                 )
-                locallyManagedAlarms[updated.id] = updated
                 if (needsAckWrite && familyId.isNotBlank()) {
                     acknowledgeAlarmOnTargetDeviceInFirestore(familyId, updated)
                 }
@@ -5246,6 +5346,54 @@ class FamilyRepository(
             }
         }
         _familyAlarms.value = updatedList
+    }
+
+    /**
+     * Reconciles alarm IDs that were deleted in Firestore:
+     * 1. Records them in [explicitlyDeletedAlarmIds] and persistent `SharedPreferences`.
+     * 2. Removes them from [locallyManagedAlarms], [knownRemoteAlarmIds], and [_familyAlarms].
+     * 3. Cancels their `AlarmManager` PendingIntent, pending snooze PendingIntent, and stops active ringing if ringing.
+     * 4. Confirms cancellation in Firestore on this member's document so a parent device knows the child device cancelled it.
+     */
+    fun reconcileRemoteDeletedAlarmIds(familyId: String, deletedIds: Collection<String>) {
+        val validIds = deletedIds.map { it.trim() }.filter { it.isNotBlank() }.toSet()
+        if (validIds.isEmpty()) return
+
+        val ctx = appContext
+        val newlyCancelledOnDevice = mutableSetOf<String>()
+
+        validIds.forEach { delId ->
+            val wasInMemory = _familyAlarms.value.any { it.id == delId } ||
+                delId in locallyManagedAlarms.keys ||
+                delId !in explicitlyDeletedAlarmIds
+            val wasScheduledOrPersisted = ctx != null && (
+                com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(ctx, delId) ||
+                    com.example.notifications.FamilyAlarmScheduler.isSnoozeLocallyScheduled(ctx, delId) ||
+                    com.example.notifications.FamilyAlarmScheduler.loadPersistedAlarms(ctx).any { it.id == delId } ||
+                    com.example.notifications.FamilyAlarmRingingService.activeRingingAlarm.value?.alarmId == delId
+                )
+
+            explicitlyDeletedAlarmIds.add(delId)
+            locallyManagedAlarms.remove(delId)
+            knownRemoteAlarmIds.remove(delId)
+            ctx?.let { com.example.notifications.FamilyAlarmScheduler.markAlarmDeletedAndCancel(it, delId) }
+
+            if (wasInMemory || wasScheduledOrPersisted) {
+                newlyCancelledOnDevice.add(delId)
+            }
+        }
+
+        if (_familyAlarms.value.any { it.id in validIds }) {
+            _familyAlarms.value = _familyAlarms.value.filterNot { it.id in validIds }
+        }
+
+        if (newlyCancelledOnDevice.isNotEmpty() && familyId.isNotBlank()) {
+            confirmDeletedAlarmsCancelledInFirestore(familyId, newlyCancelledOnDevice)
+        }
+    }
+
+    fun dismissDeletedAlarmNotice(alarmId: String) {
+        _deletedAlarmNotices.value = _deletedAlarmNotices.value.filterNot { it.alarmId == alarmId }
     }
 
     fun addOrUpdateFamilyAlarm(alarm: FamilyAlarm): Boolean {
@@ -5347,7 +5495,9 @@ class FamilyRepository(
         }
 
         explicitlyDeletedAlarmIds.remove(scheduledAlarm.id)
+        ctx?.let { com.example.notifications.FamilyAlarmScheduler.clearDeletedAlarmId(it, scheduledAlarm.id) }
         locallyManagedAlarms[scheduledAlarm.id] = scheduledAlarm
+        _deletedAlarmNotices.value = _deletedAlarmNotices.value.filterNot { it.alarmId == scheduledAlarm.id }
 
         val existingIdx = _familyAlarms.value.indexOfFirst { it.id == scheduledAlarm.id }
         _familyAlarms.value = if (existingIdx >= 0) {
@@ -5379,8 +5529,38 @@ class FamilyRepository(
         }
         explicitlyDeletedAlarmIds.add(alarmId)
         locallyManagedAlarms.remove(alarmId)
-        appContext?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, alarmId) }
+        knownRemoteAlarmIds.remove(alarmId)
+        appContext?.let { com.example.notifications.FamilyAlarmScheduler.markAlarmDeletedAndCancel(it, alarmId) }
         _familyAlarms.value = _familyAlarms.value.filterNot { it.id == alarmId }
+
+        val isTargetedAtThisDevice = target.isTargetedAtDeviceMember(
+            memberId = current.id,
+            authUid = authUid,
+            currentMemberName = current.name,
+            isChildDevice = !current.isParent
+        )
+        val isRemoteChildTarget = target.isTargetedToAnotherMember() && !isTargetedAtThisDevice
+        val targetMemberId = target.effectiveAssignedMemberId
+        val targetMemberName = _members.value.find { it.id == targetMemberId }?.name
+            ?: target.assignedMemberName.takeIf { it.isNotBlank() }
+            ?: "בן משפחה"
+        val alreadyConfirmedByTarget = !isRemoteChildTarget ||
+            confirmedCancelledAlarmIdsByMember[targetMemberId]?.contains(alarmId) == true
+
+        val notice = DeletedAlarmSyncNotice(
+            alarmId = alarmId,
+            title = target.title,
+            formattedTime = target.formattedTime24h,
+            targetMemberId = targetMemberId,
+            targetMemberName = targetMemberName,
+            isRemoteTarget = isRemoteChildTarget,
+            isDeletedInCloud = true,
+            isConfirmedCancelledOnTarget = alreadyConfirmedByTarget,
+            deletedAtMillis = System.currentTimeMillis(),
+            confirmedAtMillis = if (alreadyConfirmedByTarget) System.currentTimeMillis() else 0L
+        )
+        _deletedAlarmNotices.value = (listOf(notice) + _deletedAlarmNotices.value.filterNot { it.alarmId == alarmId }).take(5)
+
         appContext?.let {
             com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
                 context = it,
@@ -5395,10 +5575,28 @@ class FamilyRepository(
         return true
     }
 
+    private fun confirmDeletedAlarmsCancelledInFirestore(familyId: String, cancelledIds: Set<String>) {
+        val db = firestoreProvider() ?: return
+        val authUser = authProvider()?.currentUser ?: return
+        if (familyId.isBlank() || cancelledIds.isEmpty()) return
+        repoScope.launch {
+            runCatching {
+                val memberRef = db.collection("families").document(familyId)
+                    .collection("members").document(authUser.uid)
+                memberRef.update(
+                    mapOf(
+                        "cancelledAlarmIds" to com.google.firebase.firestore.FieldValue.arrayUnion(*cancelledIds.toTypedArray()),
+                        "lastAlarmSyncAtMillis" to System.currentTimeMillis()
+                    )
+                ).await()
+            }
+        }
+    }
+
     private fun acknowledgeAlarmOnTargetDeviceInFirestore(familyId: String, alarm: FamilyAlarm) {
         val db = firestoreProvider() ?: return
         val authUser = authProvider()?.currentUser ?: return
-        if (familyId.isBlank()) return
+        if (familyId.isBlank() || alarm.id in explicitlyDeletedAlarmIds) return
         repoScope.launch {
             val docRef = db.collection("families").document(familyId)
                 .collection("alarms").document(alarm.id)
@@ -5426,10 +5624,21 @@ class FamilyRepository(
         val familyId = _activeFamilyId.value.takeIf { it.isNotBlank() } ?: return
         repoScope.launch {
             runCatching {
-                val docRef = db.collection("families").document(familyId)
-                    .collection("alarms").document(alarm.id)
+                val familyRef = db.collection("families").document(familyId)
+                val docRef = familyRef.collection("alarms").document(alarm.id)
                 if (isDelete) {
-                    docRef.delete().await()
+                    // 1. Delete the alarm document from /families/{familyId}/alarms/{alarmId}
+                    runCatching { docRef.delete().await() }
+                    // 2. Also record tombstone in /families/{familyId}.deletedAlarmIds so offline devices
+                    //    reconcile the deletion immediately upon reconnecting
+                    runCatching {
+                        familyRef.update(
+                            mapOf(
+                                "deletedAlarmIds" to com.google.firebase.firestore.FieldValue.arrayUnion(alarm.id),
+                                "updatedAt" to System.currentTimeMillis()
+                            )
+                        ).await()
+                    }
                 } else {
                     val targetId = alarm.effectiveAssignedMemberId
                     val map = mapOf(
@@ -5461,10 +5670,14 @@ class FamilyRepository(
                         "acknowledgedAtMillis" to alarm.acknowledgedAtMillis,
                         "nextTriggerAtMillis" to alarm.nextTriggerAtMillis,
                         "lastScheduleError" to alarm.lastScheduleError,
+                        "isDeleted" to false,
                         "updatedByUid" to authUser.uid,
                         "updatedAt" to System.currentTimeMillis()
                     )
                     docRef.set(map, SetOptions.merge()).await()
+                    // Once committed to Firestore, remove from locallyManagedAlarms so Firestore is authoritative
+                    knownRemoteAlarmIds.add(alarm.id)
+                    locallyManagedAlarms.remove(alarm.id)
                 }
             }
         }

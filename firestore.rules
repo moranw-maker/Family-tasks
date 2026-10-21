@@ -346,7 +346,11 @@ service cloud.firestore {
           || !('ownerUid' in request.resource.data)
           || request.resource.data.ownerUid == resource.data.ownerUid
         )
-      ) || isSelfMemberListAppend(familyId);
+      ) || isSelfMemberListAppend(familyId)
+      || (
+        isFamilyMember(familyId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedAlarmIds', 'updatedAt'])
+      );
 
       allow delete: if isParent(familyId);
 
@@ -414,6 +418,10 @@ service cloud.firestore {
           isParent(familyId)
           && isAllowedRoleValue(request.resource.data.get('role', ''))
           && isValidFamilyIdentity(request.resource.data)
+        ) || (
+          isOwner(memberId)
+          && isFamilyMember(familyId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cancelledAlarmIds', 'lastAlarmSyncAtMillis', 'updatedAt'])
         ) || (
           isOwner(memberId)
           && isFamilyMember(familyId)

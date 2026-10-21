@@ -64,6 +64,8 @@ fun FamilyTasksApp(
     val tasks by viewModel.tasks.collectAsStateWithLifecycle()
     val schedulePeriods by viewModel.schedulePeriods.collectAsStateWithLifecycle()
     val familyAlarms by viewModel.familyAlarms.collectAsStateWithLifecycle()
+    val deletedAlarmNotices by viewModel.deletedAlarmNotices.collectAsStateWithLifecycle()
+    val activeRingingAlarm by com.example.notifications.FamilyAlarmRingingService.activeRingingAlarm.collectAsStateWithLifecycle()
     val folders by viewModel.folders.collectAsStateWithLifecycle()
     val documents by viewModel.documents.collectAsStateWithLifecycle()
     val notifications by viewModel.notifications.collectAsStateWithLifecycle()
@@ -351,6 +353,8 @@ fun FamilyTasksApp(
                                             members = members,
                                             currentMember = currentMember,
                                             isHebrew = isHebrew,
+                                            deletedAlarmNotices = deletedAlarmNotices,
+                                            onDismissDeletedNotice = { viewModel.dismissDeletedAlarmNotice(it) },
                                             onSaveAlarm = { viewModel.saveFamilyAlarm(it) },
                                             onToggleAlarm = { viewModel.toggleFamilyAlarm(it) },
                                             onDeleteAlarm = { viewModel.deleteFamilyAlarm(it) },
@@ -735,6 +739,36 @@ fun FamilyTasksApp(
                             }
                         )
                     }
+                    // Global Full-Screen Alarm Ringing Overlay (appears immediately over any screen if an alarm is ringing)
+                    activeRingingAlarm?.let { ringing ->
+                        val appCtx = androidx.compose.ui.platform.LocalContext.current
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .testTag("global_active_alarm_ringing_overlay")
+                        ) {
+                            com.example.notifications.FullScreenAlarmRingingContent(
+                                timeFormatted = ringing.timeFormatted,
+                                alarmLabel = ringing.title,
+                                snoozeMinutes = ringing.snoozeMinutes,
+                                vibrateEnabled = ringing.vibrateEnabled,
+                                onSnooze = {
+                                    com.example.notifications.FamilyAlarmRingingService.snoozeActiveAlarm(appCtx)
+                                    viewModel.showToastMessage(
+                                        if (isHebrew) "נודניק הופעל ל-${ringing.snoozeMinutes} דקות 💤"
+                                        else "Snoozed for ${ringing.snoozeMinutes} minutes 💤"
+                                    )
+                                },
+                                onDismiss = {
+                                    com.example.notifications.FamilyAlarmRingingService.dismissActiveAlarm(appCtx, ringing.alarmId)
+                                    viewModel.showToastMessage(
+                                        if (isHebrew) "השעון המעורר כובה ✓"
+                                        else "Alarm dismissed ✓"
+                                    )
+                                }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -749,7 +783,7 @@ private fun FamilyBottomNavBar(
     onNavigate: (AppScreen) -> Unit
 ) {
     // V1.6 Requirement 1:
-    // PARENT sees the Family Management tab; CHILD sees their permitted tasks, calendar, timetable, files, and settings.
+    // PARENT sees the Family Management tab; CHILD sees their permitted tasks, calendar, timetable, alarms, and files.
     val items = buildList {
         add(NavBarItem(AppScreen.HOME, if (isHebrew) "משימות" else "Tasks", Icons.Filled.CheckCircle, Icons.Outlined.CheckCircle, "nav_home"))
         add(NavBarItem(AppScreen.CALENDAR, if (isHebrew) "לוח שנה" else "Calendar", Icons.Filled.CalendarMonth, Icons.Outlined.CalendarMonth, "nav_calendar"))
@@ -769,44 +803,54 @@ private fun FamilyBottomNavBar(
             .fillMaxWidth()
             .testTag("bottom_navigation_bar")
     ) {
-        Row(
+        androidx.compose.foundation.layout.BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(horizontal = 4.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
         ) {
-            items.forEach { item ->
-                val isSelected = currentScreen == item.screen
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(14.dp))
-                        .clickable { onNavigate(item.screen) }
-                        .background(
-                            if (isSelected) GoogleBlue.copy(alpha = 0.12f) else Color.Transparent
+            val isCompactWidth = maxWidth < 380.dp || items.size >= 6
+            val iconSize = if (isCompactWidth) 19.dp else 21.dp
+            val labelFontSize = if (isCompactWidth) 9.5.sp else 10.5.sp
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = if (isCompactWidth) 2.dp else 6.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                items.forEach { item ->
+                    val isSelected = currentScreen == item.screen
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onNavigate(item.screen) }
+                            .background(
+                                if (isSelected) GoogleBlue.copy(alpha = 0.12f) else Color.Transparent
+                            )
+                            .padding(horizontal = 2.dp, vertical = 5.dp)
+                            .defaultMinSize(minWidth = 44.dp, minHeight = 48.dp)
+                            .testTag(item.testTag)
+                    ) {
+                        Icon(
+                            imageVector = if (isSelected) item.selectedIcon else item.unselectedIcon,
+                            contentDescription = item.label,
+                            tint = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(iconSize)
                         )
-                        .padding(horizontal = 2.dp, vertical = 6.dp)
-                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                        .testTag(item.testTag)
-                ) {
-                    Icon(
-                        imageVector = if (isSelected) item.selectedIcon else item.unselectedIcon,
-                        contentDescription = item.label,
-                        tint = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = item.label,
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                        color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = item.label,
+                            fontSize = labelFontSize,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }

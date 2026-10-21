@@ -20,15 +20,31 @@ class FamilyAlarmReceiver : BroadcastReceiver() {
     companion object {
         private val recentTriggerMap = ConcurrentHashMap<String, Long>()
 
+        private val recentDismissMap = ConcurrentHashMap<String, Long>()
+
         fun wasRecentlyTriggered(alarmId: String, withinMillis: Long = 20_000L): Boolean {
             if (alarmId.isBlank()) return false
             val last = recentTriggerMap[alarmId] ?: return false
             return (System.currentTimeMillis() - last) in 0..withinMillis
         }
 
+        fun wasRecentlyDismissed(alarmId: String, withinMillis: Long = 5_000L): Boolean {
+            if (alarmId.isBlank()) return false
+            val last = recentDismissMap[alarmId] ?: return false
+            return (System.currentTimeMillis() - last) in 0..withinMillis
+        }
+
+        fun recordAlarmDismissed(alarmId: String) {
+            if (alarmId.isNotBlank()) {
+                recentDismissMap[alarmId] = System.currentTimeMillis()
+                recentTriggerMap.remove(alarmId)
+            }
+        }
+
         fun clearRecentTrigger(alarmId: String) {
             if (alarmId.isNotBlank()) {
                 recentTriggerMap.remove(alarmId)
+                recentDismissMap.remove(alarmId)
             }
         }
 
@@ -55,11 +71,16 @@ class FamilyAlarmReceiver : BroadcastReceiver() {
 
             FamilyAlarmScheduler.ACTION_SNOOZE_FAMILY_ALARM -> {
                 clearRecentTrigger(rawAlarmId)
+                if (rawAlarmId.isNotBlank() && rawAlarmId in FamilyAlarmScheduler.getPersistedDeletedAlarmIds(context)) {
+                    FamilyAlarmScheduler.cancelLocalAlarm(context, rawAlarmId)
+                    return
+                }
                 val persisted = FamilyAlarmScheduler.loadPersistedAlarms(context)
                     .find { it.id == rawAlarmId }
                 val title = intent.getStringExtra(FamilyAlarmScheduler.EXTRA_ALARM_TITLE)
-                    ?: persisted?.title
-                    ?: "שעון מעורר משפחתי"
+                    ?.takeIf { it.isNotBlank() }
+                    ?: persisted?.title?.takeIf { it.isNotBlank() }
+                    ?: "בוקר טוב!"
                 val soundType = intent.getStringExtra(FamilyAlarmScheduler.EXTRA_ALARM_SOUND_TYPE)
                     ?: persisted?.soundType
                     ?: AlarmAudioController.SOUND_MELODY_ENERGETIC
@@ -91,6 +112,14 @@ class FamilyAlarmReceiver : BroadcastReceiver() {
             }
 
             FamilyAlarmScheduler.ACTION_TRIGGER_FAMILY_ALARM -> {
+                if (rawAlarmId.isNotBlank() &&
+                    rawAlarmId != FamilyAlarmScheduler.DIAGNOSTIC_ALARM_ID &&
+                    rawAlarmId in FamilyAlarmScheduler.getPersistedDeletedAlarmIds(context)
+                ) {
+                    clearRecentTrigger(rawAlarmId)
+                    FamilyAlarmScheduler.cancelLocalAlarm(context, rawAlarmId)
+                    return
+                }
                 acquireBriefHandOffWakeLock(context)
 
                 val persisted = FamilyAlarmScheduler.loadPersistedAlarms(context)
@@ -109,8 +138,8 @@ class FamilyAlarmReceiver : BroadcastReceiver() {
 
                 val title = intent.getStringExtra(FamilyAlarmScheduler.EXTRA_ALARM_TITLE)
                     ?.takeIf { it.isNotBlank() }
-                    ?: persisted?.title
-                    ?: "שעון מעורר משפחתי"
+                    ?: persisted?.title?.takeIf { it.isNotBlank() }
+                    ?: "בוקר טוב!"
                 val hour = intent.getIntExtra(
                     FamilyAlarmScheduler.EXTRA_ALARM_HOUR,
                     persisted?.hour ?: 7

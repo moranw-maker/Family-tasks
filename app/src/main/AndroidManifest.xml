@@ -75,8 +75,11 @@
             android:name=".notifications.FamilyAlarmRingingActivity"
             android:exported="false"
             android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
             android:theme="@style/Theme.MyApplication" />
 
         <receiver
