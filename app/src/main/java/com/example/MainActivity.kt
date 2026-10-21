@@ -506,7 +506,8 @@ fun FamilyTasksApp(
                                             onTenMinuteAlertsChange = { viewModel.setTenMinuteClassAlerts(it) },
                                             onUpdateFamilyIdentity = { newIdentity ->
                                                 viewModel.updateCurrentUserProfile(newIdentity = newIdentity)
-                                            }
+                                            },
+                                            onShowToast = { viewModel.showToastMessage(it) }
                                         )
                                     }
                                 }

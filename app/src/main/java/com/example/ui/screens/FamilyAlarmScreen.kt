@@ -1,18 +1,28 @@
 package com.example.ui.screens
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.AlarmClock
+import android.text.format.DateFormat
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,27 +30,40 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Alarm
-import androidx.compose.material.icons.filled.AlarmAdd
 import androidx.compose.material.icons.filled.AlarmOff
-import androidx.compose.material.icons.filled.AlarmOn
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.RadioButtonChecked
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Snooze
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VolumeUp
@@ -48,15 +71,19 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -64,6 +91,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -73,43 +101,19 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import java.util.Locale
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.material.icons.filled.AccessTime
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.FilterChipDefaults
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import android.app.Activity
-import android.media.RingtoneManager
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.NotificationsActive
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import android.text.format.DateFormat
 import com.example.model.DeletedAlarmSyncNotice
 import com.example.model.FamilyAlarm
 import com.example.model.FamilyMember
@@ -117,41 +121,72 @@ import com.example.model.SchoolDay
 import com.example.model.UserRole
 import com.example.notifications.ActiveRingingAlarmState
 import com.example.notifications.AlarmAudioController
-import com.example.notifications.AlarmDiagnosticState
-import com.example.notifications.FamilyAlarmReceiver
 import com.example.notifications.FamilyAlarmRingingService
 import com.example.notifications.FamilyAlarmScheduler
 import com.example.ui.components.FamilyTimeSelectionDialog
-import com.example.ui.components.ScreenHelpBanner
 import com.example.ui.components.TimeFormatUtils
-import com.example.ui.components.TimePickerField
 import com.example.ui.theme.GoogleBlue
 import com.example.ui.theme.GoogleBlueDark
 import com.example.ui.theme.GoogleBlueLight
-import com.example.ui.theme.OutlineLight
-import com.example.ui.theme.PastelGreenBackground
-import com.example.ui.theme.PastelGreenDark
 import com.example.ui.theme.GoogleRed
 import com.example.ui.theme.GoogleRedDark
 import com.example.ui.theme.GoogleRedLight
+import com.example.ui.theme.OutlineLight
+import com.example.ui.theme.PastelGreenBackground
+import com.example.ui.theme.PastelGreenDark
 import com.example.ui.theme.PastelYellowBackground
 import com.example.ui.theme.PastelYellowBorder
 import com.example.ui.theme.PastelYellowDark
-import com.example.ui.theme.VibrantActionBlue
 import java.util.Calendar
+import java.util.Locale
+import kotlinx.coroutines.delay
 
 /**
- * Standalone Family Alarm Clock screen ("שעון מעורר").
+ * Duration in milliseconds for the auto-dismissing green alarm saved banner (7 seconds).
+ */
+const val ALARM_SAVED_SUCCESS_BANNER_DURATION_MS = 7_000L
+
+/**
+ * Immutable state for the auto-dismissing green alarm saved confirmation banner.
+ * Each save generates a unique [id] so that an older coroutine timer never dismisses a newer banner.
+ */
+data class AlarmSavedBannerState(
+    val id: Long,
+    val headlineText: String,
+    val nextRingSubtitleText: String
+)
+
+/**
+ * Ringtone picker categories for [FamilyAlarmRingtonePickerScreen].
+ */
+enum class RingtonePickerTab(val labelHe: String, val labelEn: String, val testTag: String) {
+    SYSTEM_ALARMS(
+        labelHe = "צלילי מערכת",
+        labelEn = "System Sounds",
+        testTag = "ringtone_tab_system_alarms"
+    ),
+    ADDITIONAL_SOUNDS(
+        labelHe = "צלילים נוספים",
+        labelEn = "More Sounds",
+        testTag = "ringtone_tab_additional_sounds"
+    ),
+    CUSTOM_SOUND(
+        labelHe = "צליל מותאם אישית",
+        labelEn = "Custom Sound",
+        testTag = "ringtone_tab_custom_sound"
+    )
+}
+
+/**
+ * Standalone Family Alarm Clock screen ("שעונים מעוררים") — Clean Soft Glass Redesign.
  *
  * Features:
- * - Separate bottom navigation tab for both Parent and Child roles.
- * - Role-aware ownership & editing permissions:
- *   - Parent-created alarm for child: visible to child (read-only), editable by parent, rings only on child's device.
- *   - Child-created alarm for self: editable by both child and parent, rings only on child's device.
- *   - Parent-created alarm for self: editable only by parent, rings only on parent's device.
- * - Live in-app ringing banner with alarm time, label, "נודניק" (Snooze), and "כיבוי" (Dismiss).
- * - Audible sound preview and volume preview for built-in melodies, system tones, and custom audio files.
- * - Hebrew confirmation dialog before deleting an alarm.
+ * - Clean Soft Glass header with "שעונים מעוררים" title and compact blue (+) button.
+ * - Non-blocking green confirmation banner ("השעון המעורר נשמר בהצלחה") that auto-dismisses after 7 seconds.
+ * - Role-aware ownership & privacy:
+ *   - Parent personal alarms are strictly private and hidden from children.
+ *   - Parent-created child alarms sync to the child's device and are protected from child edits.
+ * - Full-screen Soft Glass editor (`FamilyAlarmEditorScreen`) and dedicated Ringtone Picker (`FamilyAlarmRingtonePickerScreen`).
  */
 @Composable
 fun FamilyAlarmScreen(
@@ -173,16 +208,24 @@ fun FamilyAlarmScreen(
 
     val context = LocalContext.current
     val activeRingingAlarm by FamilyAlarmRingingService.activeRingingAlarm.collectAsState()
-    val diagnosticState by FamilyAlarmScheduler.diagnosticState.collectAsState()
-    var showDeveloperDiagnostics by remember { mutableStateOf(false) }
+    val previewState by AlarmAudioController.previewState.collectAsState()
+
     var alarmToEdit by remember { mutableStateOf<FamilyAlarm?>(null) }
     var showAddOrEditDialog by remember { mutableStateOf(false) }
     var alarmPendingDelete by remember { mutableStateOf<FamilyAlarm?>(null) }
+    var activeSuccessBanner by remember { mutableStateOf<AlarmSavedBannerState?>(null) }
 
-    val hasExactPermission = remember(diagnosticState) { FamilyAlarmScheduler.canScheduleExactAlarms(context) }
-    val canUseFullScreen = remember(diagnosticState) { FamilyAlarmScheduler.canUseFullScreenIntent(context) }
-    val hasNotifications = remember(diagnosticState) { FamilyAlarmScheduler.hasNotificationPermission(context) }
-    val isBatteryUnrestricted = remember { FamilyAlarmScheduler.isIgnoringBatteryOptimizations(context) }
+    // Lifecycle-aware 7-second auto-dismiss timer keyed by activeSuccessBanner.id
+    // If a new alarm is saved before 7 seconds elapse, the previous LaunchedEffect is cancelled
+    // and restarted for the new banner ID, so an older timer never hides a newer message.
+    activeSuccessBanner?.let { banner ->
+        LaunchedEffect(banner.id) {
+            delay(ALARM_SAVED_SUCCESS_BANNER_DURATION_MS)
+            if (activeSuccessBanner?.id == banner.id) {
+                activeSuccessBanner = null
+            }
+        }
+    }
 
     // Filter alarms so parent personal alarms are strictly private and never visible to children
     val visibleAlarms = remember(alarms, currentMember, members) {
@@ -217,24 +260,26 @@ fun FamilyAlarmScreen(
                 onSaveAlarm(savedAlarm)
                 val targetId = savedAlarm.effectiveAssignedMemberId
                 val isRemoteChildTarget = targetId.isNotBlank() && targetId != currentMember.id
-                if (alsoSetSystemClock && !isRemoteChildTarget) {
-                    openAndroidSystemClock(context, savedAlarm, isHebrew, onShowToast)
-                } else {
-                    val toastMsg = if (isRemoteChildTarget) {
-                        if (isHebrew) {
-                            "השעון נשמר בענן • יצלצל במכשיר של ${savedAlarm.assignedMemberName} (${savedAlarm.formattedTime24h}) ⏳"
+
+                val nextSummary = formatNextTriggerRelativeSummary(savedAlarm, isHebrew)
+                activeSuccessBanner = AlarmSavedBannerState(
+                    id = System.nanoTime(),
+                    headlineText = if (isHebrew) "השעון המעורר נשמר בהצלחה" else "Alarm saved successfully",
+                    nextRingSubtitleText = if (isHebrew) {
+                        if (isRemoteChildTarget) {
+                            "הצלצול הבא במכשיר של ${savedAlarm.assignedMemberName}: $nextSummary"
                         } else {
-                            "Alarm synced • Will ring on ${savedAlarm.assignedMemberName}'s device (${savedAlarm.formattedTime24h}) ⏳"
+                            "הצלצול הבא: $nextSummary"
                         }
                     } else {
-                        if (isHebrew) {
-                            "השעון המעורר תוזמן במכשיר זה לשעה ${savedAlarm.formattedTime24h} ⏰"
-                        } else {
-                            "Alarm scheduled on this device for ${savedAlarm.formattedTime24h} ⏰"
-                        }
+                        "Next ring: $nextSummary"
                     }
-                    onShowToast(toastMsg)
+                )
+
+                if (alsoSetSystemClock && !isRemoteChildTarget) {
+                    openAndroidSystemClock(context, savedAlarm, isHebrew, onShowToast)
                 }
+
                 showAddOrEditDialog = false
                 alarmToEdit = null
             }
@@ -242,483 +287,286 @@ fun FamilyAlarmScreen(
         return
     }
 
-    Scaffold(
-        floatingActionButton = {
-            Surface(
-                onClick = {
-                    alarmToEdit = null
-                    showAddOrEditDialog = true
-                },
-                shape = RoundedCornerShape(24.dp),
-                color = VibrantActionBlue,
-                contentColor = Color.White,
-                shadowElevation = 6.dp,
-                modifier = Modifier
-                    .defaultMinSize(minHeight = 48.dp)
-                    .testTag("add_alarm_fab")
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.AlarmAdd,
-                        contentDescription = if (isHebrew) "שעון מעורר חדש" else "Add Alarm",
-                        modifier = Modifier.size(20.dp)
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0xFFEAF3FE),
+                        Color(0xFFF6F9FE),
+                        Color.White
                     )
-                    Text(
-                        text = if (isHebrew) "שעון מעורר חדש" else "Add Alarm",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp
+                )
+            )
+            .testTag("family_alarm_screen")
+    ) {
+        val isCompactScreen = maxWidth < 360.dp
+        val horizontalPad = if (isCompactScreen) 12.dp else 16.dp
+
+        LazyColumn(
+            contentPadding = PaddingValues(
+                start = horizontalPad,
+                end = horizontalPad,
+                top = 12.dp,
+                bottom = 96.dp
+            ),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .widthIn(max = 640.dp)
+                .align(Alignment.TopCenter)
+                .testTag("family_alarms_list")
+        ) {
+            // 1. Clean Soft Glass Header ("שעונים מעוררים" + Prominent Compact Blue Add Button)
+            item(key = "main_alarm_header") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0xFFDCEBFE),
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Alarm,
+                                    contentDescription = null,
+                                    tint = GoogleBlueDark,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            text = if (isHebrew) "שעונים מעוררים" else "Alarms",
+                            style = MaterialTheme.typography.headlineSmall.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFF15366B),
+                                fontSize = 23.sp
+                            ),
+                            modifier = Modifier.testTag("main_alarm_screen_title")
+                        )
+                    }
+
+                    // Prominent compact blue Add (+) button
+                    Surface(
+                        onClick = {
+                            alarmToEdit = null
+                            showAddOrEditDialog = true
+                        },
+                        shape = RoundedCornerShape(16.dp),
+                        color = GoogleBlue,
+                        contentColor = Color.White,
+                        shadowElevation = 4.dp,
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .testTag("add_alarm_fab")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = if (isHebrew) "שעון מעורר חדש" else "Add Alarm",
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Text(
+                                text = if (isHebrew) "חדש" else "New",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 2. Auto-Dismissing Green Success Message (7 Seconds)
+            item(key = "alarm_saved_success_banner_slot") {
+                AnimatedVisibility(
+                    visible = activeSuccessBanner != null,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
+                    activeSuccessBanner?.let { banner ->
+                        AlarmSavedSuccessBanner(
+                            banner = banner,
+                            isHebrew = isHebrew,
+                            onDismissEarly = { activeSuccessBanner = null }
+                        )
+                    }
+                }
+            }
+
+            // 3. Live Ringing Alarm Card (when an alarm is actively ringing on this device)
+            activeRingingAlarm?.let { ringing ->
+                item(key = "active_ringing_banner") {
+                    ActiveRingingAlarmCard(
+                        ringing = ringing,
+                        isHebrew = isHebrew,
+                        onSnooze = {
+                            FamilyAlarmRingingService.snoozeActiveAlarm(context)
+                            onShowToast(
+                                if (isHebrew) "נודניק הופעל ל-${ringing.snoozeMinutes} דקות 💤"
+                                else "Snoozed for ${ringing.snoozeMinutes} minutes 💤"
+                            )
+                        },
+                        onDismiss = {
+                            FamilyAlarmRingingService.dismissActiveAlarm(context, ringing.alarmId)
+                            onShowToast(
+                                if (isHebrew) "השעון המעורר כובה ✓"
+                                else "Alarm dismissed ✓"
+                            )
+                        }
                     )
                 }
             }
-        }
-    ) { innerPadding ->
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            Color(0xFFEBF3FE),
-                            Color(0xFFF7F9FD),
-                            Color.White
-                        )
-                    )
+
+            // 4. Recently Deleted Alarms Cloud vs Target Device Sync Notices
+            items(
+                items = deletedAlarmNotices,
+                key = { "deleted_notice_${it.alarmId}" }
+            ) { notice ->
+                DeletedAlarmSyncNoticeCard(
+                    notice = notice,
+                    isHebrew = isHebrew,
+                    onDismiss = { onDismissDeletedNotice(notice.alarmId) }
                 )
-                .testTag("family_alarm_screen")
-        ) {
-            val isCompactScreen = maxWidth < 360.dp
-            val horizontalPad = if (isCompactScreen) 10.dp else 14.dp
+            }
 
-            LazyColumn(
-                contentPadding = PaddingValues(
-                    start = horizontalPad,
-                    end = horizontalPad,
-                    top = 8.dp,
-                    bottom = 112.dp
-                ),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .widthIn(max = 640.dp)
-                    .align(Alignment.TopCenter)
-                    .testTag("family_alarms_list")
-            ) {
-                // 1. Live Ringing Alarm Card (when an alarm is actively ringing on this device)
-                activeRingingAlarm?.let { ringing ->
-                    item(key = "active_ringing_banner") {
-                        ActiveRingingAlarmCard(
-                            ringing = ringing,
-                            isHebrew = isHebrew,
-                            onSnooze = {
-                                FamilyAlarmRingingService.snoozeActiveAlarm(context)
-                                onShowToast(
-                                    if (isHebrew) "נודניק הופעל ל-${ringing.snoozeMinutes} דקות 💤"
-                                    else "Snoozed for ${ringing.snoozeMinutes} minutes 💤"
-                                )
-                            },
-                            onDismiss = {
-                                FamilyAlarmRingingService.dismissActiveAlarm(context, ringing.alarmId)
-                                onShowToast(
-                                    if (isHebrew) "השעון המעורר כובה ✓"
-                                    else "Alarm dismissed ✓"
-                                )
-                            }
-                        )
-                    }
-                }
-
-                // 2. Quick Help Banner
-                item(key = "alarm_help_banner") {
-                    ScreenHelpBanner(
-                        title = if (isHebrew) "שעון מעורר משפחתי חכם" else "Smart Family Alarm Clock",
-                        tips = if (isHebrew) listOf(
-                            "שעון הורה לילד: הורה יכול להגדיר שעון מעורר עבור הילד/ה שיצלצל במכשיר הילד בלבד.",
-                            "הרשאות עריכה: ילד יכול לערוך או למחוק רק שעונים שהוא יצר בעצמו. שעון שהוגדר ע״י הורה מוגן מפני כיבוי.",
-                            "שמע ועוצמה: ניתן לבחור מנגינות השכמה מובנות, צלילי מערכת או קובץ שמע אישי ולבדוק את העוצמה מראש."
-                        ) else listOf(
-                            "Parent-to-Child Alarms: Parents can schedule wake-up alarms that ring directly on the child's device.",
-                            "Permissions: Children can manage their own alarms, while parent-assigned alarms are protected from tampering.",
-                            "Sound & Volume Preview: Test built-in melodies, system tones, or custom audio files before saving."
-                        ),
-                        isHebrew = isHebrew
-                    )
-                }
-
-                // 3. Header & Device Readiness Card
-                item(key = "alarm_header_readiness_card") {
+            // 5. Alarms List or Empty State
+            if (visibleAlarms.isEmpty()) {
+                item(key = "empty_alarms_state") {
                     Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = GoogleBlueLight.copy(alpha = 0.72f),
-                        border = BorderStroke(1.dp, GoogleBlue.copy(alpha = 0.25f)),
-                        modifier = Modifier.fillMaxWidth()
+                        shape = RoundedCornerShape(22.dp),
+                        color = Color.White.copy(alpha = 0.92f),
+                        border = BorderStroke(1.dp, Color(0xFFDCE8F8)),
+                        shadowElevation = 2.dp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 16.dp)
                     ) {
-                        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Alarm,
-                                        contentDescription = null,
-                                        tint = GoogleBlueDark,
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = if (isHebrew) "שעונים מעוררים והשכמה" else "Family & Personal Alarms",
-                                            style = MaterialTheme.typography.titleSmall.copy(
-                                                fontWeight = FontWeight.Bold,
-                                                color = GoogleBlueDark
-                                            )
-                                        )
-                                        Text(
-                                            text = if (isHebrew) {
-                                                if (currentMember.isParent) {
-                                                    "מצב הורה: ניהול שעונים אישיים ושעוני השכמה למכשירי הילדים"
-                                                } else {
-                                                    "מצב ילד/ה (${currentMember.name}): שעונים אישיים ושעוני השכמה מההורים"
-                                                }
-                                            } else {
-                                                if (currentMember.isParent) {
-                                                    "Parent mode: Manage personal and child wake-up alarms"
-                                                } else {
-                                                    "Child mode (${currentMember.name}): Personal & parent-scheduled alarms"
-                                                }
-                                            },
-                                            style = MaterialTheme.typography.labelSmall.copy(
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        )
-                                    }
-                                }
-
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
-                                ) {
-                                    TextButton(
-                                        onClick = { showDeveloperDiagnostics = !showDeveloperDiagnostics },
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                                        modifier = Modifier
-                                            .defaultMinSize(minHeight = 40.dp)
-                                            .testTag("developer_alarm_diagnostics_toggle")
-                                    ) {
-                                        Text(
-                                            text = if (isHebrew) "אבחון 🛠️" else "Diag 🛠️",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = GoogleBlueDark
-                                        )
-                                    }
-
-                                    TextButton(
-                                        onClick = {
-                                            FamilyAlarmReceiver.stopActiveRinging(context)
-                                            onShowToast(
-                                                if (isHebrew) "כל צלצול פעיל הופסק" else "Stopped active alarm ringing"
-                                            )
-                                        },
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                                        modifier = Modifier
-                                            .defaultMinSize(minHeight = 40.dp)
-                                            .testTag("stop_active_alarm_ringing_button")
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.AlarmOff,
-                                            contentDescription = if (isHebrew) "השתק" else "Silence",
-                                            modifier = Modifier.size(15.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(
-                                            text = if (isHebrew) "השתק" else "Silence",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-                            }
-
-                            if (showDeveloperDiagnostics) {
-                                Spacer(modifier = Modifier.height(8.dp))
-                                DeveloperAlarmDiagnosticsCard(
-                                    diagnosticState = diagnosticState,
-                                    isHebrew = isHebrew,
-                                    currentMemberName = currentMember.name,
-                                    onSchedule15sTest = {
-                                        val res = FamilyAlarmScheduler.scheduleDiagnostic15SecondAlarm(
-                                            context = context,
-                                            currentMemberName = currentMember.name
-                                        )
-                                        if (res.isScheduled) {
-                                            onShowToast(
-                                                if (isHebrew) "בדיקת צלצול אמיתית נקבעה ב-AlarmManager לעוד 15 שניות ⏱️"
-                                                else "Real 15-second AlarmManager test scheduled ⏱️"
-                                            )
-                                        } else {
-                                            onShowToast(
-                                                if (isHebrew) "שגיאה בתזמון בדיקת 15 שניות: ${res.errorMessage}"
-                                                else "Failed to schedule 15s test: ${res.errorMessage}"
-                                            )
-                                        }
-                                    },
-                                    onStopRinging = {
-                                        FamilyAlarmReceiver.stopActiveRinging(context)
-                                    },
-                                    onReset = {
-                                        FamilyAlarmScheduler.resetDiagnosticState(context)
-                                    }
-                                )
-                            }
-
-                            if (!hasExactPermission) {
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = PastelYellowBackground,
-                                    border = BorderStroke(1.dp, PastelYellowBorder),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text(
-                                            text = if (isHebrew)
-                                                "לצלצול בדקה המדויקת ב-Android 12+, אשרו הרשאת שעון מדויק"
-                                            else
-                                                "Allow exact alarm permission for minute-accurate triggers",
-                                            style = MaterialTheme.typography.labelSmall.copy(color = PastelYellowDark),
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        TextButton(
-                                            onClick = { FamilyAlarmScheduler.openExactAlarmPermissionSettings(context) },
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                            modifier = Modifier.testTag("grant_exact_alarm_permission_button")
-                                        ) {
-                                            Text(
-                                                text = if (isHebrew) "אשר הרשאה" else "Grant",
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (!canUseFullScreen) {
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = PastelYellowBackground,
-                                    border = BorderStroke(1.dp, PastelYellowBorder),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text(
-                                            text = if (isHebrew)
-                                                "להצגת מסך כיבוי אוטומטי מעל נעילת מסך, אשרו הרשאת התראה במסך מלא"
-                                            else
-                                                "Allow full-screen alarm display to show dismiss/snooze screen automatically",
-                                            style = MaterialTheme.typography.labelSmall.copy(color = PastelYellowDark),
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        TextButton(
-                                            onClick = { FamilyAlarmScheduler.openFullScreenIntentSettings(context) },
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                            modifier = Modifier.testTag("grant_fullscreen_alarm_permission_button")
-                                        ) {
-                                            Text(
-                                                text = if (isHebrew) "אשר מסך מלא" else "Allow",
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (!hasNotifications) {
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = PastelYellowBackground,
-                                    border = BorderStroke(1.dp, PastelYellowBorder),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text(
-                                            text = if (isHebrew)
-                                                "התראות כבויות — הפעילו התראות להצגת כפתורי כיבוי ונודניק מהירים"
-                                            else
-                                                "Notifications are disabled — enable for quick dismiss/snooze controls",
-                                            style = MaterialTheme.typography.labelSmall.copy(color = PastelYellowDark),
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        TextButton(
-                                            onClick = { FamilyAlarmScheduler.openNotificationSettings(context) },
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                            modifier = Modifier.testTag("grant_alarm_notification_permission_button")
-                                        ) {
-                                            Text(
-                                                text = if (isHebrew) "הפעל התראות" else "Enable",
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (!isBatteryUnrestricted) {
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(
-                                        text = if (isHebrew)
-                                            "מומלץ להחריג מחיסכון בסוללה לצלצול אמין כשהמסך כבוי"
-                                        else
-                                            "Disable battery optimization for reliable lock-screen alarms",
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        ),
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    TextButton(
-                                        onClick = { FamilyAlarmScheduler.openBatteryOptimizationSettings(context) },
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                        modifier = Modifier.testTag("open_battery_optimization_button")
-                                    ) {
-                                        Text(
-                                            text = if (isHebrew) "הגדרות סוללה" else "Battery",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 3b. Recently Deleted Alarms Cloud vs Target Device Sync Notices
-                items(
-                    items = deletedAlarmNotices,
-                    key = { "deleted_notice_${it.alarmId}" }
-                ) { notice ->
-                    DeletedAlarmSyncNoticeCard(
-                        notice = notice,
-                        isHebrew = isHebrew,
-                        onDismiss = { onDismissDeletedNotice(notice.alarmId) }
-                    )
-                }
-
-                // 4. Alarms List or Empty State
-                if (visibleAlarms.isEmpty()) {
-                    item(key = "empty_alarms_state") {
-                        Box(
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 36.dp, horizontal = 20.dp),
-                            contentAlignment = Alignment.Center
+                            horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(text = "⏰", fontSize = 52.sp)
-                                Spacer(modifier = Modifier.height(10.dp))
-                                Text(
-                                    text = if (isHebrew) "עדיין אין שעונים מעוררים מוגדרים" else "No family alarms configured yet",
-                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = if (isHebrew)
-                                        "לחצו על 'שעון מעורר חדש' למטה ליצירת שעון אישי או שעון לילד/ה"
-                                    else
-                                        "Tap 'Add Alarm' below to create a personal or child alarm",
-                                    style = MaterialTheme.typography.bodySmall.copy(
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                            Surface(
+                                shape = CircleShape,
+                                color = Color(0xFFEAF3FE),
+                                modifier = Modifier.size(68.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.Alarm,
+                                        contentDescription = null,
+                                        tint = GoogleBlue,
+                                        modifier = Modifier.size(34.dp)
                                     )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Text(
+                                text = if (isHebrew) "עדיין אין שעונים מעוררים מוגדרים" else "No alarms configured yet",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF15366B)
+                                )
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = if (isHebrew)
+                                    "לחצו על כפתור ה־(+) למעלה כדי להוסיף שעון מעורר חדש"
+                                else
+                                    "Tap the (+) button above to create a new alarm",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            )
+                        }
+                    }
+                }
+            } else {
+                items(visibleAlarms, key = { it.id }) { alarm ->
+                    val targetId = alarm.effectiveAssignedMemberId
+                    val assignedMember = members.find { it.id == targetId }
+                    val creatorMember = members.find { it.id == alarm.createdByMemberId }
+                    val canModify = alarm.canMemberModify(currentMember)
+                    val canDelete = alarm.canMemberDelete(currentMember)
+                    val isThisAlarmPreviewing = previewState.isPlaying &&
+                        previewState.activeSoundType == alarm.soundType &&
+                        (alarm.soundType != AlarmAudioController.SOUND_CUSTOM_URI ||
+                            previewState.activeCustomUri == alarm.customSoundUri)
+
+                    FamilyAlarmCard(
+                        alarm = alarm,
+                        assignedMember = assignedMember,
+                        creatorMember = creatorMember,
+                        currentMember = currentMember,
+                        canModify = canModify,
+                        canDelete = canDelete,
+                        isPreviewing = isThisAlarmPreviewing,
+                        isHebrew = isHebrew,
+                        onPreviewToggle = {
+                            if (isThisAlarmPreviewing) {
+                                AlarmAudioController.stopPreview(context)
+                            } else {
+                                AlarmAudioController.startPreview(
+                                    context = context,
+                                    soundType = alarm.soundType,
+                                    customSoundUri = alarm.customSoundUri,
+                                    volumePercent = alarm.volumePercent
+                                )
+                            }
+                        },
+                        onToggle = {
+                            if (canModify) {
+                                onToggleAlarm(alarm.id)
+                            } else {
+                                onShowToast(
+                                    if (isHebrew) "שעון זה הוגדר ע״י הורה ואינו ניתן לכיבוי או שינוי מחשבון ילד 🔒"
+                                    else "This alarm is managed by a parent and cannot be modified 🔒"
+                                )
+                            }
+                        },
+                        onEdit = {
+                            if (canModify) {
+                                alarmToEdit = alarm
+                                showAddOrEditDialog = true
+                            } else {
+                                onShowToast(
+                                    if (isHebrew) "שעון זה מנוהל ע״י הורה (צפייה בלבד) 🔒"
+                                    else "This alarm is managed by a parent (view only) 🔒"
+                                )
+                            }
+                        },
+                        onRequestDelete = {
+                            if (canDelete) {
+                                alarmPendingDelete = alarm
+                            } else {
+                                onShowToast(
+                                    if (isHebrew) "אין הרשאה למחוק שעון מעורר שהוגדר ע״י הורה 🔒"
+                                    else "Only a parent can delete this alarm 🔒"
                                 )
                             }
                         }
-                    }
-                } else {
-                    items(visibleAlarms, key = { it.id }) { alarm ->
-                        val targetId = alarm.effectiveAssignedMemberId
-                        val assignedMember = members.find { it.id == targetId }
-                        val creatorMember = members.find { it.id == alarm.createdByMemberId }
-                        val canModify = alarm.canMemberModify(currentMember)
-                        val canDelete = alarm.canMemberDelete(currentMember)
-
-                        FamilyAlarmCard(
-                            alarm = alarm,
-                            assignedMember = assignedMember,
-                            creatorMember = creatorMember,
-                            currentMember = currentMember,
-                            canModify = canModify,
-                            canDelete = canDelete,
-                            isHebrew = isHebrew,
-                            onToggle = {
-                                if (canModify) {
-                                    onToggleAlarm(alarm.id)
-                                } else {
-                                    onShowToast(
-                                        if (isHebrew) "שעון זה הוגדר ע״י הורה ואינו ניתן לכיבוי או שינוי מחשבון ילד 🔒"
-                                        else "This alarm is managed by a parent and cannot be modified 🔒"
-                                    )
-                                }
-                            },
-                            onEdit = {
-                                if (canModify) {
-                                    alarmToEdit = alarm
-                                    showAddOrEditDialog = true
-                                } else {
-                                    onShowToast(
-                                        if (isHebrew) "שעון זה מנוהל ע״י הורה (צפייה בלבד) 🔒"
-                                        else "This alarm is managed by a parent (view only) 🔒"
-                                    )
-                                }
-                            },
-                            onRequestDelete = {
-                                if (canDelete) {
-                                    alarmPendingDelete = alarm
-                                } else {
-                                    onShowToast(
-                                        if (isHebrew) "אין הרשאה למחוק שעון מעורר שהוגדר ע״י הורה 🔒"
-                                        else "Only a parent can delete this alarm 🔒"
-                                    )
-                                }
-                            }
-                        )
-                    }
+                    )
                 }
             }
         }
     }
 
-    // 5. Hebrew Delete Confirmation Dialog (Requirement 8)
+    // Hebrew Delete Confirmation Dialog
     alarmPendingDelete?.let { alarmToDelete ->
         AlertDialog(
             onDismissRequest = { alarmPendingDelete = null },
@@ -772,6 +620,61 @@ fun FamilyAlarmScreen(
             },
             modifier = Modifier.testTag("delete_alarm_confirm_dialog")
         )
+    }
+}
+
+/**
+ * Non-blocking green confirmation banner that appears when an alarm is created or updated
+ * and automatically disappears after 7 seconds.
+ */
+@Composable
+fun AlarmSavedSuccessBanner(
+    banner: AlarmSavedBannerState,
+    isHebrew: Boolean,
+    onDismissEarly: () -> Unit
+) {
+    Surface(
+        onClick = onDismissEarly,
+        shape = RoundedCornerShape(16.dp),
+        color = Color(0xFFE6F6EC),
+        border = BorderStroke(1.2.dp, Color(0xFF34A853).copy(alpha = 0.45f)),
+        shadowElevation = 3.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("alarm_saved_success_banner")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.CheckCircle,
+                contentDescription = if (isHebrew) "נשמר בהצלחה" else "Saved",
+                tint = Color(0xFF1E7E34),
+                modifier = Modifier.size(24.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = banner.headlineText,
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF145A26)
+                    ),
+                    modifier = Modifier.testTag("alarm_saved_success_headline")
+                )
+                Text(
+                    text = banner.nextRingSubtitleText,
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFF1E7E34)
+                    ),
+                    modifier = Modifier.testTag("alarm_saved_success_subtitle")
+                )
+            }
+        }
     }
 }
 
@@ -894,23 +797,19 @@ private fun DeletedAlarmSyncNoticeCard(
 
     val statusText = if (isPendingRemoteCancel) {
         if (isHebrew) {
-            "☁️ השעון (${notice.formattedTime} • ${notice.title}) נמחק מהענן — ממתין לאישור ביטול ממכשיר של ${notice.targetMemberName} (יבוטל אוטומטית כשהמכשיר מחובר)"
+            "☁️ השעון (${notice.formattedTime} • ${notice.title}) נמחק מהענן — ממתין לאישור ביטול ממכשיר של ${notice.targetMemberName}"
         } else {
-            "☁️ Deleted in cloud (${notice.formattedTime} • ${notice.title}) — waiting for cancellation confirmation from ${notice.targetMemberName}'s device"
+            "☁️ Deleted in cloud (${notice.formattedTime} • ${notice.title}) — waiting for cancellation on ${notice.targetMemberName}'s device"
         }
     } else {
         if (isHebrew) {
             if (notice.isRemoteTarget) {
-                "✓ השעון (${notice.formattedTime} • ${notice.title}) נמחק מהענן ובוטל סופית במכשיר של ${notice.targetMemberName}"
+                "✓ השעון (${notice.formattedTime} • ${notice.title}) נמחק ובוטל במכשיר של ${notice.targetMemberName}"
             } else {
                 "✓ השעון (${notice.formattedTime} • ${notice.title}) נמחק ובוטל ממכשיר זה"
             }
         } else {
-            if (notice.isRemoteTarget) {
-                "✓ Deleted in cloud and confirmed cancelled on ${notice.targetMemberName}'s device (${notice.formattedTime})"
-            } else {
-                "✓ Alarm deleted and cancelled on this device (${notice.formattedTime})"
-            }
+            "✓ Alarm deleted and cancelled (${notice.formattedTime})"
         }
     }
 
@@ -952,6 +851,16 @@ private fun DeletedAlarmSyncNoticeCard(
     }
 }
 
+/**
+ * Clean Soft Glass Alarm Card matching the visual reference.
+ *
+ * Displays:
+ * - Large alarm time (e.g. 07:00)
+ * - Alarm name (e.g. "בוקר טוב רועי!")
+ * - Repeat days or one-time status + assigned family member when relevant
+ * - Quick sound preview button + Enable/Disable Switch
+ * - Tap card to edit + subtle edit/delete icons
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FamilyAlarmCard(
@@ -961,7 +870,9 @@ private fun FamilyAlarmCard(
     currentMember: FamilyMember,
     canModify: Boolean,
     canDelete: Boolean,
+    isPreviewing: Boolean,
     isHebrew: Boolean,
+    onPreviewToggle: () -> Unit,
     onToggle: () -> Unit,
     onEdit: () -> Unit,
     onRequestDelete: () -> Unit
@@ -971,151 +882,197 @@ private fun FamilyAlarmCard(
     val isRemoteTarget = alarm.isTargetedToAnotherMember() && !isTargetedAtThisDevice
     val isTargetAcknowledged = alarm.isTargetDeviceAcknowledged()
     val isPendingTargetDevice = alarm.isEnabled && isRemoteTarget && !isTargetAcknowledged
-    val isExactPermNeeded = alarm.isEnabled && alarm.scheduleStatus == FamilyAlarm.STATUS_EXACT_PERMISSION_NEEDED
-    val isScheduleError = alarm.isEnabled && alarm.scheduleStatus == FamilyAlarm.STATUS_SCHEDULE_ERROR
 
     val targetDisplayName = assignedMember?.name
         ?: alarm.assignedMemberName.takeIf { it.isNotBlank() }
         ?: if (isHebrew) "בן משפחה" else "Family Member"
 
-    val nextTriggerSummary = remember(alarm.hour, alarm.minute, alarm.daysOfWeek, alarm.isEnabled) {
-        if (!alarm.isEnabled) ""
-        else formatNextTriggerRelativeSummary(alarm, isHebrew)
+    val repeatDaysText = remember(alarm.daysOfWeek, isHebrew) {
+        when {
+            alarm.daysOfWeek.size >= 7 ->
+                if (isHebrew) "כל יום" else "Every day"
+            alarm.daysOfWeek.size == 6 && SchoolDay.SATURDAY !in alarm.daysOfWeek ->
+                if (isHebrew) "א׳–ו׳ • ימי לימודים" else "Sun–Fri • School days"
+            alarm.daysOfWeek.size == 1 ->
+                if (isHebrew) "חד־פעמי (${alarm.daysOfWeek.first().shortHe})" else "One-time"
+            else ->
+                alarm.daysOfWeek.joinToString(", ") {
+                    if (isHebrew) it.shortHe else it.getDisplayName(false).take(3)
+                }
+        }
+    }
+
+    val assignmentText = remember(alarm, currentMember.id, targetId, targetDisplayName, isHebrew) {
+        when {
+            targetId == currentMember.id ->
+                if (isHebrew) "השעון שלי" else "My Alarm"
+            targetId.isNotBlank() ->
+                if (isHebrew) "עבור $targetDisplayName" else "For $targetDisplayName"
+            else ->
+                if (isHebrew) "שעון משפחתי" else "Family Alarm"
+        }
     }
 
     val (statusLabel, statusBg, statusFg) = when {
         !alarm.isEnabled -> Triple(
-            if (isHebrew) "כבוי" else "Disabled",
-            MaterialTheme.colorScheme.surfaceVariant,
-            MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        isScheduleError -> Triple(
-            if (isHebrew) "⚠️ שגיאת תזמון במכשיר — בדקו הרשאות שעון" else "⚠️ Device schedule error",
-            GoogleRedLight,
-            GoogleRedDark
+            if (isHebrew) "כבוי" else "Off",
+            Color(0xFFF0F4FA),
+            Color(0xFF6E81A0)
         )
         isPendingTargetDevice -> Triple(
-            if (isHebrew) {
-                "⏳ ממתין לסנכרון במכשיר של $targetDisplayName"
-            } else {
-                "⏳ Pending confirmation on $targetDisplayName's device"
-            },
-            PastelYellowBackground,
-            PastelYellowDark
-        )
-        isExactPermNeeded -> Triple(
-            if (isHebrew) "⚠️ מתוזמן ($nextTriggerSummary • מומלץ לאשר הרשאת דיוק)" else "⚠️ Scheduled ($nextTriggerSummary)",
+            if (isHebrew) "⏳ ממתין לסנכרון במכשיר של $targetDisplayName"
+            else "⏳ Syncing to $targetDisplayName",
             PastelYellowBackground,
             PastelYellowDark
         )
         else -> Triple(
             if (isHebrew) {
-                val dev = alarm.acknowledgedByDeviceName.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
-                if (isTargetedAtThisDevice) {
-                    val triggerNote = nextTriggerSummary.takeIf { it.isNotBlank() }?.let { " • $it" }.orEmpty()
-                    "✓ מתוזמן במכשיר זה$triggerNote"
-                } else {
-                    "✓ סונכרן ומתוזמן במכשיר של $targetDisplayName$dev"
-                }
+                if (isTargetedAtThisDevice) "פעיל" else "מסונכרן למכשיר של $targetDisplayName"
             } else {
-                val dev = alarm.acknowledgedByDeviceName.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
-                if (isTargetedAtThisDevice) {
-                    "✓ Scheduled on this device ($nextTriggerSummary)"
-                } else {
-                    "✓ Synced & scheduled on $targetDisplayName's device$dev"
-                }
+                if (isTargetedAtThisDevice) "Active" else "Synced to $targetDisplayName"
             },
             PastelGreenBackground,
             PastelGreenDark
         )
     }
 
-    val soundLabel = AlarmAudioController.soundDisplayName(
-        soundType = alarm.soundType,
-        customTitle = alarm.customSoundTitle,
-        isHebrew = isHebrew
-    )
-
-    val creatorName = creatorMember?.name
-        ?: alarm.createdByMemberName.takeIf { it.isNotBlank() }
-        ?: if (alarm.createdByRole.equals("PARENT", ignoreCase = true)) {
-            if (isHebrew) "הורה" else "Parent"
-        } else {
-            ""
-        }
-
-    val ownershipDescription = when {
-        alarm.createdByMemberId == currentMember.id && targetId == currentMember.id ->
-            if (isHebrew) "שעון אישי שלי (${currentMember.name})" else "My Personal Alarm (${currentMember.name})"
-        alarm.createdByRole.equals("PARENT", ignoreCase = true) && targetId != alarm.createdByMemberId ->
-            if (isHebrew) "הוגדר ע״י הורה (${creatorName.ifBlank { "הורה" }}) עבור $targetDisplayName"
-            else "Set by Parent ($creatorName) for $targetDisplayName"
-        targetId.isNotBlank() ->
-            if (isHebrew) "שעון של $targetDisplayName" else "$targetDisplayName's Alarm"
-        else ->
-            if (isHebrew) "שעון משפחתי" else "Family Alarm"
-    }
-
     Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = if (alarm.isEnabled) 3.dp else 1.dp,
+        shape = RoundedCornerShape(22.dp),
+        color = if (alarm.isEnabled) Color.White else Color(0xFFF7FAFF),
+        shadowElevation = if (alarm.isEnabled) 3.dp else 1.dp,
         border = BorderStroke(
             width = 1.dp,
-            color = if (alarm.isEnabled) GoogleBlue.copy(alpha = 0.35f) else OutlineLight
+            color = if (alarm.isEnabled) Color(0xFFCCE0FA) else OutlineLight
         ),
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(22.dp))
             .clickable(enabled = canModify) { onEdit() }
             .testTag("family_alarm_card_${alarm.id}")
     ) {
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val isCompactCard = maxWidth < 330.dp
-            val cardPadding = if (isCompactCard) 12.dp else 14.dp
-
-            Column(modifier = Modifier.padding(cardPadding)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Time + Title + Repeat/Assignment summary
+                Column(modifier = Modifier.weight(1f)) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(if (isCompactCard) 8.dp else 12.dp),
-                        modifier = Modifier.weight(1f)
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(if (isCompactCard) 40.dp else 46.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (alarm.isEnabled) GoogleBlueLight else MaterialTheme.colorScheme.surfaceVariant
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(text = alarm.ringtoneEmoji, fontSize = if (isCompactCard) 19.sp else 22.sp)
-                        }
-
-                        Column(modifier = Modifier.weight(1f)) {
+                        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
                             Text(
                                 text = alarm.formattedTime24h,
-                                style = (if (isCompactCard) MaterialTheme.typography.titleLarge else MaterialTheme.typography.headlineSmall).copy(
+                                style = MaterialTheme.typography.headlineMedium.copy(
                                     fontWeight = FontWeight.ExtraBold,
-                                    color = if (alarm.isEnabled) MaterialTheme.colorScheme.onSurface
-                                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                    fontSize = 32.sp,
+                                    letterSpacing = (-0.5).sp,
+                                    color = if (alarm.isEnabled) Color(0xFF12366E)
+                                    else Color(0xFF7B8FA8)
                                 )
                             )
+                        }
+
+                        // Compact status pill
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = statusBg,
+                            modifier = Modifier.testTag("alarm_status_badge_${alarm.id}")
+                        ) {
                             Text(
-                                text = alarm.title,
-                                style = MaterialTheme.typography.bodyMedium.copy(
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = if (alarm.isEnabled) MaterialTheme.colorScheme.onSurface
-                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                text = statusLabel,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = statusFg,
+                                    fontSize = 11.sp
                                 ),
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                             )
                         }
+
+                        if (!canModify) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color(0xFFEEF3FA),
+                                modifier = Modifier.testTag("alarm_parent_locked_badge_${alarm.id}")
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Lock,
+                                        contentDescription = null,
+                                        tint = Color(0xFF5D7290),
+                                        modifier = Modifier.size(11.dp)
+                                    )
+                                    Text(
+                                        text = if (isHebrew) "הורה" else "Parent",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF5D7290),
+                                            fontSize = 10.sp
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(2.dp))
+
+                    Text(
+                        text = alarm.title,
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = if (alarm.isEnabled) Color(0xFF1F3B66)
+                            else Color(0xFF7B8FA8)
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    Spacer(modifier = Modifier.height(3.dp))
+
+                    Text(
+                        text = "$repeatDaysText • $assignmentText",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            color = Color(0xFF5A7194),
+                            fontWeight = FontWeight.Medium
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                // Controls: Sound preview + Enable/Disable Switch
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    IconButton(
+                        onClick = onPreviewToggle,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (isPreviewing) GoogleRedLight else Color(0xFFEAF3FE)
+                            )
+                            .testTag("preview_alarm_card_${alarm.id}")
+                    ) {
+                        Icon(
+                            imageVector = if (isPreviewing) Icons.Default.Stop else Icons.Default.PlayArrow,
+                            contentDescription = if (isHebrew) "השמע צלצול" else "Preview sound",
+                            tint = if (isPreviewing) GoogleRedDark else GoogleBlueDark,
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
 
                     Switch(
@@ -1125,139 +1082,66 @@ private fun FamilyAlarmCard(
                         modifier = Modifier.testTag("toggle_alarm_${alarm.id}")
                     )
                 }
+            }
 
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Device Acknowledgement & Scheduling Status Pill (FlowRow wraps cleanly on narrow screens)
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = statusBg,
-                        modifier = Modifier.testTag("alarm_status_badge_${alarm.id}")
-                    ) {
-                        Text(
-                            text = statusLabel,
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = statusFg
-                            ),
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
-                    }
-
-                    if (!canModify) {
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            modifier = Modifier.testTag("alarm_parent_locked_badge_${alarm.id}")
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Lock,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(12.dp)
-                                )
-                                Text(
-                                    text = if (isHebrew) "מנוהל ע״י הורה" else "Parent Managed",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-
+            if (canModify || canDelete) {
                 Spacer(modifier = Modifier.height(6.dp))
-
-                // Audio, Vibration, Snooze & Volume Summary
-                Text(
-                    text = if (isHebrew) {
-                        "$soundLabel • עוצמה ${alarm.volumePercent}% • נודניק ${alarm.snoozeDurationMinutes} דק׳ • ${if (alarm.vibrateEnabled) "רטט פעיל" else "ללא רטט"}"
-                    } else {
-                        "$soundLabel • Vol ${alarm.volumePercent}% • Snooze ${alarm.snoozeDurationMinutes}m • ${if (alarm.vibrateEnabled) "Vibrate" else "No vibrate"}"
-                    },
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    ),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                Spacer(modifier = Modifier.height(6.dp))
-
+                HorizontalDivider(color = Color(0xFFEEF4FC), thickness = 1.dp)
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    val daysText = when {
-                        alarm.daysOfWeek.size >= 7 ->
-                            if (isHebrew) "כל ימות השבוע (א׳-ש׳)" else "Every day (Sun-Sat)"
-                        alarm.daysOfWeek.size == 6 && SchoolDay.SATURDAY !in alarm.daysOfWeek ->
-                            if (isHebrew) "ימי לימודים (א׳-ו׳)" else "School days (Sun-Fri)"
-                        else ->
-                            alarm.daysOfWeek.joinToString(", ") {
-                                if (isHebrew) it.shortHe else it.getDisplayName(false).take(3)
-                            }
-                    }
-
                     Text(
-                        text = "$ownershipDescription • $daysText",
+                        text = AlarmAudioController.cleanSoundDisplayName(
+                            soundType = alarm.soundType,
+                            customTitle = alarm.customSoundTitle,
+                            isHebrew = isHebrew
+                        ),
                         style = MaterialTheme.typography.labelSmall.copy(
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = Color(0xFF6B80A0),
                             fontWeight = FontWeight.Medium
                         ),
-                        maxLines = 2,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
 
-                    if (canModify || canDelete) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
-                            if (canModify) {
-                                IconButton(
-                                    onClick = onEdit,
-                                    modifier = Modifier
-                                        .size(44.dp)
-                                        .testTag("edit_alarm_${alarm.id}")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Edit,
-                                        contentDescription = if (isHebrew) "עריכה" else "Edit",
-                                        tint = GoogleBlue,
-                                        modifier = Modifier.size(19.dp)
-                                    )
-                                }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        if (canModify) {
+                            IconButton(
+                                onClick = onEdit,
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .testTag("edit_alarm_${alarm.id}")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Edit,
+                                    contentDescription = if (isHebrew) "עריכה" else "Edit",
+                                    tint = GoogleBlue,
+                                    modifier = Modifier.size(17.dp)
+                                )
                             }
+                        }
 
-                            if (canDelete) {
-                                IconButton(
-                                    onClick = onRequestDelete,
-                                    modifier = Modifier
-                                        .size(44.dp)
-                                        .testTag("delete_alarm_${alarm.id}")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.DeleteOutline,
-                                        contentDescription = if (isHebrew) "מחיקה" else "Delete",
-                                        tint = Color(0xFFD93025),
-                                        modifier = Modifier.size(19.dp)
-                                    )
-                                }
+                        if (canDelete) {
+                            IconButton(
+                                onClick = onRequestDelete,
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .testTag("delete_alarm_${alarm.id}")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DeleteOutline,
+                                    contentDescription = if (isHebrew) "מחיקה" else "Delete",
+                                    tint = Color(0xFFD93025),
+                                    modifier = Modifier.size(17.dp)
+                                )
                             }
                         }
                     }
@@ -1267,6 +1151,21 @@ private fun FamilyAlarmCard(
     }
 }
 
+/**
+ * Simplified Full-Screen Add/Edit Alarm Screen ("שעון מעורר חדש" / "עריכת שעון מעורר").
+ *
+ * Implements the clean Soft Glass structure:
+ * - Fixed Top Bar with title and back arrow
+ * - Scrollable Main Content:
+ *   1. Prominent Alarm Time card (07:00 + "הצלצול הבא: ...")
+ *   2. Repeat Days card ("חזרה על ימים") with 7 day buttons and 3 quick presets ("חד־פעמי", "ימי לימודים", "כל יום")
+ *   3. Alarm Assignment ("עבור מי השעון?") dropdown + quick chips
+ *   4. Optional Alarm Name ("שם השעון המעורר", placeholder "בוקר טוב רועי!")
+ *   5. Compact Ringtone Row ("צלצול") with Play/Stop button + tap to open full-screen Ringtone Picker
+ *   6. Compact Snooze Row ("נודניק — 5 דקות")
+ *   7. Collapsible "אפשרויות נוספות" section (Vibration, Volume, Device Clock)
+ * - Permanently Visible Bottom Action Bar ("ביטול" and "שמור שעון" / "שמור שינויים")
+ */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun FamilyAlarmEditorScreen(
@@ -1284,9 +1183,6 @@ fun FamilyAlarmEditorScreen(
     }
 
     val childMembers = remember(members) { members.filter { it.role == UserRole.CHILD } }
-    val nativeDeviceRingtones = remember(context) {
-        AlarmAudioController.getDeviceSystemAlarmRingtones(context, maxCount = 6)
-    }
 
     val initialTitle = remember(alarmToEdit) {
         alarmToEdit?.title?.takeUnless {
@@ -1294,17 +1190,16 @@ fun FamilyAlarmEditorScreen(
         }.orEmpty()
     }
     val initialTimeFormatted = remember(alarmToEdit) {
-        alarmToEdit?.formattedTime24h ?: run {
-            val cal = Calendar.getInstance().apply { add(Calendar.MINUTE, 2) }
-            String.format(Locale.US, "%02d:%02d", cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE))
-        }
+        alarmToEdit?.formattedTime24h ?: "07:00"
     }
     val initialSelectedMemberId = remember(alarmToEdit, currentMember.id) {
         alarmToEdit?.effectiveAssignedMemberId?.takeIf { it.isNotBlank() }
             ?: currentMember.id
     }
     val initialSelectedDays = remember(alarmToEdit) {
-        alarmToEdit?.daysOfWeek?.toSet() ?: SchoolDay.allWeekDays.toSet()
+        alarmToEdit?.daysOfWeek?.toSet() ?: SchoolDay.allWeekDays
+            .filterNot { it == SchoolDay.SATURDAY }
+            .toSet()
     }
     val initialSoundType = remember(alarmToEdit) {
         alarmToEdit?.soundType?.takeIf { it.isNotBlank() } ?: AlarmAudioController.SOUND_SYSTEM_ALARM
@@ -1330,23 +1225,20 @@ fun FamilyAlarmEditorScreen(
     var showTimePickerModal by remember { mutableStateOf(false) }
 
     var selectedMemberId by remember(alarmToEdit) { mutableStateOf(initialSelectedMemberId) }
-    var isPersonalAlarm by remember(alarmToEdit) {
-        mutableStateOf(
-            if (!currentMember.isParent) true
-            else initialSelectedMemberId == currentMember.id
-        )
-    }
+    var showAssignmentDropdown by remember { mutableStateOf(false) }
 
     var selectedDays by remember(alarmToEdit) { mutableStateOf(initialSelectedDays) }
     var soundType by remember(alarmToEdit) { mutableStateOf(initialSoundType) }
     var customSoundUri by remember(alarmToEdit) { mutableStateOf(initialCustomSoundUri) }
     var customSoundTitle by remember(alarmToEdit) { mutableStateOf(initialCustomSoundTitle) }
-    var customFileErrorHe by remember { mutableStateOf<String?>(null) }
 
     var vibrateEnabled by remember(alarmToEdit) { mutableStateOf(initialVibrateEnabled) }
     var snoozeDurationMinutes by remember(alarmToEdit) { mutableIntStateOf(initialSnoozeMinutes) }
+    var showSnoozeOptions by remember { mutableStateOf(false) }
     var volumePercent by remember(alarmToEdit) { mutableFloatStateOf(initialVolumePercent) }
     var alsoSetDeviceClock by remember { mutableStateOf(false) }
+    var showAdditionalOptions by remember { mutableStateOf(false) }
+    var showRingtonePickerScreen by remember { mutableStateOf(false) }
     var showDiscardConfirmationDialog by remember { mutableStateOf(false) }
 
     val hasUnsavedChanges = remember(
@@ -1384,60 +1276,37 @@ fun FamilyAlarmEditorScreen(
         }
     }
 
-    BackHandler {
-        handleRequestCancelOrBack()
-    }
-
     val isTargetRemoteChild = currentMember.isParent &&
         selectedMemberId.isNotBlank() &&
         selectedMemberId != currentMember.id
 
-    // Native Android System Ringtone Picker launcher (TYPE_ALARM)
-    val systemRingtonePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val resolved = AlarmAudioController.resolvePickedSystemRingtone(
-                context = context,
-                resultData = result.data,
-                isHebrew = isHebrew
-            )
-            if (resolved != null) {
-                val (pickedUriStr, toneTitle) = resolved
-                customFileErrorHe = null
-                customSoundUri = pickedUriStr
-                customSoundTitle = toneTitle
-                soundType = AlarmAudioController.SOUND_CUSTOM_URI
-                AlarmAudioController.startPreview(
-                    context = context,
-                    soundType = AlarmAudioController.SOUND_CUSTOM_URI,
-                    customSoundUri = pickedUriStr,
-                    volumePercent = volumePercent.toInt()
-                )
+    // Dedicated Full-Screen Ringtone Picker Screen
+    if (showRingtonePickerScreen) {
+        FamilyAlarmRingtonePickerScreen(
+            initialSoundType = soundType,
+            initialCustomSoundUri = customSoundUri,
+            initialCustomSoundTitle = customSoundTitle,
+            initialVolumePercent = volumePercent.toInt(),
+            isTargetRemoteChild = isTargetRemoteChild,
+            isHebrew = isHebrew,
+            onCancel = {
+                AlarmAudioController.stopPreview(context)
+                showRingtonePickerScreen = false
+            },
+            onConfirmSound = { chosenSoundType, chosenCustomUri, chosenCustomTitle, chosenVolume ->
+                AlarmAudioController.stopPreview(context)
+                soundType = chosenSoundType
+                customSoundUri = chosenCustomUri
+                customSoundTitle = chosenCustomTitle
+                volumePercent = chosenVolume.toFloat()
+                showRingtonePickerScreen = false
             }
-        }
+        )
+        return
     }
 
-    val customAudioLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        if (uri != null) {
-            val importRes = AlarmAudioController.importAndPersistCustomSoundUri(context, uri)
-            importRes.onSuccess { (persistedUriStr, displayName) ->
-                customFileErrorHe = null
-                customSoundUri = persistedUriStr
-                customSoundTitle = displayName
-                soundType = AlarmAudioController.SOUND_CUSTOM_URI
-                AlarmAudioController.startPreview(
-                    context = context,
-                    soundType = AlarmAudioController.SOUND_CUSTOM_URI,
-                    customSoundUri = persistedUriStr,
-                    volumePercent = volumePercent.toInt()
-                )
-            }.onFailure { err ->
-                customFileErrorHe = err.localizedMessage ?: "לא ניתן לטעון את קובץ השמע שנבחר"
-            }
-        }
+    BackHandler {
+        handleRequestCancelOrBack()
     }
 
     val parsedTime = remember(timeFormatted) {
@@ -1477,13 +1346,13 @@ fun FamilyAlarmEditorScreen(
     }
 
     val softCardBorder = BorderStroke(1.dp, Color(0xFFDCE8F8))
-    val softCardShape = RoundedCornerShape(16.dp)
+    val softCardShape = RoundedCornerShape(18.dp)
 
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
             .testTag("alarm_editor_screen"),
-        containerColor = Color(0xFFF4F8FE),
+        containerColor = Color(0xFFF3F7FE),
         topBar = {
             Surface(
                 color = Color.White,
@@ -1492,7 +1361,11 @@ fun FamilyAlarmEditorScreen(
                     .fillMaxWidth()
                     .testTag("alarm_editor_header")
             ) {
-                Column(modifier = Modifier.fillMaxWidth().statusBarsPadding()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1657,348 +1530,138 @@ fun FamilyAlarmEditorScreen(
                     .testTag("alarm_editor_scroll_content"),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // 1. MAIN ALARM TIME CARD
+                // 1. ALARM TIME CARD (Large time display + Next ring preview)
                 Surface(
-                    shape = RoundedCornerShape(20.dp),
+                    shape = RoundedCornerShape(22.dp),
                     color = Color.White,
                     border = BorderStroke(1.2.dp, Color(0xFFBDD6FA)),
-                    shadowElevation = 2.dp,
+                    shadowElevation = 3.dp,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(20.dp))
+                        .clip(RoundedCornerShape(22.dp))
                         .clickable { showTimePickerModal = true }
                         .testTag("alarm_editor_time_card")
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                            .padding(horizontal = 18.dp, vertical = 16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.Center
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-                                    Text(
-                                        text = timeFormatted,
-                                        style = MaterialTheme.typography.displayMedium.copy(
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = Color(0xFF12366E),
-                                            fontSize = if (isCompactWidth) 38.sp else 44.sp,
-                                            letterSpacing = (-1).sp
-                                        ),
-                                        modifier = Modifier.testTag("alarm_editor_time_display")
-                                    )
-                                }
-
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = Color(0xFFEAF2FE)
-                                ) {
-                                    Text(
-                                        text = periodBadgeText,
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            fontWeight = FontWeight.Bold,
-                                            color = GoogleBlueDark,
-                                            fontSize = 12.sp
-                                        ),
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                    )
-                                }
+                            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                Text(
+                                    text = timeFormatted,
+                                    style = MaterialTheme.typography.displayMedium.copy(
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFF12366E),
+                                        fontSize = if (isCompactWidth) 44.sp else 52.sp,
+                                        letterSpacing = (-1).sp
+                                    ),
+                                    modifier = Modifier.testTag("alarm_editor_time_display")
+                                )
                             }
 
+                            Spacer(modifier = Modifier.width(10.dp))
+
                             Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = Color(0xFFE8F1FE),
-                                border = BorderStroke(1.dp, GoogleBlue.copy(alpha = 0.25f))
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color(0xFFEAF2FE)
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.AccessTime,
-                                        contentDescription = if (isHebrew) "שינוי שעה" else "Change Time",
-                                        tint = GoogleBlueDark,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Text(
-                                        text = if (isHebrew) "בחר שעה" else "Pick Time",
-                                        style = MaterialTheme.typography.labelMedium.copy(
-                                            fontWeight = FontWeight.Bold,
-                                            color = GoogleBlueDark
-                                        )
-                                    )
-                                }
+                                Text(
+                                    text = periodBadgeText,
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = GoogleBlueDark
+                                    ),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                )
                             }
                         }
 
                         Spacer(modifier = Modifier.height(8.dp))
 
                         Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = PastelGreenBackground,
-                            border = BorderStroke(1.dp, PastelGreenDark.copy(alpha = 0.28f)),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("alarm_next_ring_preview")
+                            shape = RoundedCornerShape(12.dp),
+                            color = Color(0xFFEFF6FF),
+                            border = BorderStroke(1.dp, Color(0xFFCCE0FA)),
+                            modifier = Modifier.testTag("alarm_next_ring_preview")
                         ) {
-                            Text(
-                                text = if (isHebrew) "⏰ יצלצל: $previewNextTriggerText" else "⏰ Next ring: $previewNextTriggerText",
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = PastelGreenDark
-                                ),
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.AccessTime,
+                                    contentDescription = null,
+                                    tint = GoogleBlueDark,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = if (isHebrew) "הצלצול הבא: $previewNextTriggerText" else "Next ring: $previewNextTriggerText",
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF1A4B9C)
+                                    )
+                                )
+                            }
                         }
                     }
                 }
 
-                // 2. ALARM ASSIGNMENT ("עבור מי השעון?")
+                // 2. REPEAT DAYS CARD ("חזרה על ימים")
+                val singleUpcomingDay = remember(parsedTime) {
+                    computeSingleUpcomingSchoolDay(parsedTime.first, parsedTime.second)
+                }
+                val schoolDaysSet = remember {
+                    SchoolDay.allWeekDays.filterNot { it == SchoolDay.SATURDAY }.toSet()
+                }
+                val allDaysSet = remember { SchoolDay.allWeekDays.toSet() }
+
+                val isOneTimeSelected = selectedDays.size == 1
+                val isSchoolDaysSelected = selectedDays == schoolDaysSet
+                val isAllDaysSelected = selectedDays == allDaysSet
+
                 Surface(
                     shape = softCardShape,
                     color = Color.White,
                     border = softCardBorder,
+                    shadowElevation = 1.dp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Text(
-                            text = if (isHebrew) "עבור מי השעון?" else "Who is this alarm for?",
+                            text = if (isHebrew) "חזרה על ימים" else "Repeat Days",
                             style = MaterialTheme.typography.titleSmall.copy(
                                 fontWeight = FontWeight.Bold,
-                                color = Color(0xFF1E3A66)
+                                color = Color(0xFF15366B)
                             )
                         )
 
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            item {
-                                val isPersonalSelf = selectedMemberId == currentMember.id
-                                FilterChip(
-                                    selected = isPersonalSelf,
-                                    onClick = {
-                                        isPersonalAlarm = true
-                                        selectedMemberId = currentMember.id
-                                    },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = Color(0xFFDCEBFE),
-                                        selectedLabelColor = Color(0xFF12366E)
-                                    ),
-                                    label = {
-                                        Text(
-                                            text = if (isHebrew) "השעון שלי" else "My Alarm",
-                                            fontWeight = if (isPersonalSelf) FontWeight.Bold else FontWeight.Medium,
-                                            fontSize = 13.sp
-                                        )
-                                    },
-                                    modifier = Modifier.testTag("alarm_assign_personal")
-                                )
-                            }
-                            if (currentMember.isParent) {
-                                items(childMembers) { child ->
-                                    val isSelected = selectedMemberId == child.id
-                                    FilterChip(
-                                        selected = isSelected,
-                                        onClick = {
-                                            isPersonalAlarm = false
-                                            selectedMemberId = child.id
-                                            if (soundType == AlarmAudioController.SOUND_CUSTOM_URI) {
-                                                soundType = AlarmAudioController.SOUND_SYSTEM_ALARM
-                                            }
-                                        },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = Color(0xFFDCEBFE),
-                                            selectedLabelColor = Color(0xFF12366E)
-                                        ),
-                                        label = {
-                                            Text(
-                                                text = "${child.avatarEmoji} ${child.name}",
-                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                                fontSize = 13.sp
-                                            )
-                                        },
-                                        modifier = Modifier.testTag("alarm_assign_${child.id}")
-                                    )
-                                }
-                            }
-                        }
-
-                        if (isTargetRemoteChild) {
-                            val targetChildName = childMembers.find { it.id == selectedMemberId }?.name ?: ""
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFFEAF3FF),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text(
-                                    text = if (isHebrew)
-                                        "📲 יסונכרן ויצלצל במכשיר של $targetChildName בלבד (מוגן מכיבוי ע״י הילד/ה)"
-                                    else
-                                        "📲 Will sync and ring on $targetChildName's device (protected from child edits)",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        color = GoogleBlueDark,
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 11.sp
-                                    ),
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                                )
-                            }
-                        } else if (currentMember.isParent) {
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFFF2F6FC),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text(
-                                    text = if (isHebrew)
-                                        "🔒 שעון אישי פרטי • גלוי לך בלבד ואינו מוצג בחשבון הילדים"
-                                    else
-                                        "🔒 Private personal alarm • Visible only to you and hidden from children",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        color = Color(0xFF355079),
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 11.sp
-                                    ),
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // 3. ALARM NAME FIELD ("שם השעון המעורר")
-                OutlinedTextField(
-                    value = title,
-                    onValueChange = { title = it },
-                    label = {
-                        Text(
-                            text = if (isHebrew) "שם השעון המעורר" else "Alarm Name",
-                            fontSize = 13.sp
-                        )
-                    },
-                    placeholder = {
-                        Text(
-                            text = if (isHebrew) "בוקר טוב! / השכמה לבית הספר" else "Good Morning! / School Wake-Up",
-                            fontSize = 13.sp,
-                            color = Color(0xFF8A9BB5)
-                        )
-                    },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = Color.White,
-                        unfocusedContainerColor = Color.White,
-                        focusedBorderColor = GoogleBlue,
-                        unfocusedBorderColor = Color(0xFFD5E3F7)
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("alarm_title_input")
-                )
-
-                // 4. DAYS OF THE WEEK SELECTOR
-                Surface(
-                    shape = softCardShape,
-                    color = Color.White,
-                    border = softCardBorder,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        FlowRow(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                text = if (isHebrew) "ימים בשבוע" else "Days",
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF1E3A66)
-                                ),
-                                modifier = Modifier.align(Alignment.CenterVertically)
-                            )
-
-                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                TextButton(
-                                    onClick = {
-                                        selectedDays = SchoolDay.allWeekDays
-                                            .filterNot { it == SchoolDay.SATURDAY }
-                                            .toSet()
-                                    },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                    modifier = Modifier.height(30.dp)
-                                ) {
-                                    Text(
-                                        text = if (isHebrew) "א׳-ו׳ (לימודים)" else "Sun-Fri",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
-                                TextButton(
-                                    onClick = {
-                                        selectedDays = SchoolDay.allWeekDays
-                                            .filterNot { it == SchoolDay.FRIDAY || it == SchoolDay.SATURDAY }
-                                            .toSet()
-                                    },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                    modifier = Modifier.height(30.dp)
-                                ) {
-                                    Text(
-                                        text = if (isHebrew) "א׳-ה׳" else "Sun-Thu",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
-                                TextButton(
-                                    onClick = {
-                                        selectedDays = SchoolDay.allWeekDays.toSet()
-                                    },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                    modifier = Modifier.height(30.dp)
-                                ) {
-                                    Text(
-                                        text = if (isHebrew) "כל השבוע" else "All Week",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
-                            }
-                        }
-
+                        // 7 Compact Day Buttons: א׳ ב׳ ג׳ ד׳ ה׳ ו׳ ש׳
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             SchoolDay.allWeekDays.forEach { day ->
                                 val isSelected = day in selectedDays
                                 Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = if (isSelected) GoogleBlue else Color(0xFFEEF4FC),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (isSelected) GoogleBlue else Color(0xFFF0F5FD),
                                     border = if (isSelected) null else BorderStroke(1.dp, Color(0xFFD5E3F7)),
                                     modifier = Modifier
                                         .weight(1f)
-                                        .defaultMinSize(minHeight = 40.dp)
-                                        .clip(RoundedCornerShape(10.dp))
+                                        .defaultMinSize(minHeight = 42.dp)
+                                        .clip(RoundedCornerShape(12.dp))
                                         .clickable {
                                             selectedDays = if (isSelected && selectedDays.size > 1) {
                                                 selectedDays - day
@@ -2014,7 +1677,7 @@ fun FamilyAlarmEditorScreen(
                                     ) {
                                         Text(
                                             text = if (isHebrew) day.shortHe else day.getDisplayName(false).take(2),
-                                            style = MaterialTheme.typography.labelSmall.copy(
+                                            style = MaterialTheme.typography.labelMedium.copy(
                                                 fontWeight = FontWeight.Bold,
                                                 color = if (isSelected) Color.White else Color(0xFF355079)
                                             ),
@@ -2024,14 +1687,59 @@ fun FamilyAlarmEditorScreen(
                                 }
                             }
                         }
+
+                        // 3 Quick Presets: "חד־פעמי", "ימי לימודים", "כל יום"
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            PresetPillButton(
+                                label = if (isHebrew) "חד־פעמי" else "One-time",
+                                isSelected = isOneTimeSelected,
+                                onClick = { selectedDays = setOf(singleUpcomingDay) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("alarm_preset_one_time")
+                            )
+                            PresetPillButton(
+                                label = if (isHebrew) "ימי לימודים" else "School days",
+                                isSelected = isSchoolDaysSelected,
+                                onClick = { selectedDays = schoolDaysSet },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("alarm_preset_school_days")
+                            )
+                            PresetPillButton(
+                                label = if (isHebrew) "כל יום" else "Every day",
+                                isSelected = isAllDaysSelected,
+                                onClick = { selectedDays = allDaysSet },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("alarm_preset_every_day")
+                            )
+                        }
                     }
                 }
 
-                // 5. NATIVE ANDROID ALARM SOUND & VOLUME CARD
+                // 3. ALARM ASSIGNMENT ("עבור מי השעון?")
+                val selectedTargetLabel = remember(selectedMemberId, currentMember, childMembers, isHebrew) {
+                    if (selectedMemberId == currentMember.id || !currentMember.isParent) {
+                        if (isHebrew) "השעון שלי" else "My Alarm"
+                    } else {
+                        val child = childMembers.find { it.id == selectedMemberId }
+                        if (child != null) {
+                            if (isHebrew) "ילד: ${child.name}" else "Child: ${child.name}"
+                        } else {
+                            if (isHebrew) "השעון שלי" else "My Alarm"
+                        }
+                    }
+                }
+
                 Surface(
                     shape = softCardShape,
                     color = Color.White,
                     border = softCardBorder,
+                    shadowElevation = 1.dp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
@@ -2040,31 +1748,261 @@ fun FamilyAlarmEditorScreen(
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable(enabled = currentMember.isParent && childMembers.isNotEmpty()) {
+                                        showAssignmentDropdown = true
+                                    }
+                                    .padding(vertical = 4.dp)
+                                    .testTag("alarm_assignment_dropdown_row"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Person,
+                                        contentDescription = null,
+                                        tint = GoogleBlueDark,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = if (isHebrew) "עבור מי השעון?" else "Who is this alarm for?",
+                                        style = MaterialTheme.typography.titleSmall.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF15366B)
+                                        )
+                                    )
+                                }
+
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = Color(0xFFEAF3FE),
+                                    border = BorderStroke(1.dp, Color(0xFFCCE0FA))
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            text = selectedTargetLabel,
+                                            style = MaterialTheme.typography.labelMedium.copy(
+                                                fontWeight = FontWeight.Bold,
+                                                color = GoogleBlueDark
+                                            )
+                                        )
+                                        if (currentMember.isParent && childMembers.isNotEmpty()) {
+                                            Icon(
+                                                imageVector = Icons.Default.ExpandMore,
+                                                contentDescription = null,
+                                                tint = GoogleBlueDark,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            DropdownMenu(
+                                expanded = showAssignmentDropdown,
+                                onDismissRequest = { showAssignmentDropdown = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = if (isHebrew) "השעון שלי" else "My Alarm",
+                                            fontWeight = if (selectedMemberId == currentMember.id) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    },
+                                    onClick = {
+                                        selectedMemberId = currentMember.id
+                                        showAssignmentDropdown = false
+                                    }
+                                )
+                                if (currentMember.isParent) {
+                                    childMembers.forEach { child ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = if (isHebrew) "ילד: ${child.name} (${child.avatarEmoji})"
+                                                    else "Child: ${child.name} (${child.avatarEmoji})",
+                                                    fontWeight = if (selectedMemberId == child.id) FontWeight.Bold else FontWeight.Normal
+                                                )
+                                            },
+                                            onClick = {
+                                                selectedMemberId = child.id
+                                                if (soundType == AlarmAudioController.SOUND_CUSTOM_URI) {
+                                                    soundType = AlarmAudioController.SOUND_SYSTEM_ALARM
+                                                }
+                                                showAssignmentDropdown = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Compact selector pills when parent has children (keeps quick 1-tap switching & testTags)
+                        if (currentMember.isParent && childMembers.isNotEmpty()) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                val isSelf = selectedMemberId == currentMember.id
+                                FilterChip(
+                                    selected = isSelf,
+                                    onClick = { selectedMemberId = currentMember.id },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = Color(0xFFDCEBFE),
+                                        selectedLabelColor = Color(0xFF12366E)
+                                    ),
+                                    label = {
+                                        Text(
+                                            text = if (isHebrew) "השעון שלי" else "My Alarm",
+                                            fontSize = 12.sp,
+                                            fontWeight = if (isSelf) FontWeight.Bold else FontWeight.Medium
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("alarm_assign_personal")
+                                )
+                                childMembers.forEach { child ->
+                                    val isChildSelected = selectedMemberId == child.id
+                                    FilterChip(
+                                        selected = isChildSelected,
+                                        onClick = {
+                                            selectedMemberId = child.id
+                                            if (soundType == AlarmAudioController.SOUND_CUSTOM_URI) {
+                                                soundType = AlarmAudioController.SOUND_SYSTEM_ALARM
+                                            }
+                                        },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = Color(0xFFDCEBFE),
+                                            selectedLabelColor = Color(0xFF12366E)
+                                        ),
+                                        label = {
+                                            Text(
+                                                text = if (isHebrew) "ילד: ${child.name}" else "Child: ${child.name}",
+                                                fontSize = 12.sp,
+                                                fontWeight = if (isChildSelected) FontWeight.Bold else FontWeight.Medium
+                                            )
+                                        },
+                                        modifier = Modifier.testTag("alarm_assign_${child.id}")
+                                    )
+                                }
+                            }
+                        } else {
+                            // Ensure testTag("alarm_assign_personal") is always present for single-user / child mode
+                            Box(modifier = Modifier.testTag("alarm_assign_personal"))
+                        }
+                    }
+                }
+
+                // 4. ALARM NAME ("שם השעון המעורר")
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = {
+                        Text(
+                            text = if (isHebrew) "שם השעון המעורר" else "Alarm Name",
+                            fontSize = 13.sp
+                        )
+                    },
+                    placeholder = {
+                        Text(
+                            text = if (isHebrew) "בוקר טוב רועי!" else "Good Morning!",
+                            fontSize = 13.sp,
+                            color = Color(0xFF8A9BB5)
+                        )
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = Color.White,
+                        unfocusedContainerColor = Color.White,
+                        focusedBorderColor = GoogleBlue,
+                        unfocusedBorderColor = Color(0xFFDCE8F8)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("alarm_title_input")
+                )
+
+                // 5. COMPACT RINGTONE ROW ("צלצול")
+                Surface(
+                    shape = softCardShape,
+                    color = Color.White,
+                    border = softCardBorder,
+                    shadowElevation = 1.dp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(softCardShape)
+                        .clickable {
+                            AlarmAudioController.stopPreview(context)
+                            showRingtonePickerScreen = true
+                        }
+                        .testTag("alarm_ringtone_row")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
                         ) {
+                            Surface(
+                                shape = CircleShape,
+                                color = Color(0xFFEAF3FE),
+                                modifier = Modifier.size(38.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.MusicNote,
+                                        contentDescription = null,
+                                        tint = GoogleBlueDark,
+                                        modifier = Modifier.size(19.dp)
+                                    )
+                                }
+                            }
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = if (isHebrew) "צליל התראה של המכשיר" else "Android Alarm Ringtone",
+                                    text = if (isHebrew) "צלצול" else "Ringtone",
                                     style = MaterialTheme.typography.titleSmall.copy(
                                         fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF1E3A66)
+                                        color = Color(0xFF15366B)
                                     )
                                 )
                                 Text(
-                                    text = AlarmAudioController.soundDisplayName(soundType, customSoundTitle, isHebrew),
-                                    style = MaterialTheme.typography.labelSmall.copy(
+                                    text = AlarmAudioController.cleanSoundDisplayName(
+                                        soundType = soundType,
+                                        customTitle = customSoundTitle,
+                                        isHebrew = isHebrew
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall.copy(
                                         color = GoogleBlueDark,
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 12.sp
+                                        fontWeight = FontWeight.SemiBold
                                     ),
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
+                        }
 
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
                             if (previewState.isPlaying) {
                                 FilledTonalButton(
                                     onClick = { AlarmAudioController.stopPreview(context) },
@@ -2072,12 +2010,16 @@ fun FamilyAlarmEditorScreen(
                                         containerColor = GoogleRedLight,
                                         contentColor = GoogleRedDark
                                     ),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                     modifier = Modifier
                                         .height(34.dp)
                                         .testTag("alarm_stop_preview_button")
                                 ) {
-                                    Icon(imageVector = Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Icon(
+                                        imageVector = Icons.Default.Stop,
+                                        contentDescription = if (isHebrew) "עצור" else "Stop",
+                                        modifier = Modifier.size(15.dp)
+                                    )
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(
                                         text = if (isHebrew) "עצור" else "Stop",
@@ -2096,265 +2038,43 @@ fun FamilyAlarmEditorScreen(
                                         )
                                     },
                                     colors = ButtonDefaults.filledTonalButtonColors(
-                                        containerColor = Color(0xFFE5F0FE),
+                                        containerColor = Color(0xFFEAF3FE),
                                         contentColor = GoogleBlueDark
                                     ),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                     modifier = Modifier
                                         .height(34.dp)
                                         .testTag("alarm_preview_sound_button")
                                 ) {
-                                    Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = if (isHebrew) "השמע" else "Play",
+                                        modifier = Modifier.size(15.dp)
+                                    )
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(
-                                        text = if (isHebrew) "השמע צליל" else "Preview",
+                                        text = if (isHebrew) "השמע" else "Play",
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold
                                     )
                                 }
                             }
-                        }
 
-                        // Built-in & System Alarm Sound Options
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            items(AlarmAudioController.builtInSoundOptions) { option ->
-                                val isSelected = soundType == option.soundType
-                                FilterChip(
-                                    selected = isSelected,
-                                    onClick = {
-                                        soundType = option.soundType
-                                        customFileErrorHe = null
-                                        AlarmAudioController.startPreview(
-                                            context = context,
-                                            soundType = option.soundType,
-                                            customSoundUri = "",
-                                            volumePercent = volumePercent.toInt()
-                                        )
-                                    },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = Color(0xFFDCEBFE),
-                                        selectedLabelColor = Color(0xFF12366E)
-                                    ),
-                                    label = {
-                                        Text(
-                                            text = "${option.emoji} ${if (isHebrew) option.titleHe else option.titleEn}",
-                                            fontSize = 12.sp,
-                                            maxLines = 1
-                                        )
-                                    },
-                                    modifier = Modifier.testTag("alarm_sound_${option.soundType}")
-                                )
-                            }
-                        }
-
-                        // Discovered Native Device Alarm Ringtones (if available on this device)
-                        if (!isTargetRemoteChild && nativeDeviceRingtones.isNotEmpty()) {
-                            LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                items(nativeDeviceRingtones) { ringtone ->
-                                    val isSelected = soundType == AlarmAudioController.SOUND_CUSTOM_URI &&
-                                        customSoundUri == ringtone.uriString
-                                    FilterChip(
-                                        selected = isSelected,
-                                        onClick = {
-                                            customFileErrorHe = null
-                                            customSoundUri = ringtone.uriString
-                                            customSoundTitle = ringtone.title
-                                            soundType = AlarmAudioController.SOUND_CUSTOM_URI
-                                            AlarmAudioController.startPreview(
-                                                context = context,
-                                                soundType = AlarmAudioController.SOUND_CUSTOM_URI,
-                                                customSoundUri = ringtone.uriString,
-                                                volumePercent = volumePercent.toInt()
-                                            )
-                                        },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = Color(0xFFDCEBFE),
-                                            selectedLabelColor = Color(0xFF12366E)
-                                        ),
-                                        label = {
-                                            Text(
-                                                text = "🔔 ${ringtone.title}",
-                                                fontSize = 12.sp,
-                                                maxLines = 1
-                                            )
-                                        }
-                                    )
-                                }
-                            }
-                        }
-
-                        // Native Android System Ringtone Picker + Optional Audio File Picker
-                        if (!isTargetRemoteChild) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                OutlinedButton(
-                                    onClick = {
-                                        runCatching {
-                                            systemRingtonePickerLauncher.launch(
-                                                AlarmAudioController.createSystemRingtonePickerIntent(
-                                                    context = context,
-                                                    currentSoundType = soundType,
-                                                    currentCustomUri = customSoundUri,
-                                                    isHebrew = isHebrew
-                                                )
-                                            )
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(10.dp),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                    border = BorderStroke(
-                                        width = if (soundType == AlarmAudioController.SOUND_CUSTOM_URI) 1.5.dp else 1.dp,
-                                        color = if (soundType == AlarmAudioController.SOUND_CUSTOM_URI) GoogleBlue else Color(0xFFD5E3F7)
-                                    ),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .defaultMinSize(minHeight = 38.dp)
-                                        .testTag("alarm_system_ringtone_picker_button")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.NotificationsActive,
-                                        contentDescription = null,
-                                        tint = GoogleBlue,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = if (isHebrew) "צלילי התראה במכשיר" else "Device Alarm Tones",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-
-                                OutlinedButton(
-                                    onClick = { customAudioLauncher.launch(arrayOf("audio/*")) },
-                                    shape = RoundedCornerShape(10.dp),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                    border = BorderStroke(1.dp, Color(0xFFD5E3F7)),
-                                    modifier = Modifier
-                                        .defaultMinSize(minHeight = 38.dp)
-                                        .testTag("alarm_custom_sound_chip")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.MusicNote,
-                                        contentDescription = null,
-                                        tint = GoogleBlue,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = if (isHebrew) "קובץ שמע" else "Audio File",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1
-                                    )
-                                }
-                            }
-                        }
-
-                        val errorText = customFileErrorHe ?: if (isHebrew) previewState.errorMessageHe else previewState.errorMessageEn
-                        if (!errorText.isNullOrBlank()) {
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = GoogleRedLight,
-                                border = BorderStroke(1.dp, GoogleRed.copy(alpha = 0.4f)),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("alarm_audio_error_banner")
-                            ) {
-                                Text(
-                                    text = "⚠️ $errorText",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        color = GoogleRedDark,
-                                        fontWeight = FontWeight.Bold
-                                    ),
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                )
-                            }
-                        }
-
-                        HorizontalDivider(color = Color(0xFFEEF4FC), thickness = 1.dp)
-
-                        // Volume Slider + Test Volume Button
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = if (isHebrew) "עוצמת שמע (${volumePercent.toInt()}%)" else "Volume (${volumePercent.toInt()}%)",
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF1E3A66)
-                                )
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                                contentDescription = if (isHebrew) "בחר צלצול" else "Choose Ringtone",
+                                tint = Color(0xFF6B80A0)
                             )
-
-                            TextButton(
-                                onClick = {
-                                    if (previewState.isPlaying) {
-                                        AlarmAudioController.stopPreview(context)
-                                    } else {
-                                        AlarmAudioController.startPreview(
-                                            context = context,
-                                            soundType = soundType,
-                                            customSoundUri = customSoundUri,
-                                            volumePercent = volumePercent.toInt(),
-                                            durationMillis = 5_000L
-                                        )
-                                    }
-                                },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                modifier = Modifier
-                                    .height(28.dp)
-                                    .testTag("alarm_test_volume_button")
-                            ) {
-                                Icon(
-                                    imageVector = if (previewState.isPlaying) Icons.Default.Stop else Icons.Default.VolumeUp,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = if (previewState.isPlaying) {
-                                        if (isHebrew) "עצור בדיקה" else "Stop"
-                                    } else {
-                                        if (isHebrew) "בדוק עוצמה" else "Test Volume"
-                                    },
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
                         }
-
-                        Slider(
-                            value = volumePercent,
-                            onValueChange = { newVol ->
-                                volumePercent = newVol
-                                AlarmAudioController.updateActivePreviewVolume(context, newVol.toInt())
-                            },
-                            valueRange = 10f..100f,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(28.dp)
-                                .testTag("alarm_volume_slider")
-                        )
                     }
                 }
 
-                // 6. SNOOZE & VIBRATION CARD
+                // 6. COMPACT SNOOZE ROW ("נודניק — 5 דקות")
                 Surface(
                     shape = softCardShape,
                     color = Color.White,
                     border = softCardBorder,
+                    shadowElevation = 1.dp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
@@ -2363,19 +2083,43 @@ fun FamilyAlarmEditorScreen(
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        FlowRow(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { showSnoozeOptions = !showSnoozeOptions }
+                                .padding(vertical = 2.dp)
+                                .testTag("alarm_snooze_row"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(
-                                text = if (isHebrew) "זמן נודניק (דק׳):" else "Snooze (min):",
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF1E3A66)
-                                ),
-                                modifier = Modifier.align(Alignment.CenterVertically)
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = Color(0xFFEAF3FE),
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = Icons.Default.Snooze,
+                                            contentDescription = null,
+                                            tint = GoogleBlueDark,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = if (isHebrew) "נודניק — $snoozeDurationMinutes דקות" else "Snooze — $snoozeDurationMinutes min",
+                                    style = MaterialTheme.typography.titleSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF15366B)
+                                    )
+                                )
+                            }
+
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 listOf(5, 10, 15).forEach { mins ->
                                     val isSelected = snoozeDurationMinutes == mins
@@ -2388,7 +2132,7 @@ fun FamilyAlarmEditorScreen(
                                         ),
                                         label = {
                                             Text(
-                                                text = "$mins",
+                                                text = if (isHebrew) "$mins דק׳" else "${mins}m",
                                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                                                 fontSize = 12.sp
                                             )
@@ -2398,26 +2142,173 @@ fun FamilyAlarmEditorScreen(
                                 }
                             }
                         }
+                    }
+                }
 
-                        HorizontalDivider(color = Color(0xFFEEF4FC), thickness = 1.dp)
-
+                // 7. COLLAPSIBLE ADDITIONAL OPTIONS ("אפשרויות נוספות" — collapsed by default)
+                Surface(
+                    shape = softCardShape,
+                    color = Color.White,
+                    border = softCardBorder,
+                    shadowElevation = 1.dp,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                    ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { showAdditionalOptions = !showAdditionalOptions }
+                                .padding(vertical = 4.dp)
+                                .testTag("alarm_additional_options_toggle"),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = if (isHebrew) "רטט בעת צלצול" else "Vibrate on alarm",
-                                style = MaterialTheme.typography.bodyMedium.copy(
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFF1E3A66)
+                                text = if (isHebrew) "אפשרויות נוספות" else "Additional Options",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF15366B)
                                 )
                             )
-                            Switch(
-                                checked = vibrateEnabled,
-                                onCheckedChange = { vibrateEnabled = it },
-                                modifier = Modifier.testTag("alarm_vibrate_switch")
+                            Icon(
+                                imageVector = if (showAdditionalOptions) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = if (isHebrew) "אפשרויות נוספות" else "Additional Options",
+                                tint = Color(0xFF5A7194)
                             )
+                        }
+
+                        AnimatedVisibility(
+                            visible = showAdditionalOptions,
+                            enter = fadeIn() + expandVertically(),
+                            exit = fadeOut() + shrinkVertically()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                HorizontalDivider(color = Color(0xFFEEF4FC), thickness = 1.dp)
+
+                                // Vibration switch
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = if (isHebrew) "רטט בעת צלצול" else "Vibrate on alarm",
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color(0xFF1E3A66)
+                                        )
+                                    )
+                                    Switch(
+                                        checked = vibrateEnabled,
+                                        onCheckedChange = { vibrateEnabled = it },
+                                        modifier = Modifier.testTag("alarm_vibrate_switch")
+                                    )
+                                }
+
+                                HorizontalDivider(color = Color(0xFFEEF4FC), thickness = 1.dp)
+
+                                // Additional volume options
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = if (isHebrew) "עוצמת הצלצול (${volumePercent.toInt()}%)" else "Alarm Volume (${volumePercent.toInt()}%)",
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF1E3A66)
+                                        )
+                                    )
+
+                                    TextButton(
+                                        onClick = {
+                                            if (previewState.isPlaying) {
+                                                AlarmAudioController.stopPreview(context)
+                                            } else {
+                                                AlarmAudioController.startPreview(
+                                                    context = context,
+                                                    soundType = soundType,
+                                                    customSoundUri = customSoundUri,
+                                                    volumePercent = volumePercent.toInt(),
+                                                    durationMillis = 5_000L
+                                                )
+                                            }
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                        modifier = Modifier
+                                            .height(28.dp)
+                                            .testTag("alarm_test_volume_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = if (previewState.isPlaying) Icons.Default.Stop else Icons.Default.VolumeUp,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = if (previewState.isPlaying) {
+                                                if (isHebrew) "עצור בדיקה" else "Stop"
+                                            } else {
+                                                if (isHebrew) "בדוק עוצמה" else "Test Volume"
+                                            },
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+
+                                Slider(
+                                    value = volumePercent,
+                                    onValueChange = { newVol ->
+                                        volumePercent = newVol
+                                        AlarmAudioController.updateActivePreviewVolume(context, newVol.toInt())
+                                    },
+                                    valueRange = 10f..100f,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(28.dp)
+                                        .testTag("alarm_volume_slider")
+                                )
+
+                                // Device clock option (only when targeting this device)
+                                if (!isTargetRemoteChild) {
+                                    HorizontalDivider(color = Color(0xFFEEF4FC), thickness = 1.dp)
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .clickable { alsoSetDeviceClock = !alsoSetDeviceClock }
+                                            .padding(vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = if (isHebrew) "הוסף גם לשעון המובנה של המכשיר" else "Also add to built-in device clock app",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                fontWeight = FontWeight.Medium,
+                                                color = Color(0xFF355079)
+                                            ),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Checkbox(
+                                            checked = alsoSetDeviceClock,
+                                            onCheckedChange = { alsoSetDeviceClock = it },
+                                            modifier = Modifier.testTag("alarm_also_set_device_clock_checkbox")
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2494,6 +2385,970 @@ fun FamilyAlarmEditorScreen(
     }
 }
 
+/**
+ * Dedicated Full-Screen Ringtone Picker Screen ("בחירת צליל מעורר").
+ *
+ * Categories:
+ * 1. "צלילי מערכת" (`RingtoneManager.TYPE_ALARM`)
+ * 2. "צלילים נוספים" (`RingtoneManager.TYPE_RINGTONE` and `RingtoneManager.TYPE_NOTIFICATION`)
+ * 3. "צליל מותאם אישית" (Selecting a custom audio file from the phone)
+ *
+ * Features:
+ * - Play / Stop preview button per row (only one sound plays at a time; stops on exit).
+ * - Radio selection indicator + soft blue highlight card for the selected ringtone.
+ * - Bottom Volume control ("עוצמת הצלצול") with slider and percentage indicator.
+ * - Permanently visible bottom buttons: "ביטול" and "בחר צליל".
+ */
+@Composable
+fun FamilyAlarmRingtonePickerScreen(
+    initialSoundType: String,
+    initialCustomSoundUri: String,
+    initialCustomSoundTitle: String,
+    initialVolumePercent: Int,
+    isTargetRemoteChild: Boolean,
+    isHebrew: Boolean,
+    onCancel: () -> Unit,
+    onConfirmSound: (soundType: String, customSoundUri: String, customSoundTitle: String, volumePercent: Int) -> Unit
+) {
+    val context = LocalContext.current
+    val previewState by AlarmAudioController.previewState.collectAsState()
+
+    val systemAlarmRingtones = remember(context) {
+        AlarmAudioController.getSystemAlarmCategoryRingtones(context)
+    }
+    val additionalRingtones = remember(context) {
+        AlarmAudioController.getAdditionalCategoryRingtones(context)
+    }
+
+    var selectedTab by remember {
+        mutableStateOf(
+            when {
+                initialSoundType == AlarmAudioController.SOUND_CUSTOM_URI &&
+                    initialCustomSoundUri.isNotBlank() &&
+                    systemAlarmRingtones.none { it.uriString == initialCustomSoundUri } &&
+                    additionalRingtones.none { it.uriString == initialCustomSoundUri } ->
+                    RingtonePickerTab.CUSTOM_SOUND
+                initialSoundType == AlarmAudioController.SOUND_SYSTEM_RINGTONE ||
+                    initialSoundType == AlarmAudioController.SOUND_SYSTEM_NOTIFICATION ||
+                    (initialSoundType == AlarmAudioController.SOUND_CUSTOM_URI &&
+                        additionalRingtones.any { it.uriString == initialCustomSoundUri }) ->
+                    RingtonePickerTab.ADDITIONAL_SOUNDS
+                else -> RingtonePickerTab.SYSTEM_ALARMS
+            }
+        )
+    }
+
+    var selectedSoundType by remember { mutableStateOf(initialSoundType) }
+    var selectedCustomUri by remember { mutableStateOf(initialCustomSoundUri) }
+    var selectedCustomTitle by remember { mutableStateOf(initialCustomSoundTitle) }
+    var volumePercent by remember { mutableFloatStateOf(initialVolumePercent.coerceIn(10, 100).toFloat()) }
+    var customFileErrorHe by remember { mutableStateOf<String?>(null) }
+
+    // Ensure any active preview stops when leaving the Ringtone Picker screen
+    DisposableEffect(Unit) {
+        onDispose {
+            AlarmAudioController.stopPreview(context)
+        }
+    }
+
+    BackHandler {
+        AlarmAudioController.stopPreview(context)
+        onCancel()
+    }
+
+    // Native Android System Ringtone Picker launcher
+    val systemRingtonePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val resolved = AlarmAudioController.resolvePickedSystemRingtone(
+                context = context,
+                resultData = result.data,
+                isHebrew = isHebrew
+            )
+            if (resolved != null) {
+                val (pickedUriStr, toneTitle) = resolved
+                customFileErrorHe = null
+                if (isTargetRemoteChild) {
+                    selectedSoundType = AlarmAudioController.SOUND_SYSTEM_ALARM
+                    selectedCustomUri = ""
+                    selectedCustomTitle = ""
+                } else {
+                    selectedSoundType = AlarmAudioController.SOUND_CUSTOM_URI
+                    selectedCustomUri = pickedUriStr
+                    selectedCustomTitle = toneTitle
+                }
+                AlarmAudioController.startPreview(
+                    context = context,
+                    soundType = AlarmAudioController.SOUND_CUSTOM_URI,
+                    customSoundUri = pickedUriStr,
+                    volumePercent = volumePercent.toInt()
+                )
+            }
+        }
+    }
+
+    // Custom audio file picker launcher ("צליל מותאם אישית")
+    val customAudioLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val importRes = AlarmAudioController.importAndPersistCustomSoundUri(context, uri)
+            importRes.onSuccess { (persistedUriStr, displayName) ->
+                customFileErrorHe = null
+                selectedCustomUri = persistedUriStr
+                selectedCustomTitle = displayName
+                selectedSoundType = AlarmAudioController.SOUND_CUSTOM_URI
+                AlarmAudioController.startPreview(
+                    context = context,
+                    soundType = AlarmAudioController.SOUND_CUSTOM_URI,
+                    customSoundUri = persistedUriStr,
+                    volumePercent = volumePercent.toInt()
+                )
+            }.onFailure { err ->
+                customFileErrorHe = err.localizedMessage ?: "לא ניתן לטעון את קובץ השמע שנבחר"
+            }
+        }
+    }
+
+    Scaffold(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("alarm_ringtone_picker_screen"),
+        containerColor = Color(0xFFF3F7FE),
+        topBar = {
+            Surface(
+                color = Color.White,
+                shadowElevation = 2.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        IconButton(
+                            onClick = {
+                                AlarmAudioController.stopPreview(context)
+                                onCancel()
+                            },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("close_ringtone_picker_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = if (isHebrew) "חזרה" else "Back",
+                                tint = Color(0xFF15366B)
+                            )
+                        }
+
+                        Text(
+                            text = if (isHebrew) "בחירת צליל מעורר" else "Select Alarm Sound",
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFF15366B),
+                                fontSize = 20.sp
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("ringtone_picker_header_title")
+                        )
+                    }
+
+                    // Three Compact Category Tabs: "צלילי מערכת", "צלילים נוספים", "צליל מותאם אישית"
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        RingtonePickerTab.entries.forEach { tab ->
+                            val isSelected = selectedTab == tab
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isSelected) GoogleBlue else Color(0xFFEEF4FC),
+                                border = if (isSelected) null else BorderStroke(1.dp, Color(0xFFD5E3F7)),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .defaultMinSize(minHeight = 40.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { selectedTab = tab }
+                                    .testTag(tab.testTag)
+                            ) {
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp)
+                                ) {
+                                    Text(
+                                        text = if (isHebrew) tab.labelHe else tab.labelEn,
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isSelected) Color.White else Color(0xFF355079),
+                                            fontSize = 12.sp
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = Color(0xFFDCE8F8), thickness = 1.dp)
+                }
+            }
+        },
+        bottomBar = {
+            Surface(
+                color = Color.White,
+                shadowElevation = 8.dp,
+                tonalElevation = 3.dp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .testTag("ringtone_picker_bottom_bar")
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // Volume Control ("עוצמת הצלצול" + Volume slider + Percentage indicator)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.VolumeUp,
+                                contentDescription = null,
+                                tint = GoogleBlueDark,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = if (isHebrew) "עוצמת הצלצול" else "Ringtone Volume",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF15366B)
+                                )
+                            )
+                        }
+
+                        Text(
+                            text = "${volumePercent.toInt()}%",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = GoogleBlueDark
+                            ),
+                            modifier = Modifier.testTag("ringtone_picker_volume_percent")
+                        )
+                    }
+
+                    Slider(
+                        value = volumePercent,
+                        onValueChange = { newVol ->
+                            volumePercent = newVol
+                            AlarmAudioController.updateActivePreviewVolume(context, newVol.toInt())
+                        },
+                        valueRange = 10f..100f,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(28.dp)
+                            .testTag("ringtone_picker_volume_slider")
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                AlarmAudioController.stopPreview(context)
+                                onCancel()
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.2.dp, Color(0xFFBFD4F2)),
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 48.dp)
+                                .testTag("cancel_ringtone_picker_button")
+                        ) {
+                            Text(
+                                text = if (isHebrew) "ביטול" else "Cancel",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp,
+                                color = Color(0xFF355079)
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                AlarmAudioController.stopPreview(context)
+                                onConfirmSound(
+                                    selectedSoundType,
+                                    selectedCustomUri,
+                                    selectedCustomTitle,
+                                    volumePercent.toInt().coerceIn(10, 100)
+                                )
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = GoogleBlue,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier
+                                .weight(1.4f)
+                                .defaultMinSize(minHeight = 48.dp)
+                                .testTag("confirm_ringtone_picker_button")
+                        ) {
+                            Text(
+                                text = if (isHebrew) "בחר צליל" else "Select Sound",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    ) { innerPadding ->
+        LazyColumn(
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .widthIn(max = 640.dp)
+                .testTag("ringtone_picker_list")
+        ) {
+            when (selectedTab) {
+                RingtonePickerTab.SYSTEM_ALARMS -> {
+                    // Default Android System Alarm Sound option
+                    item(key = "default_system_alarm_option") {
+                        val isSelected = selectedSoundType == AlarmAudioController.SOUND_SYSTEM_ALARM
+                        val isPlayingThis = previewState.isPlaying &&
+                            previewState.activeSoundType == AlarmAudioController.SOUND_SYSTEM_ALARM &&
+                            previewState.activeCustomUri.isBlank()
+
+                        RingtoneOptionRow(
+                            title = if (isHebrew) "צליל שעון מעורר של המכשיר (ברירת מחדל)" else "Default Device Alarm Sound",
+                            subtitle = if (isHebrew) "צליל ההתראה הראשי של מערכת האנדרואיד" else "Primary system alarm tone",
+                            isSelected = isSelected,
+                            isPlaying = isPlayingThis,
+                            isHebrew = isHebrew,
+                            onSelect = {
+                                selectedSoundType = AlarmAudioController.SOUND_SYSTEM_ALARM
+                                selectedCustomUri = ""
+                                selectedCustomTitle = ""
+                                AlarmAudioController.startPreview(
+                                    context = context,
+                                    soundType = AlarmAudioController.SOUND_SYSTEM_ALARM,
+                                    customSoundUri = "",
+                                    volumePercent = volumePercent.toInt()
+                                )
+                            },
+                            onTogglePlay = {
+                                if (isPlayingThis) {
+                                    AlarmAudioController.stopPreview(context)
+                                } else {
+                                    selectedSoundType = AlarmAudioController.SOUND_SYSTEM_ALARM
+                                    selectedCustomUri = ""
+                                    selectedCustomTitle = ""
+                                    AlarmAudioController.startPreview(
+                                        context = context,
+                                        soundType = AlarmAudioController.SOUND_SYSTEM_ALARM,
+                                        customSoundUri = "",
+                                        volumePercent = volumePercent.toInt()
+                                    )
+                                }
+                            },
+                            modifier = Modifier.testTag("ringtone_row_SYSTEM_ALARM")
+                        )
+                    }
+
+                    // Built-in gentle/classic/energetic alarm melodies (work across all parent & child devices)
+                    items(
+                        items = AlarmAudioController.builtInSoundOptions.filter {
+                            it.soundType != AlarmAudioController.SOUND_SYSTEM_ALARM &&
+                                it.soundType != AlarmAudioController.SOUND_SYSTEM_RINGTONE &&
+                                it.soundType != AlarmAudioController.SOUND_SYSTEM_NOTIFICATION
+                        },
+                        key = { "builtin_${it.soundType}" }
+                    ) { option ->
+                        val isSelected = selectedSoundType == option.soundType
+                        val isPlayingThis = previewState.isPlaying &&
+                            previewState.activeSoundType == option.soundType
+
+                        RingtoneOptionRow(
+                            title = if (isHebrew) option.titleHe else option.titleEn,
+                            subtitle = if (isHebrew) "צליל השכמה מובנה במערכת" else "Built-in system wake-up tone",
+                            isSelected = isSelected,
+                            isPlaying = isPlayingThis,
+                            isHebrew = isHebrew,
+                            onSelect = {
+                                selectedSoundType = option.soundType
+                                selectedCustomUri = ""
+                                selectedCustomTitle = ""
+                                AlarmAudioController.startPreview(
+                                    context = context,
+                                    soundType = option.soundType,
+                                    customSoundUri = "",
+                                    volumePercent = volumePercent.toInt()
+                                )
+                            },
+                            onTogglePlay = {
+                                if (isPlayingThis) {
+                                    AlarmAudioController.stopPreview(context)
+                                } else {
+                                    selectedSoundType = option.soundType
+                                    selectedCustomUri = ""
+                                    selectedCustomTitle = ""
+                                    AlarmAudioController.startPreview(
+                                        context = context,
+                                        soundType = option.soundType,
+                                        customSoundUri = "",
+                                        volumePercent = volumePercent.toInt()
+                                    )
+                                }
+                            },
+                            modifier = Modifier.testTag("ringtone_row_${option.soundType}")
+                        )
+                    }
+
+                    // Enumerated Native Android TYPE_ALARM ringtones on this device
+                    if (!isTargetRemoteChild) {
+                        items(
+                            items = systemAlarmRingtones,
+                            key = { "sys_alarm_${it.uriString}" }
+                        ) { tone ->
+                            val isSelected = selectedSoundType == AlarmAudioController.SOUND_CUSTOM_URI &&
+                                selectedCustomUri == tone.uriString
+                            val isPlayingThis = previewState.isPlaying &&
+                                previewState.activeCustomUri == tone.uriString
+
+                            RingtoneOptionRow(
+                                title = tone.title,
+                                subtitle = if (isHebrew) "צליל שעון מעורר במכשיר" else "Device Alarm Tone",
+                                isSelected = isSelected,
+                                isPlaying = isPlayingThis,
+                                isHebrew = isHebrew,
+                                onSelect = {
+                                    selectedSoundType = AlarmAudioController.SOUND_CUSTOM_URI
+                                    selectedCustomUri = tone.uriString
+                                    selectedCustomTitle = tone.title
+                                    AlarmAudioController.startPreview(
+                                        context = context,
+                                        soundType = AlarmAudioController.SOUND_CUSTOM_URI,
+                                        customSoundUri = tone.uriString,
+                                        volumePercent = volumePercent.toInt()
+                                    )
+                                },
+                                onTogglePlay = {
+                                    if (isPlayingThis) {
+                                        AlarmAudioController.stopPreview(context)
+                                    } else {
+                                        selectedSoundType = AlarmAudioController.SOUND_CUSTOM_URI
+                                        selectedCustomUri = tone.uriString
+                                        selectedCustomTitle = tone.title
+                                        AlarmAudioController.startPreview(
+                                            context = context,
+                                            soundType = AlarmAudioController.SOUND_CUSTOM_URI,
+                                            customSoundUri = tone.uriString,
+                                            volumePercent = volumePercent.toInt()
+                                        )
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+
+                RingtonePickerTab.ADDITIONAL_SOUNDS -> {
+                    // Default System Ringtone & Default Notification Sound
+                    item(key = "default_system_ringtone_option") {
+                        val isSelected = selectedSoundType == AlarmAudioController.SOUND_SYSTEM_RINGTONE
+                        val isPlayingThis = previewState.isPlaying &&
+                            previewState.activeSoundType == AlarmAudioController.SOUND_SYSTEM_RINGTONE &&
+                            previewState.activeCustomUri.isBlank()
+
+                        RingtoneOptionRow(
+                            title = if (isHebrew) "רינגטון שיחה ראשי של המכשיר" else "Default Phone Ringtone",
+                            subtitle = if (isHebrew) "צליל שיחה נכנסת של האנדרואיד" else "System incoming call ringtone",
+                            isSelected = isSelected,
+                            isPlaying = isPlayingThis,
+                            isHebrew = isHebrew,
+                            onSelect = {
+                                selectedSoundType = AlarmAudioController.SOUND_SYSTEM_RINGTONE
+                                selectedCustomUri = ""
+                                selectedCustomTitle = ""
+                                AlarmAudioController.startPreview(
+                                    context = context,
+                                    soundType = AlarmAudioController.SOUND_SYSTEM_RINGTONE,
+                                    customSoundUri = "",
+                                    volumePercent = volumePercent.toInt()
+                                )
+                            },
+                            onTogglePlay = {
+                                if (isPlayingThis) {
+                                    AlarmAudioController.stopPreview(context)
+                                } else {
+                                    selectedSoundType = AlarmAudioController.SOUND_SYSTEM_RINGTONE
+                                    selectedCustomUri = ""
+                                    selectedCustomTitle = ""
+                                    AlarmAudioController.startPreview(
+                                        context = context,
+                                        soundType = AlarmAudioController.SOUND_SYSTEM_RINGTONE,
+                                        customSoundUri = "",
+                                        volumePercent = volumePercent.toInt()
+                                    )
+                                }
+                            },
+                            modifier = Modifier.testTag("ringtone_row_SYSTEM_RINGTONE")
+                        )
+                    }
+
+                    item(key = "default_system_notification_option") {
+                        val isSelected = selectedSoundType == AlarmAudioController.SOUND_SYSTEM_NOTIFICATION
+                        val isPlayingThis = previewState.isPlaying &&
+                            previewState.activeSoundType == AlarmAudioController.SOUND_SYSTEM_NOTIFICATION &&
+                            previewState.activeCustomUri.isBlank()
+
+                        RingtoneOptionRow(
+                            title = if (isHebrew) "צליל התראה של המכשיר" else "Default Notification Sound",
+                            subtitle = if (isHebrew) "צליל הודעה קצר של האנדרואיד" else "System notification tone",
+                            isSelected = isSelected,
+                            isPlaying = isPlayingThis,
+                            isHebrew = isHebrew,
+                            onSelect = {
+                                selectedSoundType = AlarmAudioController.SOUND_SYSTEM_NOTIFICATION
+                                selectedCustomUri = ""
+                                selectedCustomTitle = ""
+                                AlarmAudioController.startPreview(
+                                    context = context,
+                                    soundType = AlarmAudioController.SOUND_SYSTEM_NOTIFICATION,
+                                    customSoundUri = "",
+                                    volumePercent = volumePercent.toInt()
+                                )
+                            },
+                            onTogglePlay = {
+                                if (isPlayingThis) {
+                                    AlarmAudioController.stopPreview(context)
+                                } else {
+                                    selectedSoundType = AlarmAudioController.SOUND_SYSTEM_NOTIFICATION
+                                    selectedCustomUri = ""
+                                    selectedCustomTitle = ""
+                                    AlarmAudioController.startPreview(
+                                        context = context,
+                                        soundType = AlarmAudioController.SOUND_SYSTEM_NOTIFICATION,
+                                        customSoundUri = "",
+                                        volumePercent = volumePercent.toInt()
+                                    )
+                                }
+                            },
+                            modifier = Modifier.testTag("ringtone_row_SYSTEM_NOTIFICATION")
+                        )
+                    }
+
+                    if (!isTargetRemoteChild) {
+                        items(
+                            items = additionalRingtones,
+                            key = { "add_tone_${it.uriString}" }
+                        ) { tone ->
+                            val isSelected = selectedSoundType == AlarmAudioController.SOUND_CUSTOM_URI &&
+                                selectedCustomUri == tone.uriString
+                            val isPlayingThis = previewState.isPlaying &&
+                                previewState.activeCustomUri == tone.uriString
+
+                            RingtoneOptionRow(
+                                title = tone.title,
+                                subtitle = if (isHebrew) "צליל נוסף מהמכשיר" else "Additional Device Sound",
+                                isSelected = isSelected,
+                                isPlaying = isPlayingThis,
+                                isHebrew = isHebrew,
+                                onSelect = {
+                                    selectedSoundType = AlarmAudioController.SOUND_CUSTOM_URI
+                                    selectedCustomUri = tone.uriString
+                                    selectedCustomTitle = tone.title
+                                    AlarmAudioController.startPreview(
+                                        context = context,
+                                        soundType = AlarmAudioController.SOUND_CUSTOM_URI,
+                                        customSoundUri = tone.uriString,
+                                        volumePercent = volumePercent.toInt()
+                                    )
+                                },
+                                onTogglePlay = {
+                                    if (isPlayingThis) {
+                                        AlarmAudioController.stopPreview(context)
+                                    } else {
+                                        selectedSoundType = AlarmAudioController.SOUND_CUSTOM_URI
+                                        selectedCustomUri = tone.uriString
+                                        selectedCustomTitle = tone.title
+                                        AlarmAudioController.startPreview(
+                                            context = context,
+                                            soundType = AlarmAudioController.SOUND_CUSTOM_URI,
+                                            customSoundUri = tone.uriString,
+                                            volumePercent = volumePercent.toInt()
+                                        )
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+
+                RingtonePickerTab.CUSTOM_SOUND -> {
+                    item(key = "custom_sound_picker_card") {
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = Color.White,
+                            border = BorderStroke(1.dp, Color(0xFFDCE8F8)),
+                            shadowElevation = 1.dp,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Text(
+                                    text = if (isHebrew) "צליל מותאם אישית" else "Custom Sound",
+                                    style = MaterialTheme.typography.titleSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF15366B)
+                                    )
+                                )
+
+                                if (isTargetRemoteChild) {
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = Color(0xFFEFF6FF),
+                                        border = BorderStroke(1.dp, Color(0xFFCCE0FA)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = if (isHebrew)
+                                                "שעון זה מיועד למכשיר של הילד/ה. כדי להבטיח שהצלצול יפעל תמיד במכשיר הילד, מומלץ לבחור מצלילי המערכת."
+                                            else
+                                                "This alarm rings on the child's device. System sounds are recommended so playback always works on their phone.",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = GoogleBlueDark,
+                                                fontWeight = FontWeight.Medium
+                                            ),
+                                            modifier = Modifier.padding(12.dp)
+                                        )
+                                    }
+                                } else {
+                                    Text(
+                                        text = if (isHebrew)
+                                            "בחרו שיר או קובץ שמע מהמכשיר (MP3, WAV, OGG, M4A) או פתחו את בורר הצלילים של אנדרואיד:"
+                                        else
+                                            "Choose an audio file from your phone (MP3, WAV, OGG, M4A) or open the system ringtone picker:",
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            color = Color(0xFF5A7194)
+                                        )
+                                    )
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Button(
+                                            onClick = { customAudioLauncher.launch(arrayOf("audio/*")) },
+                                            shape = RoundedCornerShape(12.dp),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = GoogleBlue,
+                                                contentColor = Color.White
+                                            ),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .defaultMinSize(minHeight = 46.dp)
+                                                .testTag("alarm_custom_sound_chip")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.FolderOpen,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = if (isHebrew) "בחר קובץ מהמכשיר" else "Choose Audio File",
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 13.sp
+                                            )
+                                        }
+
+                                        OutlinedButton(
+                                            onClick = {
+                                                runCatching {
+                                                    systemRingtonePickerLauncher.launch(
+                                                        AlarmAudioController.createSystemRingtonePickerIntent(
+                                                            context = context,
+                                                            currentSoundType = selectedSoundType,
+                                                            currentCustomUri = selectedCustomUri,
+                                                            isHebrew = isHebrew
+                                                        )
+                                                    )
+                                                }
+                                            },
+                                            shape = RoundedCornerShape(12.dp),
+                                            border = BorderStroke(1.dp, Color(0xFFBFD4F2)),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .defaultMinSize(minHeight = 46.dp)
+                                                .testTag("alarm_system_ringtone_picker_button")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.NotificationsActive,
+                                                contentDescription = null,
+                                                tint = GoogleBlueDark,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = if (isHebrew) "בורר צלילי מערכת" else "System Picker",
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 13.sp,
+                                                color = GoogleBlueDark
+                                            )
+                                        }
+                                    }
+                                }
+
+                                if (selectedSoundType == AlarmAudioController.SOUND_CUSTOM_URI && selectedCustomUri.isNotBlank()) {
+                                    val isPlayingCustom = previewState.isPlaying &&
+                                        previewState.activeCustomUri == selectedCustomUri
+                                    RingtoneOptionRow(
+                                        title = selectedCustomTitle.ifBlank {
+                                            if (isHebrew) "צליל מותאם אישית" else "Custom Sound"
+                                        },
+                                        subtitle = if (isHebrew) "צליל מותאם אישית שנבחר" else "Selected custom sound",
+                                        isSelected = true,
+                                        isPlaying = isPlayingCustom,
+                                        isHebrew = isHebrew,
+                                        onSelect = {
+                                            AlarmAudioController.startPreview(
+                                                context = context,
+                                                soundType = AlarmAudioController.SOUND_CUSTOM_URI,
+                                                customSoundUri = selectedCustomUri,
+                                                volumePercent = volumePercent.toInt()
+                                            )
+                                        },
+                                        onTogglePlay = {
+                                            if (isPlayingCustom) {
+                                                AlarmAudioController.stopPreview(context)
+                                            } else {
+                                                AlarmAudioController.startPreview(
+                                                    context = context,
+                                                    soundType = AlarmAudioController.SOUND_CUSTOM_URI,
+                                                    customSoundUri = selectedCustomUri,
+                                                    volumePercent = volumePercent.toInt()
+                                                )
+                                            }
+                                        },
+                                        modifier = Modifier.testTag("selected_custom_sound_row")
+                                    )
+                                }
+
+                                val errorText = customFileErrorHe ?: if (isHebrew) previewState.errorMessageHe else previewState.errorMessageEn
+                                if (!errorText.isNullOrBlank()) {
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = GoogleRedLight,
+                                        border = BorderStroke(1.dp, GoogleRed.copy(alpha = 0.4f)),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("alarm_audio_error_banner")
+                                    ) {
+                                        Text(
+                                            text = "⚠️ $errorText",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                color = GoogleRedDark,
+                                                fontWeight = FontWeight.Bold
+                                            ),
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Single ringtone row inside [FamilyAlarmRingtonePickerScreen] with:
+ * - Play / Stop preview button
+ * - Ringtone name & subtitle
+ * - Radio selection indicator
+ * - Soft blue highlight when selected
+ */
+@Composable
+private fun RingtoneOptionRow(
+    title: String,
+    subtitle: String,
+    isSelected: Boolean,
+    isPlaying: Boolean,
+    isHebrew: Boolean,
+    onSelect: () -> Unit,
+    onTogglePlay: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = if (isSelected) Color(0xFFE6F0FE) else Color.White,
+        border = BorderStroke(
+            width = if (isSelected) 1.5.dp else 1.dp,
+            color = if (isSelected) GoogleBlue else Color(0xFFDCE8F8)
+        ),
+        shadowElevation = if (isSelected) 2.dp else 0.dp,
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .clickable { onSelect() }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                IconButton(
+                    onClick = onTogglePlay,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isPlaying) GoogleRedLight else Color(0xFFDCEBFE)
+                        )
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                        contentDescription = if (isPlaying) {
+                            if (isHebrew) "עצור" else "Stop"
+                        } else {
+                            if (isHebrew) "השמע" else "Play"
+                        },
+                        tint = if (isPlaying) GoogleRedDark else GoogleBlueDark,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.SemiBold,
+                            color = Color(0xFF15366B)
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (subtitle.isNotBlank()) {
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = Color(0xFF5A7194)
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            Icon(
+                imageVector = if (isSelected) Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
+                contentDescription = null,
+                tint = if (isSelected) GoogleBlue else Color(0xFF9EB2CE),
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun PresetPillButton(
+    label: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = if (isSelected) Color(0xFFDCEBFE) else Color(0xFFF3F7FE),
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (isSelected) GoogleBlue else Color(0xFFD5E3F7)
+        ),
+        modifier = modifier
+            .defaultMinSize(minHeight = 36.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable { onClick() }
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                    color = if (isSelected) Color(0xFF12366E) else Color(0xFF355079),
+                    fontSize = 12.sp
+                ),
+                maxLines = 1
+            )
+        }
+    }
+}
+
+private fun computeSingleUpcomingSchoolDay(hour: Int, minute: Int): SchoolDay {
+    val now = Calendar.getInstance()
+    val candidate = (now.clone() as Calendar).apply {
+        set(Calendar.HOUR_OF_DAY, hour)
+        set(Calendar.MINUTE, minute)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }
+    if (candidate.timeInMillis <= now.timeInMillis) {
+        candidate.add(Calendar.DAY_OF_YEAR, 1)
+    }
+    return when (candidate.get(Calendar.DAY_OF_WEEK)) {
+        Calendar.SUNDAY -> SchoolDay.SUNDAY
+        Calendar.MONDAY -> SchoolDay.MONDAY
+        Calendar.TUESDAY -> SchoolDay.TUESDAY
+        Calendar.WEDNESDAY -> SchoolDay.WEDNESDAY
+        Calendar.THURSDAY -> SchoolDay.THURSDAY
+        Calendar.FRIDAY -> SchoolDay.FRIDAY
+        Calendar.SATURDAY -> SchoolDay.SATURDAY
+        else -> SchoolDay.SUNDAY
+    }
+}
+
 @Composable
 internal fun AddOrEditFamilyAlarmDialog(
     alarmToEdit: FamilyAlarm?,
@@ -2552,7 +3407,7 @@ private fun openAndroidSystemClock(
     }
 }
 
-private fun formatNextTriggerRelativeSummary(
+internal fun formatNextTriggerRelativeSummary(
     alarm: FamilyAlarm,
     isHebrew: Boolean
 ): String {
@@ -2582,10 +3437,10 @@ private fun formatNextTriggerRelativeSummary(
 
     return if (isHebrew) {
         when {
-            sameDay && diffMinutes <= 60L -> "היום ב-${alarm.formattedTime24h} (בעוד $diffMinutes דק׳)"
-            sameDay -> "היום ב-${alarm.formattedTime24h}"
-            isTomorrow -> "מחר ($dayNameHe) ב-${alarm.formattedTime24h}"
-            else -> "$dayNameHe ב-${alarm.formattedTime24h}"
+            sameDay && diffMinutes <= 60L -> "היום בשעה ${alarm.formattedTime24h} (בעוד $diffMinutes דק׳)"
+            sameDay -> "היום בשעה ${alarm.formattedTime24h}"
+            isTomorrow -> "מחר בשעה ${alarm.formattedTime24h}"
+            else -> "$dayNameHe בשעה ${alarm.formattedTime24h}"
         }
     } else {
         when {
@@ -2593,205 +3448,6 @@ private fun formatNextTriggerRelativeSummary(
             sameDay -> "Today at ${alarm.formattedTime24h}"
             isTomorrow -> "Tomorrow at ${alarm.formattedTime24h}"
             else -> "At ${alarm.formattedTime24h}"
-        }
-    }
-}
-
-@Composable
-private fun DeveloperAlarmDiagnosticsCard(
-    diagnosticState: AlarmDiagnosticState,
-    isHebrew: Boolean,
-    currentMemberName: String,
-    onSchedule15sTest: () -> Unit,
-    onStopRinging: () -> Unit,
-    onReset: () -> Unit
-) {
-    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(diagnosticState.isScheduled, diagnosticState.triggerAtMillis) {
-        while (diagnosticState.isScheduled && !diagnosticState.receiverTriggered) {
-            nowMillis = System.currentTimeMillis()
-            kotlinx.coroutines.delay(500L)
-        }
-        nowMillis = System.currentTimeMillis()
-    }
-
-    val remainingSeconds = if (diagnosticState.isScheduled && diagnosticState.triggerAtMillis > nowMillis) {
-        ((diagnosticState.triggerAtMillis - nowMillis + 999L) / 1000L).coerceAtLeast(0L)
-    } else {
-        0L
-    }
-
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = Color.White,
-        border = BorderStroke(1.dp, GoogleBlue.copy(alpha = 0.45f)),
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("developer_alarm_diagnostics_card")
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = if (isHebrew) "כלי אבחון מפתחים (Developer Diagnostics)" else "Developer Alarm Diagnostics",
-                    style = MaterialTheme.typography.labelMedium.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = GoogleBlueDark
-                    )
-                )
-                if (diagnosticState.isScheduled || diagnosticState.errorMessage.isNotBlank()) {
-                    TextButton(
-                        onClick = onReset,
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                        modifier = Modifier.height(26.dp)
-                    ) {
-                        Text(
-                            text = if (isHebrew) "איפוס" else "Reset",
-                            fontSize = 11.sp
-                        )
-                    }
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Button(
-                    onClick = onSchedule15sTest,
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = GoogleBlueDark,
-                        contentColor = Color.White
-                    ),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("diagnostic_alarm_15s_button")
-                ) {
-                    Text(
-                        text = "בדיקת צלצול בעוד 15 שניות",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                if (diagnosticState.audioPlaybackStarted || diagnosticState.ringingServiceStarted) {
-                    FilledTonalButton(
-                        onClick = onStopRinging,
-                        shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.filledTonalButtonColors(
-                            containerColor = GoogleRedLight,
-                            contentColor = GoogleRedDark
-                        ),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                        modifier = Modifier.testTag("diagnostic_stop_ringing_button")
-                    ) {
-                        Text(
-                            text = if (isHebrew) "עצור צלצול" else "Stop",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-
-            // Diagnostic pipeline checklist
-            Column(
-                verticalArrangement = Arrangement.spacedBy(3.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFFF3F6FC), RoundedCornerShape(8.dp))
-                    .padding(8.dp)
-            ) {
-                val permStatusText = if (diagnosticState.exactAlarmPermissionGranted) {
-                    "✓ הרשאת התראה מדויקת: מאושרת (${diagnosticState.schedulingMethod.ifBlank { "EXACT" }})"
-                } else {
-                    "⚠️ הרשאת התראה מדויקת: לא זמינה (שימוש ב-AlarmClock / Window)"
-                }
-                Text(
-                    text = permStatusText,
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.testTag("diag_status_permission")
-                )
-
-                val scheduledText = if (diagnosticState.isScheduled) {
-                    val countNote = if (!diagnosticState.receiverTriggered && remainingSeconds > 0L) {
-                        " (בעוד ${remainingSeconds} שניות)"
-                    } else ""
-                    "✓ 1. נקבע ב-AlarmManager: כן$countNote"
-                } else {
-                    "○ 1. נקבע ב-AlarmManager: טרם הופעל"
-                }
-                Text(
-                    text = scheduledText,
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontWeight = if (diagnosticState.isScheduled) FontWeight.Bold else FontWeight.Normal,
-                        color = if (diagnosticState.isScheduled) PastelGreenDark else MaterialTheme.colorScheme.onSurfaceVariant
-                    ),
-                    modifier = Modifier.testTag("diag_status_scheduled")
-                )
-
-                val receiverText = if (diagnosticState.receiverTriggered) {
-                    "✓ 2. BroadcastReceiver הופעל (FamilyAlarmReceiver)"
-                } else {
-                    "○ 2. BroadcastReceiver הופעל: ממתין..."
-                }
-                Text(
-                    text = receiverText,
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontWeight = if (diagnosticState.receiverTriggered) FontWeight.Bold else FontWeight.Normal,
-                        color = if (diagnosticState.receiverTriggered) PastelGreenDark else MaterialTheme.colorScheme.onSurfaceVariant
-                    ),
-                    modifier = Modifier.testTag("diag_status_receiver")
-                )
-
-                val serviceText = if (diagnosticState.ringingServiceStarted) {
-                    "✓ 3. שירות צלצול הופעל (FamilyAlarmRingingService Foreground)"
-                } else {
-                    "○ 3. שירות צלצול הופעל: ממתין..."
-                }
-                Text(
-                    text = serviceText,
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontWeight = if (diagnosticState.ringingServiceStarted) FontWeight.Bold else FontWeight.Normal,
-                        color = if (diagnosticState.ringingServiceStarted) PastelGreenDark else MaterialTheme.colorScheme.onSurfaceVariant
-                    ),
-                    modifier = Modifier.testTag("diag_status_service")
-                )
-
-                val audioText = if (diagnosticState.audioPlaybackStarted) {
-                    val engine = diagnosticState.audioEngineDetails.takeIf { it.isNotBlank() }?.let { " [$it]" }.orEmpty()
-                    "✓ 4. ניגון שמע הופעל (USAGE_ALARM)$engine"
-                } else {
-                    "○ 4. ניגון שמע הופעל: ממתין..."
-                }
-                Text(
-                    text = audioText,
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontWeight = if (diagnosticState.audioPlaybackStarted) FontWeight.Bold else FontWeight.Normal,
-                        color = if (diagnosticState.audioPlaybackStarted) PastelGreenDark else MaterialTheme.colorScheme.onSurfaceVariant
-                    ),
-                    modifier = Modifier.testTag("diag_status_audio")
-                )
-
-                if (diagnosticState.errorMessage.isNotBlank()) {
-                    Text(
-                        text = "❌ שגיאה: ${diagnosticState.errorMessage}",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = GoogleRedDark
-                        ),
-                        modifier = Modifier.testTag("diag_status_error")
-                    )
-                }
-            }
         }
     }
 }

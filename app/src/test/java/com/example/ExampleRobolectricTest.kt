@@ -1982,4 +1982,72 @@ class ExampleRobolectricTest {
             pickerIntent.getIntExtra(android.media.RingtoneManager.EXTRA_RINGTONE_TYPE, -1)
         )
     }
+
+    @Test
+    fun `test final alarm ui redesign ringtone picker categories and 7 second success banner`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Verify RingtonePickerTab categories and exact Hebrew labels
+        val tabs = com.example.ui.screens.RingtonePickerTab.entries
+        assertEquals(3, tabs.size)
+        assertEquals("צלילי מערכת", com.example.ui.screens.RingtonePickerTab.SYSTEM_ALARMS.labelHe)
+        assertEquals("צלילים נוספים", com.example.ui.screens.RingtonePickerTab.ADDITIONAL_SOUNDS.labelHe)
+        assertEquals("צליל מותאם אישית", com.example.ui.screens.RingtonePickerTab.CUSTOM_SOUND.labelHe)
+        assertFalse(
+            "Custom sound tab must never use the forbidden label קבצים אישיים",
+            tabs.any { it.labelHe == "קבצים אישיים" }
+        )
+
+        // 2. Verify 7-second auto-dismissing green success banner duration & state
+        assertEquals(
+            "Success banner auto-dismiss duration must be exactly 7,000 ms (7 seconds)",
+            7_000L,
+            com.example.ui.screens.ALARM_SAVED_SUCCESS_BANNER_DURATION_MS
+        )
+
+        val testAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_banner_test",
+            title = "בוקר טוב רועי!",
+            hour = 7,
+            minute = 0,
+            daysOfWeek = com.example.model.SchoolDay.allWeekDays
+        )
+        val nextRingSummary = com.example.ui.screens.formatNextTriggerRelativeSummary(testAlarm, isHebrew = true)
+        assertTrue(
+            "Next ring summary in Hebrew must include 07:00",
+            nextRingSummary.contains("07:00")
+        )
+        val banner1 = com.example.ui.screens.AlarmSavedBannerState(
+            id = 101L,
+            headlineText = "השעון המעורר נשמר בהצלחה",
+            nextRingSubtitleText = "הצלצול הבא: $nextRingSummary"
+        )
+        val banner2 = com.example.ui.screens.AlarmSavedBannerState(
+            id = 102L,
+            headlineText = "השעון המעורר נשמר בהצלחה",
+            nextRingSubtitleText = "הצלצול הבא: $nextRingSummary"
+        )
+        assertNotEquals("Each saved alarm banner must have a distinct ID so older timers never dismiss newer banners", banner1.id, banner2.id)
+
+        // 3. Verify clean ringtone display name and audio preview controller state
+        val cleanDefaultName = com.example.notifications.AlarmAudioController.cleanSoundDisplayName(
+            soundType = com.example.notifications.AlarmAudioController.SOUND_SYSTEM_ALARM,
+            customTitle = "",
+            isHebrew = true
+        )
+        assertTrue(cleanDefaultName.isNotBlank())
+
+        val cleanCustomName = com.example.notifications.AlarmAudioController.cleanSoundDisplayName(
+            soundType = com.example.notifications.AlarmAudioController.SOUND_CUSTOM_URI,
+            customTitle = "Morning Sunrise",
+            isHebrew = true
+        )
+        assertEquals("Morning Sunrise", cleanCustomName)
+
+        // Ensure ringtone category helpers execute safely without throwing
+        val systemTones = com.example.notifications.AlarmAudioController.getSystemAlarmCategoryRingtones(context)
+        val additionalTones = com.example.notifications.AlarmAudioController.getAdditionalCategoryRingtones(context)
+        assertNotNull(systemTones)
+        assertNotNull(additionalTones)
+    }
 }

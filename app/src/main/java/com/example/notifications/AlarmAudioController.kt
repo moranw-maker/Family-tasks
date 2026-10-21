@@ -44,14 +44,19 @@ data class AlarmSoundOption(
 )
 
 data class NativeDeviceRingtone(
+    val idKey: String,
     val title: String,
-    val uriString: String,
+    val subtitleHe: String = "מערכת Android",
+    val subtitleEn: String = "Android System",
+    val soundType: String = AlarmAudioController.SOUND_CUSTOM_URI,
+    val uriString: String = "",
     val emoji: String = "🔔"
 )
 
 data class AudioPreviewState(
     val isPlaying: Boolean = false,
     val activeSoundType: String = "",
+    val activeCustomUri: String = "",
     val activeVolumePercent: Int = 85,
     val errorMessageHe: String? = null,
     val errorMessageEn: String? = null
@@ -157,7 +162,27 @@ object AlarmAudioController {
         if (opt != null) {
             return "${opt.emoji} ${if (isHebrew) opt.titleHe else opt.titleEn}"
         }
-        return if (isHebrew) "🔔 צליל שעון מעורר (ברירת מחדל)" else "🔔 Default Android Alarm"
+        return if (isHebrew) "🔔 צליל ברירת המחדל של המכשיר" else "🔔 Default Android Alarm"
+    }
+
+    fun cleanSoundDisplayName(soundType: String, customTitle: String, isHebrew: Boolean): String {
+        if (customTitle.isNotBlank()) {
+            return customTitle
+        }
+        return when (soundType) {
+            SOUND_SYSTEM_ALARM -> if (isHebrew) "צליל ברירת המחדל של המכשיר" else "Default Android Alarm"
+            SOUND_SYSTEM_RINGTONE -> if (isHebrew) "צלצול הטלפון של המכשיר" else "Device Phone Ringtone"
+            SOUND_SYSTEM_NOTIFICATION -> if (isHebrew) "צליל התראה של המכשיר" else "Device Notification Sound"
+            SOUND_CUSTOM_URI -> if (isHebrew) "צליל מותאם אישית" else "Custom Alarm Sound"
+            else -> {
+                val opt = builtInSoundOptions.find { it.soundType == soundType }
+                if (opt != null) {
+                    if (isHebrew) opt.titleHe else opt.titleEn
+                } else {
+                    if (isHebrew) "צליל ברירת המחדל של המכשיר" else "Default Android Alarm"
+                }
+            }
+        }
     }
 
     /**
@@ -165,17 +190,110 @@ object AlarmAudioController {
      * so users can choose familiar native system tones directly.
      */
     fun getDeviceSystemAlarmRingtones(context: Context, maxCount: Int = 10): List<NativeDeviceRingtone> {
+        return getSystemAlarmCategoryRingtones(context, maxCount = maxCount)
+    }
+
+    /**
+     * Category 1 ("צלילי מערכת"): Queries installed Android system alarm tones ([RingtoneManager.TYPE_ALARM]).
+     * Only returns real sounds available on the device, starting with the system default alarm tone.
+     */
+    fun getSystemAlarmCategoryRingtones(context: Context, maxCount: Int = 30): List<NativeDeviceRingtone> {
         val results = mutableListOf<NativeDeviceRingtone>()
         val seenUris = mutableSetOf<String>()
         val appCtx = context.applicationContext ?: context
 
-        fun collectFromType(type: Int, emoji: String) {
+        val defaultAlarmUri = runCatching {
+            RingtoneManager.getActualDefaultRingtoneUri(appCtx, RingtoneManager.TYPE_ALARM)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+        }.getOrNull()
+        val defaultAlarmTitle = defaultAlarmUri?.let { uri ->
+            runCatching { RingtoneManager.getRingtone(appCtx, uri)?.getTitle(appCtx)?.trim() }.getOrNull()
+        }?.takeIf { it.isNotBlank() && !it.contains("Unknown", ignoreCase = true) }
+
+        results.add(
+            NativeDeviceRingtone(
+                idKey = "sys_default_alarm",
+                title = defaultAlarmTitle ?: "צליל ברירת המחדל של המכשיר",
+                subtitleHe = "מערכת Android • שעון מעורר",
+                subtitleEn = "Android System • Default Alarm",
+                soundType = SOUND_SYSTEM_ALARM,
+                uriString = "",
+                emoji = "🔔"
+            )
+        )
+
+        runCatching {
+            val manager = RingtoneManager(appCtx).apply { setType(RingtoneManager.TYPE_ALARM) }
+            val cursor = manager.cursor ?: return@runCatching
+            cursor.use { c ->
+                var idx = 0
+                while (c.moveToNext() && results.size < maxCount && idx < 40) {
+                    val uri = runCatching { manager.getRingtoneUri(c.position) }.getOrNull()
+                    val title = runCatching { c.getString(RingtoneManager.TITLE_COLUMN_INDEX) }.getOrNull()
+                        ?.trim()
+                        .orEmpty()
+                    if (uri != null && title.isNotBlank()) {
+                        val uriStr = uri.toString()
+                        if (seenUris.add(uriStr)) {
+                            results.add(
+                                NativeDeviceRingtone(
+                                    idKey = "alarm_uri_$uriStr",
+                                    title = title,
+                                    subtitleHe = "מערכת Android",
+                                    subtitleEn = "Android System",
+                                    soundType = SOUND_CUSTOM_URI,
+                                    uriString = uriStr,
+                                    emoji = "⏰"
+                                )
+                            )
+                        }
+                    }
+                    idx++
+                }
+            }
+        }
+        return results
+    }
+
+    /**
+     * Category 2 ("צלילים נוספים"): Queries real available system ringtones ([RingtoneManager.TYPE_RINGTONE])
+     * and notification tones ([RingtoneManager.TYPE_NOTIFICATION]) on the device.
+     */
+    fun getAdditionalCategoryRingtones(context: Context, maxCount: Int = 35): List<NativeDeviceRingtone> {
+        val results = mutableListOf<NativeDeviceRingtone>()
+        val seenUris = mutableSetOf<String>()
+        val appCtx = context.applicationContext ?: context
+
+        results.add(
+            NativeDeviceRingtone(
+                idKey = "sys_default_ringtone",
+                title = "צלצול הטלפון של המכשיר",
+                subtitleHe = "מערכת Android • רינגטון ברירת מחדל",
+                subtitleEn = "Android System • Default Ringtone",
+                soundType = SOUND_SYSTEM_RINGTONE,
+                uriString = "",
+                emoji = "📞"
+            )
+        )
+        results.add(
+            NativeDeviceRingtone(
+                idKey = "sys_default_notification",
+                title = "צליל התראה של המכשיר",
+                subtitleHe = "מערכת Android • התראת ברירת מחדל",
+                subtitleEn = "Android System • Default Notification",
+                soundType = SOUND_SYSTEM_NOTIFICATION,
+                uriString = "",
+                emoji = "✨"
+            )
+        )
+
+        fun collectFromType(type: Int, subtitleHe: String, subtitleEn: String, emoji: String, limit: Int) {
             runCatching {
                 val manager = RingtoneManager(appCtx).apply { setType(type) }
                 val cursor = manager.cursor ?: return@runCatching
                 cursor.use { c ->
-                    var idx = 0
-                    while (c.moveToNext() && results.size < maxCount && idx < 25) {
+                    var count = 0
+                    while (c.moveToNext() && results.size < maxCount && count < limit) {
                         val uri = runCatching { manager.getRingtoneUri(c.position) }.getOrNull()
                         val title = runCatching { c.getString(RingtoneManager.TITLE_COLUMN_INDEX) }.getOrNull()
                             ?.trim()
@@ -185,23 +303,37 @@ object AlarmAudioController {
                             if (seenUris.add(uriStr)) {
                                 results.add(
                                     NativeDeviceRingtone(
+                                        idKey = "extra_uri_$uriStr",
                                         title = title,
+                                        subtitleHe = subtitleHe,
+                                        subtitleEn = subtitleEn,
+                                        soundType = SOUND_CUSTOM_URI,
                                         uriString = uriStr,
                                         emoji = emoji
                                     )
                                 )
+                                count++
                             }
                         }
-                        idx++
                     }
                 }
             }
         }
 
-        collectFromType(RingtoneManager.TYPE_ALARM, "⏰")
-        if (results.size < 4) {
-            collectFromType(RingtoneManager.TYPE_RINGTONE, "🔔")
-        }
+        collectFromType(
+            type = RingtoneManager.TYPE_RINGTONE,
+            subtitleHe = "מערכת Android • רינגטון",
+            subtitleEn = "Android System • Ringtone",
+            emoji = "🔔",
+            limit = 18
+        )
+        collectFromType(
+            type = RingtoneManager.TYPE_NOTIFICATION,
+            subtitleHe = "מערכת Android • צליל התראה",
+            subtitleEn = "Android System • Notification",
+            emoji = "✨",
+            limit = 15
+        )
         return results
     }
 
@@ -342,13 +474,13 @@ object AlarmAudioController {
         previewStreamVolumeScalar = volumeScalar
 
         requestAlarmAudioFocus(appCtx, isPreview = true)
-        applyDeviceAlarmStreamVolume(appCtx, clampedVolume)
 
         if (soundType == SOUND_CUSTOM_URI) {
             if (customSoundUri.isBlank()) {
                 _previewState.value = AudioPreviewState(
                     isPlaying = false,
                     activeSoundType = soundType,
+                    activeCustomUri = customSoundUri,
                     activeVolumePercent = clampedVolume,
                     errorMessageHe = "לא נבחר צליל או קובץ שמע",
                     errorMessageEn = "No sound or audio file selected"
@@ -371,6 +503,7 @@ object AlarmAudioController {
                 _previewState.value = AudioPreviewState(
                     isPlaying = false,
                     activeSoundType = soundType,
+                    activeCustomUri = customSoundUri,
                     activeVolumePercent = clampedVolume,
                     errorMessageHe = "לא ניתן לנגן את הצליל שנבחר. נסו לבחור צליל אחר.",
                     errorMessageEn = "Unable to play selected sound. Please choose another sound."
@@ -415,6 +548,7 @@ object AlarmAudioController {
         _previewState.value = AudioPreviewState(
             isPlaying = true,
             activeSoundType = soundType,
+            activeCustomUri = customSoundUri,
             activeVolumePercent = clampedVolume
         )
 
@@ -428,7 +562,8 @@ object AlarmAudioController {
     }
 
     /**
-     * Updates the volume of an actively playing preview in real time when the user drags the slider.
+     * Updates the volume of an actively playing preview in real time when the user drags the slider,
+     * without mutating the global device STREAM_ALARM setting.
      */
     fun updateActivePreviewVolume(context: Context, volumePercent: Int) {
         val clamped = volumePercent.coerceIn(10, 100)
@@ -444,7 +579,6 @@ object AlarmAudioController {
             runCatching { previewAudioTrack?.setVolume(scalar) }
         }
         if (_previewState.value.isPlaying) {
-            applyDeviceAlarmStreamVolume(context.applicationContext ?: context, clamped)
             _previewState.value = _previewState.value.copy(activeVolumePercent = clamped)
         }
     }
