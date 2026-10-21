@@ -96,6 +96,7 @@ fun FamilyTasksApp(
 
     val appLanguage by viewModel.appLanguage.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
+    val appTextScale by viewModel.appTextScale.collectAsStateWithLifecycle()
     val firstDayOfWeek by viewModel.firstDayOfWeek.collectAsStateWithLifecycle()
     val biometricLockEnabled by viewModel.biometricLockEnabled.collectAsStateWithLifecycle()
     val isAppUnlocked by viewModel.isAppUnlocked.collectAsStateWithLifecycle()
@@ -161,7 +162,10 @@ fun FamilyTasksApp(
     val layoutDirection = if (appLanguage.isRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
     val unreadCount = remember(notifications) { notifications.count { !it.isRead } }
 
-    MyApplicationTheme {
+    MyApplicationTheme(
+        themeMode = themeMode,
+        textScale = appTextScale
+    ) {
         CompositionLocalProvider(LocalLayoutDirection provides layoutDirection) {
             if (biometricLockEnabled && !isAppUnlocked) {
                 BiometricLockScreen(
@@ -299,6 +303,9 @@ fun FamilyTasksApp(
                                             onAddNewTask = { viewModel.openAddTaskDialog(null) },
                                             onOpenFamilyAdmin = { viewModel.navigateTo(AppScreen.ADMIN_DASHBOARD) },
                                             onOpenRewards = { showRewardsSheet = true },
+                                            periods = schedulePeriods,
+                                            alarms = familyAlarms,
+                                            onNavigateToScreen = { viewModel.navigateTo(it) },
                                             taskSyncStates = taskSyncStates,
                                             taskOperationError = taskOperationError,
                                             onApproveTask = { viewModel.approveTaskCompletion(it) },
@@ -486,6 +493,7 @@ fun FamilyTasksApp(
                                             autoSyncDrive = autoSyncDrive,
                                             appLanguage = appLanguage,
                                             themeMode = themeMode,
+                                            appTextScale = appTextScale,
                                             firstDayOfWeek = firstDayOfWeek,
                                             biometricLockEnabled = biometricLockEnabled,
                                             tenMinuteClassAlertsEnabled = tenMinuteClassAlertsEnabled,
@@ -500,6 +508,7 @@ fun FamilyTasksApp(
                                             onAutoSyncDriveChange = { viewModel.setAutoSyncDrive(it) },
                                             onLanguageChange = { viewModel.setLanguage(it) },
                                             onThemeModeChange = { viewModel.setThemeMode(it) },
+                                            onTextScaleChange = { viewModel.setAppTextScale(it) },
                                             onFirstDayOfWeekChange = { viewModel.setFirstDayOfWeek(it) },
                                             onBiometricLockChange = { viewModel.setBiometricLock(it) },
                                             onLockNow = { viewModel.lockApp() },
@@ -783,6 +792,7 @@ private fun FamilyBottomNavBar(
     isHebrew: Boolean,
     onNavigate: (AppScreen) -> Unit
 ) {
+    val glassColors = LocalSoftGlassColors.current
     // V1.6 Requirement 1:
     // PARENT sees the Family Management tab; CHILD sees their permitted tasks, calendar, timetable, alarms, and files.
     val items = buildList {
@@ -799,58 +809,64 @@ private fun FamilyBottomNavBar(
     Surface(
         tonalElevation = 6.dp,
         shadowElevation = 10.dp,
-        color = MaterialTheme.colorScheme.surface,
+        color = glassColors.cardBackground,
         modifier = Modifier
             .fillMaxWidth()
             .testTag("bottom_navigation_bar")
     ) {
-        androidx.compose.foundation.layout.BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-        ) {
-            val isCompactWidth = maxWidth < 380.dp || items.size >= 6
-            val iconSize = if (isCompactWidth) 19.dp else 21.dp
-            val labelFontSize = if (isCompactWidth) 9.5.sp else 10.5.sp
-
-            Row(
+        Column(modifier = Modifier.fillMaxWidth()) {
+            HorizontalDivider(
+                thickness = 1.dp,
+                color = glassColors.divider
+            )
+            androidx.compose.foundation.layout.BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = if (isCompactWidth) 2.dp else 6.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
+                    .navigationBarsPadding()
             ) {
-                items.forEach { item ->
-                    val isSelected = currentScreen == item.screen
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable { onNavigate(item.screen) }
-                            .background(
-                                if (isSelected) GoogleBlue.copy(alpha = 0.12f) else Color.Transparent
+                val isCompactWidth = maxWidth < 380.dp || items.size >= 6
+                val iconSize = if (isCompactWidth) 19.dp else 21.dp
+                val labelFontSize = if (isCompactWidth) 9.5.sp else 10.5.sp
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = if (isCompactWidth) 2.dp else 6.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    items.forEach { item ->
+                        val isSelected = currentScreen == item.screen
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { onNavigate(item.screen) }
+                                .background(
+                                    if (isSelected) glassColors.primaryAccentSoft else Color.Transparent
+                                )
+                                .padding(horizontal = 2.dp, vertical = 5.dp)
+                                .defaultMinSize(minWidth = 44.dp, minHeight = 48.dp)
+                                .testTag(item.testTag)
+                        ) {
+                            Icon(
+                                imageVector = if (isSelected) item.selectedIcon else item.unselectedIcon,
+                                contentDescription = item.label,
+                                tint = if (isSelected) glassColors.primaryAccent else glassColors.textSecondary,
+                                modifier = Modifier.size(iconSize)
                             )
-                            .padding(horizontal = 2.dp, vertical = 5.dp)
-                            .defaultMinSize(minWidth = 44.dp, minHeight = 48.dp)
-                            .testTag(item.testTag)
-                    ) {
-                        Icon(
-                            imageVector = if (isSelected) item.selectedIcon else item.unselectedIcon,
-                            contentDescription = item.label,
-                            tint = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(iconSize)
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = item.label,
-                            fontSize = labelFontSize,
-                            maxLines = 1,
-                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                            color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = item.label,
+                                fontSize = labelFontSize,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                color = if (isSelected) glassColors.primaryAccent else glassColors.textSecondary
+                            )
+                        }
                     }
                 }
             }

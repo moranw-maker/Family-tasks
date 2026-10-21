@@ -131,6 +131,7 @@ import com.example.ui.theme.GoogleBlueLight
 import com.example.ui.theme.GoogleRed
 import com.example.ui.theme.GoogleRedDark
 import com.example.ui.theme.GoogleRedLight
+import com.example.ui.theme.LocalSoftGlassColors
 import com.example.ui.theme.OutlineLight
 import com.example.ui.theme.PastelGreenBackground
 import com.example.ui.theme.PastelGreenDark
@@ -287,16 +288,26 @@ fun FamilyAlarmScreen(
         return
     }
 
+    val glassColors = LocalSoftGlassColors.current
+
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFFEAF3FE),
-                        Color(0xFFF6F9FE),
-                        Color.White
-                    )
+                    colors = if (glassColors.isDark) {
+                        listOf(
+                            glassColors.screenBackgroundTop,
+                            glassColors.screenBackgroundMid,
+                            glassColors.screenBackgroundBottom
+                        )
+                    } else {
+                        listOf(
+                            Color(0xFFEAF3FE),
+                            Color(0xFFF6F9FE),
+                            Color.White
+                        )
+                    }
                 )
             )
             .testTag("family_alarm_screen")
@@ -333,14 +344,14 @@ fun FamilyAlarmScreen(
                     ) {
                         Surface(
                             shape = CircleShape,
-                            color = Color(0xFFDCEBFE),
+                            color = if (glassColors.isDark) glassColors.primaryAccentSoft else Color(0xFFDCEBFE),
                             modifier = Modifier.size(40.dp)
                         ) {
                             Box(contentAlignment = Alignment.Center) {
                                 Icon(
                                     imageVector = Icons.Default.Alarm,
                                     contentDescription = null,
-                                    tint = GoogleBlueDark,
+                                    tint = if (glassColors.isDark) glassColors.primaryAccent else GoogleBlueDark,
                                     modifier = Modifier.size(22.dp)
                                 )
                             }
@@ -349,7 +360,7 @@ fun FamilyAlarmScreen(
                             text = if (isHebrew) "שעונים מעוררים" else "Alarms",
                             style = MaterialTheme.typography.headlineSmall.copy(
                                 fontWeight = FontWeight.ExtraBold,
-                                color = Color(0xFF15366B),
+                                color = if (glassColors.isDark) glassColors.textPrimary else Color(0xFF15366B),
                                 fontSize = 23.sp
                             ),
                             modifier = Modifier.testTag("main_alarm_screen_title")
@@ -448,8 +459,8 @@ fun FamilyAlarmScreen(
                 item(key = "empty_alarms_state") {
                     Surface(
                         shape = RoundedCornerShape(22.dp),
-                        color = Color.White.copy(alpha = 0.92f),
-                        border = BorderStroke(1.dp, Color(0xFFDCE8F8)),
+                        color = if (glassColors.isDark) glassColors.cardBackground else Color.White.copy(alpha = 0.92f),
+                        border = BorderStroke(1.dp, if (glassColors.isDark) glassColors.cardBorder else Color(0xFFDCE8F8)),
                         shadowElevation = 2.dp,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -463,14 +474,14 @@ fun FamilyAlarmScreen(
                         ) {
                             Surface(
                                 shape = CircleShape,
-                                color = Color(0xFFEAF3FE),
+                                color = if (glassColors.isDark) glassColors.primaryAccentSoft else Color(0xFFEAF3FE),
                                 modifier = Modifier.size(68.dp)
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
                                     Icon(
                                         imageVector = Icons.Default.Alarm,
                                         contentDescription = null,
-                                        tint = GoogleBlue,
+                                        tint = glassColors.primaryAccent,
                                         modifier = Modifier.size(34.dp)
                                     )
                                 }
@@ -480,7 +491,7 @@ fun FamilyAlarmScreen(
                                 text = if (isHebrew) "עדיין אין שעונים מעוררים מוגדרים" else "No alarms configured yet",
                                 style = MaterialTheme.typography.titleMedium.copy(
                                     fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF15366B)
+                                    color = if (glassColors.isDark) glassColors.textPrimary else Color(0xFF15366B)
                                 )
                             )
                             Spacer(modifier = Modifier.height(6.dp))
@@ -490,7 +501,7 @@ fun FamilyAlarmScreen(
                                 else
                                     "Tap the (+) button above to create a new alarm",
                                 style = MaterialTheme.typography.bodySmall.copy(
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = glassColors.textSecondary
                                 )
                             )
                         }
@@ -877,6 +888,7 @@ private fun FamilyAlarmCard(
     onEdit: () -> Unit,
     onRequestDelete: () -> Unit
 ) {
+    val glassColors = LocalSoftGlassColors.current
     val targetId = alarm.effectiveAssignedMemberId
     val isTargetedAtThisDevice = alarm.isTargetedAtDeviceMember(currentMember.id)
     val isRemoteTarget = alarm.isTargetedToAnotherMember() && !isTargetedAtThisDevice
@@ -916,14 +928,14 @@ private fun FamilyAlarmCard(
     val (statusLabel, statusBg, statusFg) = when {
         !alarm.isEnabled -> Triple(
             if (isHebrew) "כבוי" else "Off",
-            Color(0xFFF0F4FA),
-            Color(0xFF6E81A0)
+            if (glassColors.isDark) glassColors.secondaryContainer else Color(0xFFF0F4FA),
+            if (glassColors.isDark) glassColors.textMuted else Color(0xFF6E81A0)
         )
         isPendingTargetDevice -> Triple(
             if (isHebrew) "⏳ ממתין לסנכרון במכשיר של $targetDisplayName"
             else "⏳ Syncing to $targetDisplayName",
-            PastelYellowBackground,
-            PastelYellowDark
+            glassColors.warningContainer,
+            glassColors.warningText
         )
         else -> Triple(
             if (isHebrew) {
@@ -931,18 +943,26 @@ private fun FamilyAlarmCard(
             } else {
                 if (isTargetedAtThisDevice) "Active" else "Synced to $targetDisplayName"
             },
-            PastelGreenBackground,
-            PastelGreenDark
+            glassColors.successContainer,
+            glassColors.successText
         )
     }
 
     Surface(
         shape = RoundedCornerShape(22.dp),
-        color = if (alarm.isEnabled) Color.White else Color(0xFFF7FAFF),
+        color = if (glassColors.isDark) {
+            if (alarm.isEnabled) glassColors.cardBackground else glassColors.cardElevated
+        } else {
+            if (alarm.isEnabled) Color.White else Color(0xFFF7FAFF)
+        },
         shadowElevation = if (alarm.isEnabled) 3.dp else 1.dp,
         border = BorderStroke(
             width = 1.dp,
-            color = if (alarm.isEnabled) Color(0xFFCCE0FA) else OutlineLight
+            color = if (glassColors.isDark) {
+                if (alarm.isEnabled) glassColors.cardBorderStrong else glassColors.cardBorder
+            } else {
+                if (alarm.isEnabled) Color(0xFFCCE0FA) else OutlineLight
+            }
         ),
         modifier = Modifier
             .fillMaxWidth()
@@ -973,8 +993,11 @@ private fun FamilyAlarmCard(
                                     fontWeight = FontWeight.ExtraBold,
                                     fontSize = 32.sp,
                                     letterSpacing = (-0.5).sp,
-                                    color = if (alarm.isEnabled) Color(0xFF12366E)
-                                    else Color(0xFF7B8FA8)
+                                    color = if (glassColors.isDark) {
+                                        if (alarm.isEnabled) glassColors.textPrimary else glassColors.textMuted
+                                    } else {
+                                        if (alarm.isEnabled) Color(0xFF12366E) else Color(0xFF7B8FA8)
+                                    }
                                 )
                             )
                         }
@@ -999,7 +1022,7 @@ private fun FamilyAlarmCard(
                         if (!canModify) {
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFFEEF3FA),
+                                color = if (glassColors.isDark) glassColors.secondaryContainer else Color(0xFFEEF3FA),
                                 modifier = Modifier.testTag("alarm_parent_locked_badge_${alarm.id}")
                             ) {
                                 Row(
@@ -1010,14 +1033,14 @@ private fun FamilyAlarmCard(
                                     Icon(
                                         imageVector = Icons.Default.Lock,
                                         contentDescription = null,
-                                        tint = Color(0xFF5D7290),
+                                        tint = if (glassColors.isDark) glassColors.textSecondary else Color(0xFF5D7290),
                                         modifier = Modifier.size(11.dp)
                                     )
                                     Text(
                                         text = if (isHebrew) "הורה" else "Parent",
                                         style = MaterialTheme.typography.labelSmall.copy(
                                             fontWeight = FontWeight.Bold,
-                                            color = Color(0xFF5D7290),
+                                            color = if (glassColors.isDark) glassColors.textSecondary else Color(0xFF5D7290),
                                             fontSize = 10.sp
                                         )
                                     )
@@ -1032,8 +1055,11 @@ private fun FamilyAlarmCard(
                         text = alarm.title,
                         style = MaterialTheme.typography.bodyLarge.copy(
                             fontWeight = FontWeight.Bold,
-                            color = if (alarm.isEnabled) Color(0xFF1F3B66)
-                            else Color(0xFF7B8FA8)
+                            color = if (glassColors.isDark) {
+                                if (alarm.isEnabled) glassColors.textPrimary else glassColors.textMuted
+                            } else {
+                                if (alarm.isEnabled) Color(0xFF1F3B66) else Color(0xFF7B8FA8)
+                            }
                         ),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -1044,7 +1070,7 @@ private fun FamilyAlarmCard(
                     Text(
                         text = "$repeatDaysText • $assignmentText",
                         style = MaterialTheme.typography.labelMedium.copy(
-                            color = Color(0xFF5A7194),
+                            color = if (glassColors.isDark) glassColors.textSecondary else Color(0xFF5A7194),
                             fontWeight = FontWeight.Medium
                         ),
                         maxLines = 1,

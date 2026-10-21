@@ -91,6 +91,7 @@ class FamilyViewModel(
     // Preferences
     val appLanguage: StateFlow<AppLanguage> = repository.appLanguage
     val themeMode: StateFlow<AppThemeMode> = repository.themeMode
+    val appTextScale: StateFlow<AppTextScale> = repository.appTextScale
     val firstDayOfWeek: StateFlow<FirstDayOfWeek> = repository.firstDayOfWeek
     val biometricLockEnabled: StateFlow<Boolean> = repository.biometricLockEnabled
     val isAppUnlocked: StateFlow<Boolean> = repository.isAppUnlocked
@@ -1105,6 +1106,10 @@ class FamilyViewModel(
 
     fun setThemeMode(mode: AppThemeMode) {
         repository.setThemeMode(mode)
+    }
+
+    fun setAppTextScale(scale: AppTextScale) {
+        repository.setAppTextScale(scale)
     }
 
     fun setFirstDayOfWeek(day: FirstDayOfWeek) {

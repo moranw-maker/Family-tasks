@@ -33,10 +33,11 @@ fun RewardsSheet(
     onClaimReward: (RewardItem) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val glassColors = LocalSoftGlassColors.current
     var selectedFilter by remember { mutableIntStateOf(0) } // 0 = All, 1 = Available, 2 = Mine
 
     // Preset catalog of family rewards
-    val catalogRewards = remember {
+    val catalogRewards = remember(isHebrew) {
         listOf(
             RewardItem(
                 id = "rew_1",
@@ -99,7 +100,7 @@ fun RewardsSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-        containerColor = MaterialTheme.colorScheme.surface,
+        containerColor = glassColors.cardBackground,
         modifier = Modifier.testTag("rewards_sheet")
     ) {
         Column(
@@ -115,14 +116,18 @@ fun RewardsSheet(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 IconButton(onClick = onDismiss) {
-                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close")
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = glassColors.textPrimary
+                    )
                 }
 
                 Text(
                     text = if (isHebrew) "הפרסים והנקודות" else "Rewards & Points",
                     style = MaterialTheme.typography.titleMedium.copy(
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = glassColors.textPrimary
                     )
                 )
 
@@ -131,11 +136,11 @@ fun RewardsSheet(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Hero Points Card (matches reference screen 6)
+            // Hero Points Card
             Surface(
                 shape = RoundedCornerShape(22.dp),
-                color = PastelPurpleBackground,
-                border = BorderStroke(1.dp, PastelPurpleBorder),
+                color = if (glassColors.isDark) Color(0xFF2E1F47) else PastelPurpleBackground,
+                border = BorderStroke(1.dp, if (glassColors.isDark) Color(0xFF4C3575) else PastelPurpleBorder),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Box(
@@ -143,11 +148,19 @@ fun RewardsSheet(
                         .fillMaxWidth()
                         .background(
                             Brush.horizontalGradient(
-                                colors = listOf(
-                                    Color(0xFFEDE4FF),
-                                    Color(0xFFF7F3FF),
-                                    Color(0xFFE5D7FD)
-                                )
+                                colors = if (glassColors.isDark) {
+                                    listOf(
+                                        Color(0xFF2D1B4E),
+                                        Color(0xFF23183C),
+                                        Color(0xFF33205A)
+                                    )
+                                } else {
+                                    listOf(
+                                        Color(0xFFEDE4FF),
+                                        Color(0xFFF7F3FF),
+                                        Color(0xFFE5D7FD)
+                                    )
+                                }
                             )
                         )
                         .padding(20.dp)
@@ -162,14 +175,14 @@ fun RewardsSheet(
                                 text = "${currentMember.earnedPoints} ${if (isHebrew) "נקודות" else "Points"}",
                                 style = MaterialTheme.typography.headlineMedium.copy(
                                     fontWeight = FontWeight.ExtraBold,
-                                    color = PastelPurpleDark
+                                    color = if (glassColors.isDark) Color(0xFFD8B4FE) else PastelPurpleDark
                                 )
                             )
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = if (isHebrew) "הנקודות שצברת מביצוע משימות ⭐" else "Your chore points balance ⭐",
                                 style = MaterialTheme.typography.bodySmall.copy(
-                                    color = TextSecondary,
+                                    color = glassColors.textSecondary,
                                     fontWeight = FontWeight.Medium
                                 )
                             )
@@ -177,7 +190,7 @@ fun RewardsSheet(
 
                         Surface(
                             shape = CircleShape,
-                            color = Color(0xFFFEF3C7),
+                            color = if (glassColors.isDark) Color(0xFF422006) else Color(0xFFFEF3C7),
                             modifier = Modifier.size(56.dp)
                         ) {
                             Box(contentAlignment = Alignment.Center) {
@@ -190,7 +203,7 @@ fun RewardsSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Filter Tabs (matches reference)
+            // Filter Tabs
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -219,8 +232,11 @@ fun RewardsSheet(
 
                     Surface(
                         shape = RoundedCornerShape(18.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, if (canAfford) PastelGreenBorder else OutlineLight),
+                        color = glassColors.cardElevated,
+                        border = BorderStroke(
+                            1.dp,
+                            if (canAfford) glassColors.successBorder else glassColors.cardBorder
+                        ),
                         tonalElevation = 2.dp,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -240,7 +256,7 @@ fun RewardsSheet(
                             ) {
                                 Surface(
                                     shape = RoundedCornerShape(14.dp),
-                                    color = if (canAfford) PastelGreenBackground else Color(0xFFF1F5F9),
+                                    color = if (canAfford) glassColors.successContainer else glassColors.secondaryContainer,
                                     modifier = Modifier.size(46.dp)
                                 ) {
                                     Box(contentAlignment = Alignment.Center) {
@@ -253,13 +269,13 @@ fun RewardsSheet(
                                         text = item.title,
                                         style = MaterialTheme.typography.bodyLarge.copy(
                                             fontWeight = FontWeight.Bold,
-                                            color = TextPrimary
+                                            color = glassColors.textPrimary
                                         )
                                     )
                                     Text(
                                         text = "${item.pointsCost} ${if (isHebrew) "נקודות" else "pts"}",
                                         style = MaterialTheme.typography.bodySmall.copy(
-                                            color = if (canAfford) PastelGreenDark else TextSecondary,
+                                            color = if (canAfford) glassColors.successText else glassColors.textSecondary,
                                             fontWeight = FontWeight.SemiBold
                                         )
                                     )
@@ -270,20 +286,21 @@ fun RewardsSheet(
                                 Button(
                                     onClick = { onClaimReward(item) },
                                     shape = RoundedCornerShape(12.dp),
-                                    colors = ButtonDefaults.buttonColors(containerColor = VibrantActionBlue),
+                                    colors = ButtonDefaults.buttonColors(containerColor = glassColors.primaryAccent),
                                     modifier = Modifier.height(38.dp)
                                 ) {
                                     Text(
                                         text = if (isHebrew) "ממש" else "Claim",
                                         fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp
+                                        fontSize = 12.sp,
+                                        color = Color.White
                                     )
                                 }
                             } else {
                                 Icon(
                                     imageVector = Icons.Default.Lock,
                                     contentDescription = "Locked",
-                                    tint = TextSecondary,
+                                    tint = glassColors.textMuted,
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -301,9 +318,10 @@ private fun RowScope.RewardFilterPill(
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
+    val glassColors = LocalSoftGlassColors.current
     Surface(
         shape = RoundedCornerShape(16.dp),
-        color = if (isSelected) VibrantActionBlue else Color(0xFFF1F5F9),
+        color = if (isSelected) glassColors.primaryAccent else glassColors.secondaryContainer,
         modifier = Modifier
             .weight(1f)
             .clip(RoundedCornerShape(16.dp))
@@ -315,7 +333,7 @@ private fun RowScope.RewardFilterPill(
         ) {
             Text(
                 text = label,
-                color = if (isSelected) Color.White else TextSecondary,
+                color = if (isSelected) Color.White else glassColors.textSecondary,
                 fontWeight = FontWeight.Bold,
                 fontSize = 13.sp
             )

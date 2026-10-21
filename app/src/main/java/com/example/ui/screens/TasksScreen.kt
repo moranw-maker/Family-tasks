@@ -6,10 +6,12 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -20,7 +22,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -28,10 +32,66 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.*
+import com.example.ui.components.FamilyEmptyState
+import com.example.ui.components.FamilyGlassCard
 import com.example.ui.components.TimeFormatUtils
 import com.example.ui.dialogs.TaskDetailDialog
 import com.example.ui.theme.*
+import java.time.DayOfWeek
 import java.time.LocalDate
+import java.time.LocalTime
+import java.time.format.DateTimeFormatter
+
+private fun formatDashboardGreeting(name: String, isHebrew: Boolean, hour: Int = LocalTime.now().hour): String {
+    return if (isHebrew) {
+        val timeGreeting = when (hour) {
+            in 5..11 -> "בוקר טוב"
+            in 12..16 -> "צהריים טובים"
+            in 17..21 -> "ערב טוב"
+            else -> "לילה טוב"
+        }
+        "$timeGreeting, $name"
+    } else {
+        val timeGreeting = when (hour) {
+            in 5..11 -> "Good morning"
+            in 12..16 -> "Good afternoon"
+            in 17..21 -> "Good evening"
+            else -> "Good night"
+        }
+        "$timeGreeting, $name"
+    }
+}
+
+private fun formatHebrewDashboardDate(date: LocalDate, isHebrew: Boolean): String {
+    if (!isHebrew) {
+        return date.format(DateTimeFormatter.ofPattern("EEEE, d MMM yyyy"))
+    }
+    val dayHe = when (date.dayOfWeek) {
+        DayOfWeek.SUNDAY -> "יום ראשון"
+        DayOfWeek.MONDAY -> "יום שני"
+        DayOfWeek.TUESDAY -> "יום שלישי"
+        DayOfWeek.WEDNESDAY -> "יום רביעי"
+        DayOfWeek.THURSDAY -> "יום חמישי"
+        DayOfWeek.FRIDAY -> "יום שישי"
+        DayOfWeek.SATURDAY -> "יום שבת"
+    }
+    val monthHe = when (date.monthValue) {
+        1 -> "ינואר"
+        2 -> "פברואר"
+        3 -> "מרץ"
+        4 -> "אפריל"
+        5 -> "מאי"
+        6 -> "יוני"
+        7 -> "יולי"
+        8 -> "אוגוסט"
+        9 -> "ספטמבר"
+        10 -> "אוקטובר"
+        11 -> "נובמבר"
+        12 -> "דצמבר"
+        else -> ""
+    }
+    return "$dayHe, ${date.dayOfMonth} ב$monthHe ${date.year}"
+}
 
 @Composable
 fun TasksScreen(
@@ -51,14 +111,19 @@ fun TasksScreen(
     taskSyncStates: Map<String, TaskCompletionSyncState> = emptyMap(),
     taskOperationError: String? = null,
     onApproveTask: (String) -> Unit = {},
-    onDismissTaskError: () -> Unit = {}
+    onDismissTaskError: () -> Unit = {},
+    periods: List<SchedulePeriod> = emptyList(),
+    alarms: List<FamilyAlarm> = emptyList(),
+    onNavigateToScreen: (AppScreen) -> Unit = {}
 ) {
+    val glass = LocalSoftGlassColors.current
     var filterTab by remember { mutableIntStateOf(0) } // 0 = All, 1 = Today, 2 = Week, 3 = Completed
     var searchQuery by remember { mutableStateOf("") }
     var selectedTaskForDetail by remember { mutableStateOf<FamilyTask?>(null) }
 
-    val todayEpoch = remember { LocalDate.now().toEpochDay() }
-    val topChampion = remember(members) {
+    val todayDate = remember { LocalDate.now() }
+    val todayEpoch = remember(todayDate) { todayDate.toEpochDay() }
+    val topChampion = remember(members, currentMember) {
         members.maxByOrNull { it.earnedPoints } ?: currentMember
     }
     val totalPoints = remember(members) {
@@ -68,9 +133,39 @@ fun TasksScreen(
         tasks.count { it.isCompleted }
     }
 
+    val todayActiveCount = remember(tasks, todayEpoch) {
+        tasks.count { !it.isCompleted && it.dateEpochDay == todayEpoch }
+    }
+    val awaitingCompletionCount = remember(tasks) {
+        tasks.count { !it.isCompleted || !it.approvedByParent }
+    }
+    val upcomingEventsCount = remember(tasks, todayEpoch) {
+        tasks.count { !it.isCompleted && it.dateEpochDay >= todayEpoch }
+    }
+
+    val todaySchoolDay = remember(todayDate) {
+        SchoolDay.fromJavaDayOfWeek(todayDate.dayOfWeek)
+    }
+    val todayLessonsCount = remember(periods, todaySchoolDay, currentMember) {
+        if (todaySchoolDay == null) {
+            0
+        } else if (currentMember.isChild) {
+            periods.count { it.day == todaySchoolDay && it.childId == currentMember.id }
+        } else {
+            periods.count { it.day == todaySchoolDay }
+        }
+    }
+
+    val nextScheduledAlarm = remember(alarms, currentMember, members) {
+        alarms
+            .filter { alarm ->
+                alarm.isEnabled && alarm.isVisibleToMember(currentMember = currentMember, members = members)
+            }
+            .sortedBy { it.hour * 60 + it.minute }
+            .firstOrNull()
+    }
+
     // Filter tasks based on member, status, date, and search query.
-    // Tasks that are SAVING, PENDING_APPROVAL (!approvedByParent), or FAILED stay visible in active tabs
-    // so children see pending-approval status and parents see tasks awaiting their approval.
     val filteredTasks = tasks.filter { task ->
         val matchesMember = selectedMemberFilter == null || task.assignedToMemberId == selectedMemberFilter
         val matchesSearch = searchQuery.isBlank() ||
@@ -97,18 +192,17 @@ fun TasksScreen(
     }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = glass.screenBackground,
         floatingActionButton = {
-            // Role-aware interface: hide task creation FAB from CHILD users
             if (currentMember.isParent) {
                 FloatingActionButton(
                     onClick = onAddNewTask,
-                    shape = RoundedCornerShape(18.dp),
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = Color.White,
+                    shape = RoundedCornerShape(20.dp),
+                    containerColor = glass.primaryAccent,
+                    contentColor = if (glass.isDark) Color(0xFF0B1120) else Color.White,
                     elevation = FloatingActionButtonDefaults.elevation(
-                        defaultElevation = 3.dp,
-                        pressedElevation = 6.dp
+                        defaultElevation = 4.dp,
+                        pressedElevation = 8.dp
                     ),
                     modifier = Modifier.testTag("add_task_fab")
                 ) {
@@ -125,38 +219,36 @@ fun TasksScreen(
             contentPadding = PaddingValues(
                 start = 16.dp,
                 end = 16.dp,
-                top = 8.dp,
+                top = 10.dp,
                 bottom = innerPadding.calculateBottomPadding() + 88.dp
             ),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier
                 .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            glass.screenGradientTop,
+                            glass.screenBackground,
+                            glass.screenGradientBottom
+                        )
+                    )
+                )
                 .testTag("tasks_screen")
         ) {
-            // 1. Compact Header + Family Summary Card
+            // 1. Soft Glass Greeting + Current Date + Family Profile Banner
             item {
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 1.dp,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                FamilyGlassCard(
+                    cornerRadius = 22.dp,
+                    isTintedBlue = true,
+                    onClick = if (currentMember.isParent) onOpenFamilyAdmin else null,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(18.dp))
-                        .then(
-                            if (currentMember.isParent) {
-                                Modifier.clickable { onOpenFamilyAdmin() }
-                            } else {
-                                Modifier
-                            }
-                        )
                         .testTag("our_family_banner_card")
                 ) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
@@ -170,10 +262,10 @@ fun TasksScreen(
                                 members.take(4).forEach { m ->
                                     Box(
                                         modifier = Modifier
-                                            .size(32.dp)
+                                            .size(34.dp)
                                             .clip(CircleShape)
-                                            .background(Color(m.colorHex).copy(alpha = 0.18f))
-                                            .border(1.5.dp, MaterialTheme.colorScheme.surface, CircleShape),
+                                            .background(Color(m.colorHex).copy(alpha = if (glass.isDark) 0.30f else 0.18f))
+                                            .border(1.5.dp, glass.cardBackground, CircleShape),
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(text = m.avatarEmoji, fontSize = 15.sp)
@@ -183,10 +275,17 @@ fun TasksScreen(
 
                             Column {
                                 Text(
-                                    text = if (isHebrew) "שלום, ${currentMember.name}" else "Hello, ${currentMember.name}",
+                                    text = formatDashboardGreeting(currentMember.name, isHebrew),
                                     style = MaterialTheme.typography.titleMedium.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = glass.textPrimary
+                                    )
+                                )
+                                Text(
+                                    text = formatHebrewDashboardDate(todayDate, isHebrew),
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = glass.primaryAccent,
+                                        fontWeight = FontWeight.SemiBold
                                     )
                                 )
                                 Text(
@@ -195,7 +294,7 @@ fun TasksScreen(
                                     else
                                         "Our Family • ${members.size} active members",
                                     style = MaterialTheme.typography.labelSmall.copy(
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        color = glass.textSecondary,
                                         fontWeight = FontWeight.Medium
                                     )
                                 )
@@ -204,9 +303,9 @@ fun TasksScreen(
 
                         if (currentMember.isParent) {
                             Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = GoogleBlueLight,
-                                border = BorderStroke(1.dp, GoogleBlue.copy(alpha = 0.2f))
+                                shape = RoundedCornerShape(12.dp),
+                                color = glass.cardBackground,
+                                border = BorderStroke(1.dp, glass.cardBorder)
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -217,14 +316,14 @@ fun TasksScreen(
                                         text = if (isHebrew) "ניהול" else "Manage",
                                         style = MaterialTheme.typography.labelSmall.copy(
                                             fontWeight = FontWeight.Bold,
-                                            color = GoogleBlueDark
+                                            color = glass.primaryAccent
                                         )
                                     )
                                     Icon(
                                         imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
                                         contentDescription = null,
-                                        tint = GoogleBlueDark,
-                                        modifier = Modifier.size(12.dp)
+                                        tint = glass.primaryAccent,
+                                        modifier = Modifier.size(11.dp)
                                     )
                                 }
                             }
@@ -233,123 +332,198 @@ fun TasksScreen(
                 }
             }
 
-            // 2. Compact Soft-Tactile Stats Row
+            // 2. Quick Action Shortcuts Row ("משימה חדשה", "לוח שנה", "מערכת שעות", "שעון מעורר")
             item {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // Total Points Card (Soft warm amber/coral)
-                    Surface(
-                        onClick = onOpenRewards,
-                        shape = RoundedCornerShape(18.dp),
-                        color = PastelYellowBackground,
-                        border = BorderStroke(1.dp, PastelYellowBorder),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(74.dp)
-                            .testTag("stat_card_points")
+                    if (currentMember.isParent) {
+                        DashboardQuickShortcutChip(
+                            emoji = "✨",
+                            label = if (isHebrew) "משימה חדשה" else "New Task",
+                            isPrimary = true,
+                            onClick = onAddNewTask,
+                            modifier = Modifier.testTag("quick_action_new_task")
+                        )
+                    }
+                    DashboardQuickShortcutChip(
+                        emoji = "📅",
+                        label = if (isHebrew) "לוח שנה" else "Calendar",
+                        onClick = { onNavigateToScreen(AppScreen.CALENDAR) },
+                        modifier = Modifier.testTag("quick_action_calendar")
+                    )
+                    DashboardQuickShortcutChip(
+                        emoji = "📚",
+                        label = if (isHebrew) "מערכת שעות" else "Timetable",
+                        onClick = { onNavigateToScreen(AppScreen.TIMETABLE) },
+                        modifier = Modifier.testTag("quick_action_timetable")
+                    )
+                    DashboardQuickShortcutChip(
+                        emoji = "⏰",
+                        label = if (isHebrew) "שעון מעורר" else "Alarms",
+                        onClick = { onNavigateToScreen(AppScreen.ALARMS) },
+                        modifier = Modifier.testTag("quick_action_alarms")
+                    )
+                }
+            }
+
+            // 3. Compact Dashboard Summary Cards (Points + Completed + Live Family Overview)
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Row(
+                        // Total Points Card
+                        Surface(
+                            onClick = onOpenRewards,
+                            shape = RoundedCornerShape(20.dp),
+                            color = if (glass.isDark) glass.warningBg else PastelYellowBackground,
+                            border = BorderStroke(1.dp, if (glass.isDark) glass.warningText.copy(alpha = 0.4f) else PastelYellowBorder),
                             modifier = Modifier
-                                .fillMaxSize()
-                                .padding(horizontal = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                                .weight(1f)
+                                .heightIn(min = 76.dp)
+                                .testTag("stat_card_points")
                         ) {
-                            Column(verticalArrangement = Arrangement.Center) {
-                                Text(
-                                    text = "$totalPoints",
-                                    style = MaterialTheme.typography.titleLarge.copy(
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = PastelYellowDark
-                                    )
-                                )
-                                Text(
-                                    text = if (isHebrew) "נקודות לפרסים" else "Reward Points",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        color = PastelYellowDark.copy(alpha = 0.85f),
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                )
-                            }
-                            Surface(
-                                shape = CircleShape,
-                                color = PastelYellowBorder.copy(alpha = 0.45f),
-                                modifier = Modifier.size(36.dp)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = Icons.Default.EmojiEvents,
-                                        contentDescription = null,
-                                        tint = PastelYellowDark,
-                                        modifier = Modifier.size(20.dp)
+                                Column(verticalArrangement = Arrangement.Center) {
+                                    Text(
+                                        text = "$totalPoints",
+                                        style = MaterialTheme.typography.titleLarge.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (glass.isDark) glass.warningText else PastelYellowDark
+                                        )
                                     )
+                                    Text(
+                                        text = if (isHebrew) "נקודות לפרסים" else "Reward Points",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = if (glass.isDark) glass.textSecondary else PastelYellowDark.copy(alpha = 0.85f),
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    )
+                                }
+                                Surface(
+                                    shape = CircleShape,
+                                    color = (if (glass.isDark) glass.warningText else PastelYellowBorder).copy(alpha = 0.25f),
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = Icons.Default.EmojiEvents,
+                                            contentDescription = null,
+                                            tint = if (glass.isDark) glass.warningText else PastelYellowDark,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Completed Chores Card
+                        Surface(
+                            onClick = { filterTab = 3 },
+                            shape = RoundedCornerShape(20.dp),
+                            color = if (glass.isDark) glass.successBg else PastelGreenBackground,
+                            border = BorderStroke(1.dp, if (glass.isDark) glass.successBorder else PastelGreenBorder),
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 76.dp)
+                                .testTag("stat_card_completed")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(verticalArrangement = Arrangement.Center) {
+                                    Text(
+                                        text = "$completedThisMonth",
+                                        style = MaterialTheme.typography.titleLarge.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (glass.isDark) glass.successText else PastelGreenDark
+                                        )
+                                    )
+                                    Text(
+                                        text = if (isHebrew) "הושלמו החודש" else "Done This Month",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = if (glass.isDark) glass.textSecondary else PastelGreenDark.copy(alpha = 0.85f),
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    )
+                                }
+                                Surface(
+                                    shape = CircleShape,
+                                    color = (if (glass.isDark) glass.successText else PastelGreenBorder).copy(alpha = 0.25f),
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = Icons.Default.TaskAlt,
+                                            contentDescription = null,
+                                            tint = if (glass.isDark) glass.successText else PastelGreenDark,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
 
-                    // Completed Chores Card (Soft sage/mint)
-                    Surface(
-                        onClick = { filterTab = 3 },
-                        shape = RoundedCornerShape(18.dp),
-                        color = PastelGreenBackground,
-                        border = BorderStroke(1.dp, PastelGreenBorder),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(74.dp)
-                            .testTag("stat_card_completed")
+                    // Compact 4-Mini-Metric Overview Strip (Today's Tasks, Next Alarm, School Lessons, Upcoming Events)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(horizontal = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(verticalArrangement = Arrangement.Center) {
-                                Text(
-                                    text = "$completedThisMonth",
-                                    style = MaterialTheme.typography.titleLarge.copy(
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = PastelGreenDark
-                                    )
-                                )
-                                Text(
-                                    text = if (isHebrew) "הושלמו החודש" else "Done This Month",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        color = PastelGreenDark.copy(alpha = 0.85f),
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                )
-                            }
-                            Surface(
-                                shape = CircleShape,
-                                color = PastelGreenBorder.copy(alpha = 0.45f),
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = Icons.Default.TaskAlt,
-                                        contentDescription = null,
-                                        tint = PastelGreenDark,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                            }
-                        }
+                        MiniOverviewMetricCard(
+                            emoji = "📋",
+                            valueText = "$todayActiveCount / $awaitingCompletionCount",
+                            label = if (isHebrew) "היום / ממתינות" else "Today / Open",
+                            onClick = { filterTab = 1 },
+                            modifier = Modifier.weight(1f)
+                        )
+                        MiniOverviewMetricCard(
+                            emoji = "⏰",
+                            valueText = nextScheduledAlarm?.formattedTime24h ?: (if (isHebrew) "אין פעיל" else "None"),
+                            label = if (isHebrew) "השעון הבא" else "Next Alarm",
+                            onClick = { onNavigateToScreen(AppScreen.ALARMS) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        MiniOverviewMetricCard(
+                            emoji = "🏫",
+                            valueText = if (todayLessonsCount > 0) "$todayLessonsCount" else "—",
+                            label = if (isHebrew) "שיעורים היום" else "Lessons Today",
+                            onClick = { onNavigateToScreen(AppScreen.TIMETABLE) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        MiniOverviewMetricCard(
+                            emoji = "📅",
+                            valueText = "$upcomingEventsCount",
+                            label = if (isHebrew) "בלוח השנה" else "In Calendar",
+                            onClick = { onNavigateToScreen(AppScreen.CALENDAR) },
+                            modifier = Modifier.weight(1f)
+                        )
                     }
                 }
             }
 
-            // 2b. Compact Horizontal Points Leader Row near the top of the Tasks screen
+            // 4. Compact Horizontal Points Leader Row
             item {
                 Surface(
                     onClick = onOpenRewards,
-                    shape = RoundedCornerShape(14.dp),
-                    color = PastelPurpleBackground,
-                    border = BorderStroke(1.dp, PastelPurpleBorder),
+                    shape = RoundedCornerShape(16.dp),
+                    color = if (glass.isDark) Color(0xFF2E1065).copy(alpha = 0.65f) else PastelPurpleBackground,
+                    border = BorderStroke(1.dp, if (glass.isDark) Color(0xFF7C3AED).copy(alpha = 0.5f) else PastelPurpleBorder),
                     tonalElevation = 1.dp,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -369,14 +543,14 @@ fun TasksScreen(
                         ) {
                             Surface(
                                 shape = CircleShape,
-                                color = PastelPurpleBorder.copy(alpha = 0.5f),
+                                color = (if (glass.isDark) Color(0xFFA78BFA) else PastelPurpleBorder).copy(alpha = 0.35f),
                                 modifier = Modifier.size(30.dp)
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
                                     Icon(
                                         imageVector = Icons.Default.WorkspacePremium,
                                         contentDescription = null,
-                                        tint = PastelPurpleDark,
+                                        tint = if (glass.isDark) Color(0xFFDDD6FE) else PastelPurpleDark,
                                         modifier = Modifier.size(18.dp)
                                     )
                                 }
@@ -385,13 +559,13 @@ fun TasksScreen(
                                 text = if (isHebrew) "מוביל הנקודות:" else "Points Leader:",
                                 style = MaterialTheme.typography.labelLarge.copy(
                                     fontWeight = FontWeight.Bold,
-                                    color = PastelPurpleDark
+                                    color = if (glass.isDark) Color(0xFFDDD6FE) else PastelPurpleDark
                                 )
                             )
                             Text(
                                 text = "${topChampion.avatarEmoji} ${topChampion.name}",
                                 style = MaterialTheme.typography.labelLarge.copy(
-                                    color = MaterialTheme.colorScheme.onSurface,
+                                    color = glass.textPrimary,
                                     fontWeight = FontWeight.ExtraBold
                                 )
                             )
@@ -399,12 +573,12 @@ fun TasksScreen(
 
                         Surface(
                             shape = RoundedCornerShape(50),
-                            color = PastelPurpleBorder.copy(alpha = 0.45f)
+                            color = (if (glass.isDark) Color(0xFF7C3AED) else PastelPurpleBorder).copy(alpha = 0.45f)
                         ) {
                             Text(
                                 text = "${topChampion.earnedPoints} ${if (isHebrew) "נק׳" else "pts"}",
                                 style = MaterialTheme.typography.labelMedium.copy(
-                                    color = PastelPurpleDark,
+                                    color = if (glass.isDark) Color(0xFFF5F3FF) else PastelPurpleDark,
                                     fontWeight = FontWeight.Bold
                                 ),
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
@@ -414,7 +588,7 @@ fun TasksScreen(
                 }
             }
 
-            // 3. Role-Appropriate Action Header (PARENT can create tasks; CHILD views assigned tasks)
+            // 5. Role-Appropriate Action Header
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -425,7 +599,7 @@ fun TasksScreen(
                         text = if (isHebrew) "משימות המשפחה" else "Family Tasks",
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface
+                            color = glass.textPrimary
                         )
                     )
 
@@ -433,30 +607,32 @@ fun TasksScreen(
                         Button(
                             onClick = onAddNewTask,
                             shape = RoundedCornerShape(14.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = glass.primaryAccent,
+                                contentColor = if (glass.isDark) Color(0xFF0B1120) else Color.White
+                            ),
                             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
                             elevation = ButtonDefaults.buttonElevation(defaultElevation = 1.dp),
                             modifier = Modifier
-                                .height(38.dp)
+                                .heightIn(min = 38.dp)
                                 .testTag("add_task_primary_button")
                         ) {
                             Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = if (isHebrew) "+ הוסף משימה" else "+ Add Task",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                color = Color.White
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    fontWeight = FontWeight.Bold
+                                )
                             )
                         }
                     }
                 }
             }
 
-            // 4. Compact Filter Tabs, Search Bar & Member Chips
+            // 6. Compact Filter Tabs, Search Bar & Member Chips
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    // Filter Pills
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -483,21 +659,20 @@ fun TasksScreen(
                         )
                     }
 
-                    // Compact Search field
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
                         placeholder = {
                             Text(
                                 text = if (isHebrew) "חיפוש משימות..." else "Search tasks...",
-                                style = MaterialTheme.typography.bodySmall
+                                style = MaterialTheme.typography.bodySmall.copy(color = glass.textMuted)
                             )
                         },
                         leadingIcon = {
                             Icon(
                                 imageVector = Icons.Default.Search,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                tint = glass.textSecondary,
                                 modifier = Modifier.size(18.dp)
                             )
                         },
@@ -507,25 +682,25 @@ fun TasksScreen(
                                     Icon(
                                         imageVector = Icons.Default.Close,
                                         contentDescription = "Clear",
+                                        tint = glass.textSecondary,
                                         modifier = Modifier.size(18.dp)
                                     )
                                 }
                             }
                         },
                         singleLine = true,
-                        shape = RoundedCornerShape(14.dp),
+                        shape = RoundedCornerShape(16.dp),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedContainerColor = MaterialTheme.colorScheme.surface,
-                            unfocusedContainerColor = MaterialTheme.colorScheme.surface,
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant
+                            focusedContainerColor = glass.cardBackground,
+                            unfocusedContainerColor = glass.cardBackground,
+                            focusedBorderColor = glass.primaryAccent,
+                            unfocusedBorderColor = glass.cardBorder
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("task_search_field")
                     )
 
-                    // Member Avatars Filter
                     LazyRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -535,10 +710,10 @@ fun TasksScreen(
                             val isAllSelected = selectedMemberFilter == null
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
-                                color = if (isAllSelected) GoogleBlueLight else MaterialTheme.colorScheme.surface,
+                                color = if (isAllSelected) glass.primaryAccentSoftBg else glass.cardBackground,
                                 border = BorderStroke(
                                     1.dp,
-                                    if (isAllSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                                    if (isAllSelected) glass.primaryAccent else glass.cardBorder
                                 ),
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(12.dp))
@@ -547,9 +722,10 @@ fun TasksScreen(
                             ) {
                                 Text(
                                     text = if (isHebrew) "כל החברים" else "All Members",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp,
-                                    color = if (isAllSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isAllSelected) glass.primaryAccent else glass.textSecondary
+                                    ),
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                                 )
                             }
@@ -559,10 +735,10 @@ fun TasksScreen(
                             val isSelected = selectedMemberFilter == m.id
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
-                                color = if (isSelected) GoogleBlueLight else MaterialTheme.colorScheme.surface,
+                                color = if (isSelected) glass.primaryAccentSoftBg else glass.cardBackground,
                                 border = BorderStroke(
                                     1.dp,
-                                    if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                                    if (isSelected) glass.primaryAccent else glass.cardBorder
                                 ),
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(12.dp))
@@ -570,16 +746,17 @@ fun TasksScreen(
                                     .testTag("filter_member_${m.id}")
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
                                     Text(text = m.avatarEmoji, fontSize = 13.sp)
                                     Text(
                                         text = m.name,
-                                        fontSize = 12.sp,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                            color = if (isSelected) glass.primaryAccent else glass.textPrimary
+                                        )
                                     )
                                 }
                             }
@@ -588,13 +765,13 @@ fun TasksScreen(
                 }
             }
 
-            // 5. Clear Hebrew Error Banner when a task write or approval fails
+            // 7. Error Banner when a task write or approval fails
             if (!taskOperationError.isNullOrBlank()) {
                 item {
                     Surface(
                         shape = RoundedCornerShape(16.dp),
-                        color = GoogleRedLight,
-                        border = BorderStroke(1.dp, GoogleRed),
+                        color = glass.dangerBg,
+                        border = BorderStroke(1.dp, glass.dangerText),
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("task_operation_error_banner")
@@ -614,7 +791,7 @@ fun TasksScreen(
                                 Icon(
                                     imageVector = Icons.Default.ErrorOutline,
                                     contentDescription = null,
-                                    tint = GoogleRed,
+                                    tint = glass.dangerText,
                                     modifier = Modifier.size(20.dp)
                                 )
                                 Column {
@@ -622,13 +799,13 @@ fun TasksScreen(
                                         text = if (isHebrew) "שגיאה בשמירת המשימה בענן" else "Cloud Task Sync Error",
                                         style = MaterialTheme.typography.labelLarge.copy(
                                             fontWeight = FontWeight.Bold,
-                                            color = GoogleRed
+                                            color = glass.dangerText
                                         )
                                     )
                                     Text(
                                         text = taskOperationError,
                                         style = MaterialTheme.typography.bodySmall.copy(
-                                            color = TextPrimary,
+                                            color = glass.textPrimary,
                                             fontWeight = FontWeight.Medium
                                         )
                                     )
@@ -641,7 +818,7 @@ fun TasksScreen(
                                 Icon(
                                     imageVector = Icons.Default.Close,
                                     contentDescription = "Dismiss error",
-                                    tint = GoogleRed
+                                    tint = glass.dangerText
                                 )
                             }
                         }
@@ -649,40 +826,22 @@ fun TasksScreen(
                 }
             }
 
-            // 6. Tasks List
+            // 8. Tasks List
             if (filteredTasks.isEmpty()) {
                 item {
-                    Surface(
-                        shape = RoundedCornerShape(18.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 12.dp)
-                    ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier.padding(24.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (filterTab == 3) Icons.Default.EmojiEvents else Icons.Default.CheckCircleOutline,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(36.dp)
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = if (filterTab == 3) {
-                                    if (isHebrew) "אין משימות שהושלמו בסינון זה" else "No completed tasks in this view"
-                                } else {
-                                    if (isHebrew) "אין משימות ממתינות! הכל נקי ומסודר" else "All tasks are done!"
-                                },
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                fontSize = 14.sp
-                            )
+                    FamilyEmptyState(
+                        emoji = if (filterTab == 3) "🏆" else "✨",
+                        title = if (filterTab == 3) {
+                            if (isHebrew) "אין משימות שהושלמו בסינון זה" else "No completed tasks in this view"
+                        } else {
+                            if (isHebrew) "אין משימות ממתינות! הכל נקי ומסודר" else "All tasks are done!"
+                        },
+                        subtitle = if (isHebrew) {
+                            "כל המשימות המשפחתיות מסונכרנות בזמן אמת"
+                        } else {
+                            "All family tasks are synced in real time"
                         }
-                    }
+                    )
                 }
             } else {
                 items(filteredTasks, key = { it.id }) { task ->
@@ -736,6 +895,94 @@ fun TasksScreen(
 }
 
 @Composable
+private fun DashboardQuickShortcutChip(
+    emoji: String,
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    isPrimary: Boolean = false
+) {
+    val glass = LocalSoftGlassColors.current
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = if (isPrimary) glass.primaryAccent else glass.cardBackground,
+        border = BorderStroke(
+            1.dp,
+            if (isPrimary) glass.primaryAccent else glass.cardBorder
+        ),
+        shadowElevation = 1.dp,
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(text = emoji, fontSize = 13.sp)
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontWeight = FontWeight.Bold,
+                    color = if (isPrimary) {
+                        if (glass.isDark) Color(0xFF0B1120) else Color.White
+                    } else {
+                        glass.textPrimary
+                    }
+                )
+            )
+        }
+    }
+}
+
+@Composable
+private fun MiniOverviewMetricCard(
+    emoji: String,
+    valueText: String,
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val glass = LocalSoftGlassColors.current
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = glass.cardBackground,
+        border = BorderStroke(1.dp, glass.cardBorder),
+        shadowElevation = 1.dp,
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(text = emoji, fontSize = 14.sp)
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = valueText,
+                style = MaterialTheme.typography.labelLarge.copy(
+                    fontWeight = FontWeight.ExtraBold,
+                    color = glass.textPrimary
+                ),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    color = glass.textSecondary,
+                    fontSize = 10.sp
+                ),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
 private fun TaskItemCardModern(
     task: FamilyTask,
     assignedMember: FamilyMember?,
@@ -749,6 +996,7 @@ private fun TaskItemCardModern(
     onSendNudge: () -> Unit = {},
     onCardClick: () -> Unit
 ) {
+    val glass = LocalSoftGlassColors.current
     val isPendingApproval = task.isCompleted && !task.approvedByParent
     val isFullyApproved = task.isCompleted && task.approvedByParent
     val isSaving = syncState == TaskCompletionSyncState.SAVING
@@ -761,8 +1009,8 @@ private fun TaskItemCardModern(
 
     val checkBgColor by animateColorAsState(
         targetValue = when {
-            isSaving -> GoogleBlue.copy(alpha = 0.18f)
-            isFailed -> GoogleRedLight
+            isSaving -> glass.primaryAccent.copy(alpha = 0.18f)
+            isFailed -> glass.dangerBg
             isFullyApproved -> GoogleGreen
             isPendingApproval -> GoogleYellow
             else -> Color.Transparent
@@ -772,11 +1020,11 @@ private fun TaskItemCardModern(
     )
 
     val cardBorderColor = when {
-        isFailed -> GoogleRed
-        isSaving -> GoogleBlue
-        isFullyApproved -> PastelGreenBorder
-        isPendingApproval -> PastelYellowBorder
-        else -> MaterialTheme.colorScheme.outlineVariant
+        isFailed -> glass.dangerText
+        isSaving -> glass.primaryAccent
+        isFullyApproved -> glass.successBorder
+        isPendingApproval -> if (glass.isDark) glass.warningText.copy(alpha = 0.55f) else PastelYellowBorder
+        else -> glass.cardBorder
     }
 
     val normalizedTime = remember(task.dueTimeFormatted) {
@@ -784,13 +1032,14 @@ private fun TaskItemCardModern(
     }
 
     Surface(
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(20.dp),
+        color = glass.cardBackground,
         border = BorderStroke(1.dp, cardBorderColor),
+        shadowElevation = 2.dp,
         tonalElevation = 1.dp,
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(20.dp))
             .clickable { onCardClick() }
             .testTag("task_card_${task.id}")
     ) {
@@ -804,7 +1053,7 @@ private fun TaskItemCardModern(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // Checkbox button (interactive only if user is permitted to toggle this task)
+                // Checkbox button
                 Box(
                     modifier = Modifier
                         .size(34.dp)
@@ -813,12 +1062,12 @@ private fun TaskItemCardModern(
                         .border(
                             2.dp,
                             when {
-                                isFailed -> GoogleRed
-                                isSaving -> GoogleBlue
+                                isFailed -> glass.dangerText
+                                isSaving -> glass.primaryAccent
                                 isFullyApproved -> GoogleGreen
                                 isPendingApproval -> GoogleYellow
-                                canToggle -> Color(0xFF94A3B8)
-                                else -> Color(0xFFE2E8F0)
+                                canToggle -> glass.textMuted
+                                else -> glass.cardBorder
                             },
                             CircleShape
                         )
@@ -831,7 +1080,7 @@ private fun TaskItemCardModern(
                             CircularProgressIndicator(
                                 modifier = Modifier.size(16.dp),
                                 strokeWidth = 2.dp,
-                                color = GoogleBlue
+                                color = glass.primaryAccent
                             )
                         }
                         task.isCompleted -> {
@@ -846,7 +1095,7 @@ private fun TaskItemCardModern(
                             Icon(
                                 imageVector = Icons.Default.Lock,
                                 contentDescription = "Read Only",
-                                tint = Color(0xFFCBD5E1),
+                                tint = glass.textMuted,
                                 modifier = Modifier.size(14.dp)
                             )
                         }
@@ -855,18 +1104,29 @@ private fun TaskItemCardModern(
 
                 Spacer(modifier = Modifier.width(12.dp))
 
-                // Task Title, 24h Time, Points, Sync Status & Member info
+                // Task Title, Optional Description, 24h Time, Points, Sync Status & Member info
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = task.title,
                         style = MaterialTheme.typography.bodyLarge.copy(
                             fontWeight = FontWeight.SemiBold,
                             textDecoration = if (isFullyApproved) TextDecoration.LineThrough else TextDecoration.None,
-                            color = if (isFullyApproved) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
+                            color = if (isFullyApproved) glass.textSecondary else glass.textPrimary
                         ),
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
+
+                    if (task.description.isNotBlank()) {
+                        Text(
+                            text = task.description,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = glass.textSecondary
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(4.dp))
 
@@ -885,11 +1145,11 @@ private fun TaskItemCardModern(
                         else -> "task_status_idle_${task.id}"
                     }
                     val statusColor = when {
-                        isSaving -> GoogleBlue
-                        isFailed -> GoogleRed
-                        isPendingApproval -> PastelYellowDark
-                        isFullyApproved -> GoogleGreenDark
-                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        isSaving -> glass.primaryAccent
+                        isFailed -> glass.dangerText
+                        isPendingApproval -> glass.warningText
+                        isFullyApproved -> glass.successText
+                        else -> glass.textSecondary
                     }
 
                     Row(
@@ -897,14 +1157,14 @@ private fun TaskItemCardModern(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = "${task.points} ${if (isHebrew) "נק׳" else "pts"}",
+                            text = "+${task.points} ${if (isHebrew) "נק׳" else "pts"}",
                             style = MaterialTheme.typography.labelSmall.copy(
                                 fontWeight = FontWeight.Bold,
-                                color = if (isFullyApproved) GoogleGreenDark else WarmCoralDark
+                                color = if (isFullyApproved) glass.successText else glass.warningText
                             )
                         )
 
-                        Text(text = "•", color = TextSecondary, fontSize = 11.sp)
+                        Text(text = "•", color = glass.textMuted, fontSize = 11.sp)
 
                         Text(
                             text = statusLabel,
@@ -916,11 +1176,11 @@ private fun TaskItemCardModern(
                         )
 
                         if (task.recurrence.isRecurring) {
-                            Text(text = "•", color = TextSecondary, fontSize = 11.sp)
+                            Text(text = "•", color = glass.textMuted, fontSize = 11.sp)
                             Text(
                                 text = "🔁 ${task.recurrence.getDisplayName(isHebrew)}",
                                 style = MaterialTheme.typography.labelSmall.copy(
-                                    color = MaterialTheme.colorScheme.primary,
+                                    color = glass.primaryAccent,
                                     fontWeight = FontWeight.SemiBold
                                 ),
                                 maxLines = 1,
@@ -929,11 +1189,11 @@ private fun TaskItemCardModern(
                         }
 
                         if (assignedMember != null) {
-                            Text(text = "•", color = TextSecondary, fontSize = 11.sp)
+                            Text(text = "•", color = glass.textMuted, fontSize = 11.sp)
                             Text(
                                 text = "${assignedMember.avatarEmoji} ${assignedMember.name}",
                                 style = MaterialTheme.typography.labelSmall.copy(
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    color = glass.textSecondary,
                                     fontWeight = FontWeight.Medium
                                 ),
                                 maxLines = 1,
@@ -952,14 +1212,18 @@ private fun TaskItemCardModern(
                 ) {
                     Surface(
                         shape = RoundedCornerShape(12.dp),
-                        color = when (task.category) {
-                            TaskCategory.BEDROOM -> GoogleBlueLight
-                            TaskCategory.DISHES -> PastelGreenBackground
-                            TaskCategory.HOMEWORK -> SoftLavenderLight
-                            TaskCategory.CLEANING -> SoftTealLight
-                            TaskCategory.GROCERIES -> WarmCoralLight
-                            TaskCategory.PETS -> PastelYellowBackground
-                            else -> MaterialTheme.colorScheme.surfaceVariant
+                        color = if (glass.isDark) {
+                            glass.primaryAccentSoftBg.copy(alpha = 0.55f)
+                        } else {
+                            when (task.category) {
+                                TaskCategory.BEDROOM -> GoogleBlueLight
+                                TaskCategory.DISHES -> PastelGreenBackground
+                                TaskCategory.HOMEWORK -> SoftLavenderLight
+                                TaskCategory.CLEANING -> SoftTealLight
+                                TaskCategory.GROCERIES -> WarmCoralLight
+                                TaskCategory.PETS -> PastelYellowBackground
+                                else -> glass.primaryAccentSoftBg
+                            }
                         },
                         modifier = Modifier.size(38.dp)
                     ) {
@@ -979,7 +1243,7 @@ private fun TaskItemCardModern(
                                 Icon(
                                     imageVector = Icons.Default.MoreVert,
                                     contentDescription = if (isHebrew) "אפשרויות משימה" else "Task Options",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    tint = glass.textSecondary,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
@@ -1010,14 +1274,14 @@ private fun TaskItemCardModern(
                                     text = {
                                         Text(
                                             text = if (isHebrew) "מחק משימה" else "Delete Task",
-                                            color = GoogleRed
+                                            color = glass.dangerText
                                         )
                                     },
                                     leadingIcon = {
                                         Icon(
                                             Icons.Default.DeleteOutline,
                                             contentDescription = null,
-                                            tint = GoogleRed
+                                            tint = glass.dangerText
                                         )
                                     },
                                     onClick = {
@@ -1036,8 +1300,8 @@ private fun TaskItemCardModern(
                 Spacer(modifier = Modifier.height(10.dp))
                 Surface(
                     shape = RoundedCornerShape(12.dp),
-                    color = PastelYellowBackground,
-                    border = BorderStroke(1.dp, PastelYellowBorder),
+                    color = glass.warningBg,
+                    border = BorderStroke(1.dp, glass.warningText.copy(alpha = 0.45f)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
@@ -1053,7 +1317,7 @@ private fun TaskItemCardModern(
                             else
                                 "Completed by ${assignedMember?.name ?: "child"} — awaiting approval",
                             style = MaterialTheme.typography.labelSmall.copy(
-                                color = PastelYellowDark,
+                                color = glass.warningText,
                                 fontWeight = FontWeight.SemiBold
                             ),
                             modifier = Modifier.weight(1f)
@@ -1088,12 +1352,13 @@ private fun RowScope.FilterPillChip(
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
+    val glass = LocalSoftGlassColors.current
     Surface(
         shape = RoundedCornerShape(14.dp),
-        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+        color = if (isSelected) glass.primaryAccent else glass.cardBackground,
         border = BorderStroke(
             1.dp,
-            if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+            if (isSelected) glass.primaryAccent else glass.cardBorder
         ),
         modifier = Modifier
             .weight(1f)
@@ -1106,9 +1371,14 @@ private fun RowScope.FilterPillChip(
         ) {
             Text(
                 text = label,
-                color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
-                fontWeight = FontWeight.Bold,
-                fontSize = 12.sp
+                style = MaterialTheme.typography.labelMedium.copy(
+                    color = if (isSelected) {
+                        if (glass.isDark) Color(0xFF0B1120) else Color.White
+                    } else {
+                        glass.textSecondary
+                    },
+                    fontWeight = FontWeight.Bold
+                )
             )
         }
     }

@@ -2050,4 +2050,97 @@ class ExampleRobolectricTest {
         assertNotNull(systemTones)
         assertNotNull(additionalTones)
     }
+
+    @Test
+    fun `test soft glass design system light dark theme text scale and persistence`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Verify AppThemeMode options and Hebrew labels ("בהיר", "כהה", "לפי הגדרות המכשיר")
+        assertEquals("בהיר", com.example.model.AppThemeMode.LIGHT.labelHe)
+        assertEquals("כהה", com.example.model.AppThemeMode.DARK.labelHe)
+        assertEquals("לפי הגדרות המכשיר", com.example.model.AppThemeMode.SYSTEM.labelHe)
+
+        // 2. Verify AppTextScale 5 presets and exact scale factors ("קטן", "רגיל", "גדול", "גדול מאוד", "ענק")
+        val scales = com.example.model.AppTextScale.entries
+        assertEquals(5, scales.size)
+        assertEquals("קטן", com.example.model.AppTextScale.SMALL.labelHe)
+        assertEquals(0.90f, com.example.model.AppTextScale.SMALL.scaleFactor, 0.001f)
+        assertEquals("רגיל", com.example.model.AppTextScale.NORMAL.labelHe)
+        assertEquals(1.00f, com.example.model.AppTextScale.NORMAL.scaleFactor, 0.001f)
+        assertEquals("גדול", com.example.model.AppTextScale.LARGE.labelHe)
+        assertEquals(1.12f, com.example.model.AppTextScale.LARGE.scaleFactor, 0.001f)
+        assertEquals("גדול מאוד", com.example.model.AppTextScale.EXTRA_LARGE.labelHe)
+        assertEquals(1.24f, com.example.model.AppTextScale.EXTRA_LARGE.scaleFactor, 0.001f)
+        assertEquals("ענק", com.example.model.AppTextScale.HUGE.labelHe)
+        assertEquals(1.36f, com.example.model.AppTextScale.HUGE.scaleFactor, 0.001f)
+
+        // 3. Verify centralized scaledTypography scales font sizes and line heights proportionally
+        val normalTypo = com.example.ui.theme.scaledTypography(com.example.model.AppTextScale.NORMAL.scaleFactor)
+        val hugeTypo = com.example.ui.theme.scaledTypography(com.example.model.AppTextScale.HUGE.scaleFactor)
+        val smallTypo = com.example.ui.theme.scaledTypography(com.example.model.AppTextScale.SMALL.scaleFactor)
+
+        assertTrue(
+            "HUGE text scale must produce larger bodyLarge fontSize than NORMAL",
+            hugeTypo.bodyLarge.fontSize.value > normalTypo.bodyLarge.fontSize.value
+        )
+        assertTrue(
+            "SMALL text scale must produce smaller bodyLarge fontSize than NORMAL",
+            smallTypo.bodyLarge.fontSize.value < normalTypo.bodyLarge.fontSize.value
+        )
+        assertEquals(
+            normalTypo.bodyLarge.fontSize.value * 1.36f,
+            hugeTypo.bodyLarge.fontSize.value,
+            0.05f
+        )
+
+        // 4. Verify Soft Glass Light and Dark color tokens
+        assertFalse(com.example.ui.theme.LightSoftGlassColors.isDark)
+        assertTrue(com.example.ui.theme.DarkSoftGlassColors.isDark)
+        assertEquals(
+            androidx.compose.ui.graphics.Color(0xFF0B1120),
+            com.example.ui.theme.DarkSoftGlassColors.screenBackgroundTop
+        )
+        assertEquals(
+            androidx.compose.ui.graphics.Color(0xFF1E293B),
+            com.example.ui.theme.DarkSoftGlassColors.cardElevated
+        )
+        assertEquals(
+            androidx.compose.ui.graphics.Color(0xFF60A5FA),
+            com.example.ui.theme.DarkSoftGlassColors.primaryAccent
+        )
+
+        // 5. Verify SharedPreferences persistence of themeMode and appTextScale across repository instances
+        val repo1 = FamilyRepository(context = context)
+        repo1.setThemeMode(com.example.model.AppThemeMode.DARK)
+        repo1.setAppTextScale(com.example.model.AppTextScale.EXTRA_LARGE)
+        assertEquals(com.example.model.AppThemeMode.DARK, repo1.themeMode.value)
+        assertEquals(com.example.model.AppTextScale.EXTRA_LARGE, repo1.appTextScale.value)
+
+        // Creating a new FamilyRepository attached to the same context restores the persisted preferences
+        val repo2 = FamilyRepository(context = context)
+        assertEquals(
+            "Persisted DARK themeMode must be restored on app launch",
+            com.example.model.AppThemeMode.DARK,
+            repo2.themeMode.value
+        )
+        assertEquals(
+            "Persisted EXTRA_LARGE appTextScale must be restored on app launch",
+            com.example.model.AppTextScale.EXTRA_LARGE,
+            repo2.appTextScale.value
+        )
+
+        // Reset back to defaults for cleanliness
+        repo2.setThemeMode(com.example.model.AppThemeMode.SYSTEM)
+        repo2.setAppTextScale(com.example.model.AppTextScale.NORMAL)
+        assertEquals(com.example.model.AppThemeMode.SYSTEM, repo2.themeMode.value)
+        assertEquals(com.example.model.AppTextScale.NORMAL, repo2.appTextScale.value)
+
+        // 6. Verify Israeli School Timetable strictly uses Sunday through Friday (no Saturday)
+        val schoolDays = com.example.model.SchoolDay.schoolDays
+        assertEquals(6, schoolDays.size)
+        assertFalse("School timetable days must never include Saturday", schoolDays.contains(com.example.model.SchoolDay.SATURDAY))
+        assertEquals(com.example.model.SchoolDay.SUNDAY, schoolDays.first())
+        assertEquals(com.example.model.SchoolDay.FRIDAY, schoolDays.last())
+    }
 }
+

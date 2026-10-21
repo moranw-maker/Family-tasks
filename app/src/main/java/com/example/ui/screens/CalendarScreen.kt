@@ -18,6 +18,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -57,11 +58,11 @@ fun CalendarScreen(
     taskSyncStates: Map<String, TaskCompletionSyncState> = emptyMap(),
     onApproveTask: (String) -> Unit = {}
 ) {
+    val glass = LocalSoftGlassColors.current
     var displayMonth by remember { mutableStateOf(YearMonth.from(selectedDate)) }
     var selectedTaskForSheet by remember { mutableStateOf<FamilyTask?>(null) }
     val today = remember { LocalDate.now(ZoneId.systemDefault()) }
 
-    // Keep displayMonth synced if selectedDate jumps to a different month externally
     LaunchedEffect(selectedDate) {
         val targetMonth = YearMonth.from(selectedDate)
         if (targetMonth != displayMonth) {
@@ -70,18 +71,28 @@ fun CalendarScreen(
     }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background
+        containerColor = glass.screenBackground
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .background(MaterialTheme.colorScheme.background)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            glass.screenGradientTop,
+                            glass.screenBackground,
+                            glass.screenGradientBottom
+                        )
+                    )
+                )
         ) {
-            // Compact Top Calendar Header: Month Navigation + View Mode Selector + Today Shortcut
+            // Soft Glass Top Calendar Header: Month Navigation + View Mode Selector + Today Shortcut
             Surface(
-                color = MaterialTheme.colorScheme.surface,
+                color = glass.cardBackground,
                 tonalElevation = 1.dp,
+                shadowElevation = 2.dp,
+                border = BorderStroke(0.5.dp, glass.cardBorder),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
@@ -116,7 +127,7 @@ fun CalendarScreen(
                                 Icon(
                                     imageVector = if (isHebrew) Icons.Default.ChevronRight else Icons.Default.ChevronLeft,
                                     contentDescription = if (isHebrew) "חודש קודם" else "Previous Month",
-                                    tint = MaterialTheme.colorScheme.onSurface
+                                    tint = glass.textPrimary
                                 )
                             }
 
@@ -124,7 +135,7 @@ fun CalendarScreen(
                                 text = "$monthName $yearNumber",
                                 style = MaterialTheme.typography.titleMedium.copy(
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    color = glass.textPrimary
                                 ),
                                 modifier = Modifier
                                     .padding(horizontal = 4.dp)
@@ -145,7 +156,7 @@ fun CalendarScreen(
                                 Icon(
                                     imageVector = if (isHebrew) Icons.Default.ChevronLeft else Icons.Default.ChevronRight,
                                     contentDescription = if (isHebrew) "חודש הבא" else "Next Month",
-                                    tint = MaterialTheme.colorScheme.onSurface
+                                    tint = glass.textPrimary
                                 )
                             }
                         }
@@ -155,34 +166,45 @@ fun CalendarScreen(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             // Today shortcut
-                            FilledTonalButton(
-                                onClick = {
-                                    displayMonth = YearMonth.from(today)
-                                    onDateSelect(today)
-                                },
+                            Surface(
                                 shape = RoundedCornerShape(12.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                color = glass.primaryAccentSoftBg,
+                                border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.3f)),
                                 modifier = Modifier
                                     .height(32.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        displayMonth = YearMonth.from(today)
+                                        onDateSelect(today)
+                                    }
                                     .testTag("jump_today_btn")
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Today,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = if (isHebrew) "היום" else "Today",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp
-                                )
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Today,
+                                        contentDescription = null,
+                                        tint = glass.primaryAccent,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = if (isHebrew) "היום" else "Today",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = glass.primaryAccent
+                                        )
+                                    )
+                                }
                             }
 
                             // Compact Segmented Pills for Month / Week / Day
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant
+                                color = glass.screenBackground,
+                                border = BorderStroke(1.dp, glass.cardBorder)
                             ) {
                                 Row(modifier = Modifier.padding(2.dp)) {
                                     CalendarModePill(
@@ -209,8 +231,6 @@ fun CalendarScreen(
                     }
                 }
             }
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
 
             when (calendarMode) {
                 CalendarViewMode.MONTH -> {
@@ -270,7 +290,6 @@ fun CalendarScreen(
         }
     }
 
-    // Polished Material 3 Modal Bottom Sheet when any task is tapped in a cell or in the agenda
     selectedTaskForSheet?.let { activeTask ->
         val latestTask = tasks.find { it.id == activeTask.id } ?: activeTask
         val assignedMember = members.find { it.id == latestTask.assignedToMemberId }
@@ -309,9 +328,10 @@ fun CalendarModePill(
     onClick: () -> Unit,
     testTag: String
 ) {
+    val glass = LocalSoftGlassColors.current
     Surface(
         shape = RoundedCornerShape(10.dp),
-        color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
+        color = if (isSelected) glass.primaryAccent else Color.Transparent,
         modifier = Modifier
             .clip(RoundedCornerShape(10.dp))
             .clickable { onClick() }
@@ -321,7 +341,11 @@ fun CalendarModePill(
             text = title,
             style = MaterialTheme.typography.labelSmall.copy(
                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (isSelected) {
+                    if (glass.isDark) Color(0xFF0B1120) else Color.White
+                } else {
+                    glass.textSecondary
+                },
                 fontSize = 11.sp
             ),
             modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
@@ -346,6 +370,7 @@ fun MonthCalendarView(
     onApproveTask: (String) -> Unit,
     onAddNewTask: () -> Unit = {}
 ) {
+    val glass = LocalSoftGlassColors.current
     val daysOfWeekLabels = if (firstDayOfWeek == FirstDayOfWeek.SUNDAY) {
         if (isHebrew) listOf("א׳", "ב׳", "ג׳", "ד׳", "ה׳", "ו׳", "ש׳")
         else listOf("Su", "Mo", "Tu", "We", "Th", "Fr", "Sa")
@@ -364,7 +389,6 @@ fun MonthCalendarView(
     val totalCells = ((dayOfWeekIndex + daysInMonth + 6) / 7) * 7
     val rowCount = (totalCells / 7).coerceAtLeast(5)
 
-    // Pre-group and sort each day's tasks by 24-hour scheduled time
     val tasksByEpochDay = remember(tasks) {
         tasks.groupBy { it.dateEpochDay }
             .mapValues { (_, list) ->
@@ -379,25 +403,28 @@ fun MonthCalendarView(
         val gridHeight = cellHeight * rowCount + 6.dp
 
         Column(modifier = Modifier.fillMaxSize()) {
-            // Upper Portion: Google Calendar-Inspired Month Grid
+            // Upper Portion: Soft Glass Month Grid Card
             Surface(
-                color = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(bottomStart = 22.dp, bottomEnd = 22.dp),
+                color = glass.cardBackground,
+                shadowElevation = 2.dp,
+                border = BorderStroke(0.5.dp, glass.cardBorder),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
                     // Weekday Header Strip
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 4.dp, vertical = 4.dp),
+                            .padding(horizontal = 4.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.SpaceAround
                     ) {
                         daysOfWeekLabels.forEach { label ->
                             Text(
                                 text = label,
                                 style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontWeight = FontWeight.Bold,
+                                    color = glass.textSecondary,
                                     fontSize = 11.sp
                                 ),
                                 textAlign = TextAlign.Center,
@@ -450,8 +477,6 @@ fun MonthCalendarView(
                 }
             }
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
-
             // Lower Portion: Dedicated Selected-Day Agenda Section directly below calendar
             val selectedDateTasks = tasksByEpochDay[selectedDate.toEpochDay()].orEmpty()
             SelectedDayAgendaSection(
@@ -486,25 +511,26 @@ fun MonthDayCell(
     onDateClick: () -> Unit,
     onTaskStripClick: (FamilyTask) -> Unit
 ) {
+    val glass = LocalSoftGlassColors.current
     val cellBgColor = when {
-        isSelected -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
-        isToday -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-        else -> MaterialTheme.colorScheme.surface
+        isSelected -> glass.cardTintedBlueBackground
+        isToday -> glass.primaryAccentSoftBg.copy(alpha = 0.45f)
+        else -> glass.cardBackground
     }
     val cellBorderColor = when {
-        isSelected -> MaterialTheme.colorScheme.primary
-        isToday -> MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
-        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+        isSelected -> glass.primaryAccent
+        isToday -> glass.primaryAccent.copy(alpha = 0.6f)
+        else -> glass.cardBorder.copy(alpha = 0.65f)
     }
 
     Surface(
-        shape = RoundedCornerShape(8.dp),
+        shape = RoundedCornerShape(10.dp),
         color = cellBgColor,
-        border = BorderStroke(if (isSelected) 1.5.dp else 0.6.dp, cellBorderColor),
+        border = BorderStroke(if (isSelected) 1.5.dp else 0.7.dp, cellBorderColor),
         modifier = Modifier
-            .padding(1.dp)
+            .padding(1.5.dp)
             .height(cellHeight)
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(10.dp))
             .clickable { onDateClick() }
             .testTag("calendar_day_cell_${date}")
     ) {
@@ -517,9 +543,9 @@ fun MonthDayCell(
             // Day number header
             Box(
                 modifier = Modifier
-                    .size(18.dp)
+                    .size(19.dp)
                     .clip(CircleShape)
-                    .background(if (isToday) MaterialTheme.colorScheme.primary else Color.Transparent),
+                    .background(if (isToday) glass.primaryAccent else Color.Transparent),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
@@ -527,16 +553,16 @@ fun MonthDayCell(
                     fontSize = 10.sp,
                     fontWeight = if (isToday || isSelected) FontWeight.Bold else FontWeight.Medium,
                     color = when {
-                        isToday -> MaterialTheme.colorScheme.onPrimary
-                        isSelected -> MaterialTheme.colorScheme.primary
-                        else -> MaterialTheme.colorScheme.onSurface
+                        isToday -> if (glass.isDark) Color(0xFF0B1120) else Color.White
+                        isSelected -> glass.primaryAccent
+                        else -> glass.textPrimary
                     }
                 )
             }
 
             Spacer(modifier = Modifier.height(1.dp))
 
-            // Compact Google Calendar-style colored event strips directly inside the cell
+            // Compact colored event strips directly inside the cell
             if (tasks.isNotEmpty()) {
                 val hasOverflow = tasks.size > maxVisibleTasks
                 val visibleCount = if (hasOverflow) (maxVisibleTasks - 1).coerceAtLeast(1) else tasks.size
@@ -553,7 +579,7 @@ fun MonthDayCell(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 0.5.dp)
-                            .clip(RoundedCornerShape(3.dp))
+                            .clip(RoundedCornerShape(4.dp))
                             .background(stripBg)
                             .clickable { onTaskStripClick(task) }
                             .padding(horizontal = 3.dp, vertical = 1.dp)
@@ -578,7 +604,7 @@ fun MonthDayCell(
                         fontSize = 7.5.sp,
                         lineHeight = 8.5.sp,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = glass.primaryAccent,
                         maxLines = 1,
                         modifier = Modifier.testTag("calendar_cell_more_${date}")
                     )
@@ -588,11 +614,25 @@ fun MonthDayCell(
     }
 }
 
-/**
- * Subtle, soft-tactile category/status color pairs for Calendar event strips.
- */
 @Composable
 private fun taskStripColors(task: FamilyTask): Pair<Color, Color> {
+    val glass = LocalSoftGlassColors.current
+    if (glass.isDark) {
+        return when {
+            task.isCompleted && task.approvedByParent ->
+                glass.successBg to glass.successText
+            task.isCompleted && !task.approvedByParent ->
+                glass.warningBg to glass.warningText
+            else -> when (task.category) {
+                TaskCategory.HOMEWORK -> Color(0xFF3B0764) to Color(0xFFDDD6FE)
+                TaskCategory.CLEANING -> Color(0xFF134E4A) to Color(0xFF99F6E4)
+                TaskCategory.GROCERIES -> Color(0xFF431407) to Color(0xFFFED7AA)
+                TaskCategory.DISHES -> glass.successBg to glass.successText
+                TaskCategory.PETS -> glass.warningBg to glass.warningText
+                else -> glass.primaryAccentSoftBg to glass.primaryAccent
+            }
+        }
+    }
     return when {
         task.isCompleted && task.approvedByParent ->
             PastelGreenBackground to PastelGreenDark
@@ -625,6 +665,7 @@ private fun SelectedDayAgendaSection(
     onAddNewTask: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val glass = LocalSoftGlassColors.current
     val locale = if (isHebrew) Locale.forLanguageTag("he") else Locale.ENGLISH
     val dayPrefix = when (selectedDate) {
         today -> if (isHebrew) "היום • " else "Today • "
@@ -639,7 +680,7 @@ private fun SelectedDayAgendaSection(
 
     Column(
         modifier = modifier
-            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
             .testTag("calendar_selected_day_agenda")
     ) {
         Row(
@@ -651,7 +692,7 @@ private fun SelectedDayAgendaSection(
                 text = selectedDateFormatted,
                 style = MaterialTheme.typography.titleSmall.copy(
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = glass.textPrimary
                 ),
                 modifier = Modifier
                     .weight(1f)
@@ -664,13 +705,13 @@ private fun SelectedDayAgendaSection(
             ) {
                 Surface(
                     shape = RoundedCornerShape(10.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant
+                    color = glass.primaryAccentSoftBg
                 ) {
                     Text(
                         text = if (isHebrew) "${tasks.size} משימות" else "${tasks.size} tasks",
                         style = MaterialTheme.typography.labelSmall.copy(
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontWeight = FontWeight.SemiBold
+                            color = glass.primaryAccent,
+                            fontWeight = FontWeight.Bold
                         ),
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                     )
@@ -681,8 +722,8 @@ private fun SelectedDayAgendaSection(
                         onClick = onAddNewTask,
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary
+                            containerColor = glass.primaryAccent,
+                            contentColor = if (glass.isDark) Color(0xFF0B1120) else Color.White
                         ),
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                         modifier = Modifier
@@ -705,13 +746,13 @@ private fun SelectedDayAgendaSection(
             }
         }
 
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         if (tasks.isEmpty()) {
             Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+                shape = RoundedCornerShape(18.dp),
+                color = glass.cardBackground,
+                border = BorderStroke(1.dp, glass.cardBorder),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 6.dp)
@@ -727,7 +768,7 @@ private fun SelectedDayAgendaSection(
                     Icon(
                         imageVector = Icons.Default.EventAvailable,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                        tint = glass.primaryAccent,
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
@@ -737,7 +778,7 @@ private fun SelectedDayAgendaSection(
                         else
                             "No tasks scheduled for this date",
                         style = MaterialTheme.typography.bodyMedium.copy(
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = glass.textSecondary,
                             fontWeight = FontWeight.Medium
                         )
                     )
@@ -773,10 +814,6 @@ private fun SelectedDayAgendaSection(
     }
 }
 
-/**
- * Compact, crisp soft-tactile agenda row showing 24-hour scheduled time, title, assignee,
- * and completion/approval status. Tapping opens the Modal Bottom Sheet.
- */
 @Composable
 fun CalendarAgendaTaskRow(
     task: FamilyTask,
@@ -788,6 +825,7 @@ fun CalendarAgendaTaskRow(
     onToggle: () -> Unit,
     onApprove: () -> Unit
 ) {
+    val glass = LocalSoftGlassColors.current
     val time24h = TimeFormatUtils.normalize24HourString(task.dueTimeFormatted, "16:00")
     val isPendingApproval = task.isCompleted && !task.approvedByParent
     val isApproved = task.isCompleted && task.approvedByParent
@@ -797,20 +835,21 @@ fun CalendarAgendaTaskRow(
     val (stripBg, stripAccent) = taskStripColors(task)
 
     Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(16.dp),
+        color = glass.cardBackground,
         border = BorderStroke(
             width = 1.dp,
             color = when {
-                isApproved -> PastelGreenBorder
-                isPendingApproval -> PastelYellowBorder
-                else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.65f)
+                isApproved -> glass.successBorder
+                isPendingApproval -> if (glass.isDark) glass.warningText.copy(alpha = 0.55f) else PastelYellowBorder
+                else -> glass.cardBorder
             }
         ),
+        shadowElevation = 1.dp,
         tonalElevation = 1.dp,
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(16.dp))
             .clickable { onRowClick() }
             .testTag("calendar_agenda_task_${task.id}")
     ) {
@@ -821,16 +860,15 @@ fun CalendarAgendaTaskRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Left: 24-hour time pill + category accent bar
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier.weight(1f)
             ) {
                 Surface(
-                    shape = RoundedCornerShape(8.dp),
+                    shape = RoundedCornerShape(10.dp),
                     color = stripBg,
-                    modifier = Modifier.widthIn(min = 52.dp)
+                    modifier = Modifier.widthIn(min = 54.dp)
                 ) {
                     Text(
                         text = time24h,
@@ -849,7 +887,7 @@ fun CalendarAgendaTaskRow(
                         text = task.title,
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontWeight = FontWeight.Bold,
-                            color = if (isApproved) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+                            color = if (isApproved) glass.textSecondary else glass.textPrimary,
                             textDecoration = if (isApproved) TextDecoration.LineThrough else TextDecoration.None
                         ),
                         maxLines = 1,
@@ -871,9 +909,9 @@ fun CalendarAgendaTaskRow(
                         text = "$assigneeText • $statusText",
                         style = MaterialTheme.typography.labelSmall.copy(
                             color = when {
-                                isApproved -> PastelGreenDark
-                                isPendingApproval -> PastelYellowDark
-                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                isApproved -> glass.successText
+                                isPendingApproval -> glass.warningText
+                                else -> glass.textSecondary
                             },
                             fontWeight = FontWeight.Medium
                         ),
@@ -883,7 +921,6 @@ fun CalendarAgendaTaskRow(
                 }
             }
 
-            // Right: Role-aware quick action (Parent approve button or completion checkbox)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -893,8 +930,8 @@ fun CalendarAgendaTaskRow(
                         onClick = onApprove,
                         shape = RoundedCornerShape(10.dp),
                         colors = ButtonDefaults.filledTonalButtonColors(
-                            containerColor = PastelGreenBackground,
-                            contentColor = PastelGreenDark
+                            containerColor = glass.successBg,
+                            contentColor = glass.successText
                         ),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                         modifier = Modifier
@@ -924,7 +961,7 @@ fun CalendarAgendaTaskRow(
                                 color = when {
                                     isApproved -> GoogleGreen
                                     isPendingApproval -> GoogleYellowDark
-                                    else -> MaterialTheme.colorScheme.outline
+                                    else -> glass.textMuted
                                 },
                                 shape = CircleShape
                             )
@@ -963,6 +1000,7 @@ fun WeekCalendarView(
     onApproveTask: (String) -> Unit,
     onAddNewTask: () -> Unit = {}
 ) {
+    val glass = LocalSoftGlassColors.current
     val dayOffset = if (firstDayOfWeek == FirstDayOfWeek.SUNDAY) {
         selectedDate.dayOfWeek.value % 7
     } else {
@@ -990,16 +1028,20 @@ fun WeekCalendarView(
                 val dayLetter = date.dayOfWeek.getDisplayName(TextStyle.NARROW, locale)
 
                 Surface(
-                    shape = RoundedCornerShape(12.dp),
+                    shape = RoundedCornerShape(14.dp),
                     color = when {
-                        isSelected -> MaterialTheme.colorScheme.primary
-                        isToday -> MaterialTheme.colorScheme.primaryContainer
-                        else -> MaterialTheme.colorScheme.surfaceVariant
+                        isSelected -> glass.primaryAccent
+                        isToday -> glass.primaryAccentSoftBg
+                        else -> glass.cardBackground
                     },
+                    border = BorderStroke(
+                        1.dp,
+                        if (isSelected) glass.primaryAccent else glass.cardBorder
+                    ),
                     modifier = Modifier
                         .weight(1f)
                         .padding(2.dp)
-                        .clip(RoundedCornerShape(12.dp))
+                        .clip(RoundedCornerShape(14.dp))
                         .clickable { onDateSelect(date) }
                 ) {
                     Column(
@@ -1009,21 +1051,27 @@ fun WeekCalendarView(
                         Text(
                             text = dayLetter,
                             fontSize = 11.sp,
-                            color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                            color = if (isSelected) {
+                                if (glass.isDark) Color(0xFF0B1120) else Color.White
+                            } else {
+                                glass.textSecondary
+                            }
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = date.dayOfMonth.toString(),
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                            color = if (isSelected) {
+                                if (glass.isDark) Color(0xFF0B1120) else Color.White
+                            } else {
+                                glass.textPrimary
+                            }
                         )
                     }
                 }
             }
         }
-
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
 
         SelectedDayAgendaSection(
             selectedDate = selectedDate,
@@ -1058,6 +1106,7 @@ fun DayCalendarView(
     onApproveTask: (String) -> Unit,
     onAddNewTask: () -> Unit = {}
 ) {
+    val glass = LocalSoftGlassColors.current
     val dayTasks = remember(tasks, selectedDate) {
         tasks.filter { it.dateEpochDay == selectedDate.toEpochDay() }
             .sortedBy { TimeFormatUtils.toMinutesSinceMidnight(it.dueTimeFormatted) }
@@ -1095,7 +1144,7 @@ fun DayCalendarView(
                 text = dayTitle,
                 style = MaterialTheme.typography.titleMedium.copy(
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = glass.textPrimary
                 ),
                 modifier = Modifier.weight(1f)
             )
@@ -1105,8 +1154,8 @@ fun DayCalendarView(
                     onClick = onAddNewTask,
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
+                        containerColor = glass.primaryAccent,
+                        contentColor = if (glass.isDark) Color(0xFF0B1120) else Color.White
                     ),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                     modifier = Modifier
@@ -1141,7 +1190,7 @@ fun DayCalendarView(
                         text = if (isHebrew) "🏫 מערכת שעות היום" else "🏫 School Schedule Today",
                         style = MaterialTheme.typography.labelLarge.copy(
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
+                            color = glass.primaryAccent
                         )
                     )
                 }
@@ -1151,9 +1200,9 @@ fun DayCalendarView(
                     val start24 = TimeFormatUtils.normalize24HourString(period.startTime, "08:00")
                     val end24 = TimeFormatUtils.normalize24HourString(period.endTime, "08:45")
                     Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = SoftLavenderLight,
-                        border = BorderStroke(1.dp, SoftLavenderBorder),
+                        shape = RoundedCornerShape(16.dp),
+                        color = glass.cardTintedBlueBackground,
+                        border = BorderStroke(1.dp, glass.cardBorder),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
@@ -1168,11 +1217,14 @@ fun DayCalendarView(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = "${period.subjectName} ($start24 - $end24)",
-                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = glass.textPrimary
+                                    )
                                 )
                                 Text(
                                     text = "${kid?.name ?: ""} • ${period.roomNumber} • ${period.teacherName}",
-                                    style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    style = MaterialTheme.typography.bodySmall.copy(color = glass.textSecondary)
                                 )
                             }
                         }
@@ -1189,7 +1241,7 @@ fun DayCalendarView(
                     text = if (isHebrew) "📋 משימות מתוזמנות (לפי שעה)" else "📋 Scheduled Tasks (by time)",
                     style = MaterialTheme.typography.labelLarge.copy(
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
+                        color = glass.primaryAccent
                     )
                 )
             }
@@ -1197,9 +1249,9 @@ fun DayCalendarView(
             if (dayTasks.isEmpty()) {
                 item {
                     Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+                        shape = RoundedCornerShape(16.dp),
+                        color = glass.cardBackground,
+                        border = BorderStroke(1.dp, glass.cardBorder),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Box(
@@ -1208,7 +1260,7 @@ fun DayCalendarView(
                         ) {
                             Text(
                                 text = if (isHebrew) "אין משימות מתוזמנות לתאריך זה" else "No tasks scheduled for this date",
-                                style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                style = MaterialTheme.typography.bodySmall.copy(color = glass.textSecondary)
                             )
                         }
                     }

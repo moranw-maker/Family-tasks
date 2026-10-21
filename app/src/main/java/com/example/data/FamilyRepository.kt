@@ -87,6 +87,7 @@ class FamilyRepository(
         val appCtx = ctx.applicationContext ?: ctx
         val wasNull = dynamicAppContext == null && context == null
         dynamicAppContext = appCtx
+        loadUiPreferences(appCtx)
         if (wasNull && _familyAlarms.value.isNotEmpty()) {
             resyncAlarmsForActiveMember()
         }
@@ -154,6 +155,11 @@ class FamilyRepository(
         }
 
         private const val FILE_MANAGER_PREFS = "family_tasks_file_manager_prefs"
+        private const val UI_PREFS_NAME = "family_tasks_ui_prefs"
+        private const val KEY_THEME_MODE = "pref_theme_mode"
+        private const val KEY_TEXT_SCALE = "pref_text_scale"
+        private const val KEY_APP_LANGUAGE = "pref_app_language"
+        private const val KEY_FIRST_DAY_OF_WEEK = "pref_first_day_of_week"
         private val persistedSelectedFolderByFamily = ConcurrentHashMap<String, String?>()
         private val persistedFoldersByFamily = ConcurrentHashMap<String, List<DocumentFolder>>()
         private val persistedDocumentsByFamily = ConcurrentHashMap<String, List<FamilyDocument>>()
@@ -359,12 +365,15 @@ class FamilyRepository(
     private val _autoSyncDrive = MutableStateFlow(true)
     val autoSyncDrive: StateFlow<Boolean> = _autoSyncDrive.asStateFlow()
 
-    // 4. App Preferences (RTL, Theme, First Day of Week, Views)
+    // 4. App Preferences (RTL, Theme, Text Scale, First Day of Week, Views)
     private val _appLanguage = MutableStateFlow(AppLanguage.HEBREW)
     val appLanguage: StateFlow<AppLanguage> = _appLanguage.asStateFlow()
 
     private val _themeMode = MutableStateFlow(AppThemeMode.SYSTEM)
     val themeMode: StateFlow<AppThemeMode> = _themeMode.asStateFlow()
+
+    private val _appTextScale = MutableStateFlow(AppTextScale.NORMAL)
+    val appTextScale: StateFlow<AppTextScale> = _appTextScale.asStateFlow()
 
     private val _firstDayOfWeek = MutableStateFlow(FirstDayOfWeek.SUNDAY)
     val firstDayOfWeek: StateFlow<FirstDayOfWeek> = _firstDayOfWeek.asStateFlow()
@@ -7429,16 +7438,56 @@ class FamilyRepository(
 
     // --- Settings & Preferences ---
 
+    init {
+        context?.let { loadUiPreferences(it.applicationContext ?: it) }
+    }
+
+    private fun loadUiPreferences(ctx: Context) {
+        runCatching {
+            val prefs = ctx.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.getString(KEY_THEME_MODE, null)?.let { raw ->
+                runCatching { AppThemeMode.valueOf(raw) }.getOrNull()?.let { _themeMode.value = it }
+            }
+            prefs.getString(KEY_TEXT_SCALE, null)?.let { raw ->
+                runCatching { AppTextScale.valueOf(raw) }.getOrNull()?.let { _appTextScale.value = it }
+            }
+            prefs.getString(KEY_APP_LANGUAGE, null)?.let { raw ->
+                runCatching { AppLanguage.valueOf(raw) }.getOrNull()?.let { _appLanguage.value = it }
+            }
+            prefs.getString(KEY_FIRST_DAY_OF_WEEK, null)?.let { raw ->
+                runCatching { FirstDayOfWeek.valueOf(raw) }.getOrNull()?.let { _firstDayOfWeek.value = it }
+            }
+        }
+    }
+
+    private fun saveUiPreference(key: String, value: String) {
+        val ctx = appContext ?: return
+        runCatching {
+            ctx.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(key, value)
+                .apply()
+        }
+    }
+
     fun setLanguage(lang: AppLanguage) {
         _appLanguage.value = lang
+        saveUiPreference(KEY_APP_LANGUAGE, lang.name)
     }
 
     fun setThemeMode(mode: AppThemeMode) {
         _themeMode.value = mode
+        saveUiPreference(KEY_THEME_MODE, mode.name)
+    }
+
+    fun setAppTextScale(scale: AppTextScale) {
+        _appTextScale.value = scale
+        saveUiPreference(KEY_TEXT_SCALE, scale.name)
     }
 
     fun setFirstDayOfWeek(day: FirstDayOfWeek) {
         _firstDayOfWeek.value = day
+        saveUiPreference(KEY_FIRST_DAY_OF_WEEK, day.name)
     }
 
     fun setTimetableViewMode(mode: TimetableViewMode) {

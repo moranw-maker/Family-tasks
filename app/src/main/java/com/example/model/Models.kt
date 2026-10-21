@@ -20,9 +20,23 @@ enum class AppLanguage(val code: String, val displayName: String, val isRtl: Boo
 }
 
 enum class AppThemeMode(val labelHe: String, val labelEn: String) {
-    SYSTEM("מערכת", "System"),
+    SYSTEM("לפי הגדרות המכשיר", "System"),
     LIGHT("בהיר", "Light"),
     DARK("כהה", "Dark");
+
+    fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
+}
+
+enum class AppTextScale(
+    val scaleFactor: Float,
+    val labelHe: String,
+    val labelEn: String
+) {
+    SMALL(0.90f, "קטן", "Small"),
+    NORMAL(1.00f, "רגיל", "Normal"),
+    LARGE(1.12f, "גדול", "Large"),
+    EXTRA_LARGE(1.24f, "גדול מאוד", "Extra Large"),
+    HUGE(1.36f, "ענק", "Huge");
 
     fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
 }
@@ -586,6 +600,18 @@ enum class SchoolDay(
     companion object {
         val schoolDays: List<SchoolDay> = listOf(SUNDAY, MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY)
         val allWeekDays: List<SchoolDay> = listOf(SUNDAY, MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY)
+
+        fun fromJavaDayOfWeek(dayOfWeek: java.time.DayOfWeek): SchoolDay? {
+            return when (dayOfWeek) {
+                java.time.DayOfWeek.SUNDAY -> SUNDAY
+                java.time.DayOfWeek.MONDAY -> MONDAY
+                java.time.DayOfWeek.TUESDAY -> TUESDAY
+                java.time.DayOfWeek.WEDNESDAY -> WEDNESDAY
+                java.time.DayOfWeek.THURSDAY -> THURSDAY
+                java.time.DayOfWeek.FRIDAY -> FRIDAY
+                java.time.DayOfWeek.SATURDAY -> null
+            }
+        }
     }
 }
 
@@ -926,6 +952,9 @@ data class FamilyAlarm(
         get() = String.format(java.util.Locale.US, "%02d:%02d", hour.coerceIn(0, 23), minute.coerceIn(0, 59))
 
     val formattedTime24h: String
+        get() = timeFormatted
+
+    val formattedTime24: String
         get() = timeFormatted
 
     val isConfirmedOnTargetDevice: Boolean

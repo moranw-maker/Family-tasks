@@ -1,6 +1,6 @@
 package com.example.ui.components
 
-import androidx.compose.animation.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -40,11 +40,13 @@ fun TopFamilyBar(
     onOpenSettings: () -> Unit
 ) {
     val isHebrew = currentLanguage == AppLanguage.HEBREW
+    val glass = LocalSoftGlassColors.current
 
     Surface(
-        color = Color.White,
+        color = glass.cardBackground,
         tonalElevation = 2.dp,
         shadowElevation = 2.dp,
+        border = BorderStroke(0.5.dp, glass.cardBorder),
         modifier = Modifier.fillMaxWidth()
     ) {
         CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
@@ -56,7 +58,7 @@ fun TopFamilyBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // 1. Left: Profile Avatar with Status Ring (matches reference Image 1)
+                // 1. Profile Avatar with Soft Glass Status Ring
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -65,8 +67,8 @@ fun TopFamilyBar(
                         modifier = Modifier
                             .size(40.dp)
                             .clip(CircleShape)
-                            .background(Color(currentMember.colorHex).copy(alpha = 0.2f))
-                            .border(2.dp, VibrantActionBlue.copy(alpha = 0.6f), CircleShape)
+                            .background(Color(currentMember.colorHex).copy(alpha = if (glass.isDark) 0.28f else 0.18f))
+                            .border(1.5.dp, glass.primaryAccent.copy(alpha = 0.7f), CircleShape)
                             .clickable { onOpenProfile() }
                             .testTag("user_profile_avatar_button"),
                         contentAlignment = Alignment.Center
@@ -78,19 +80,22 @@ fun TopFamilyBar(
                     }
                 }
 
-                // 2. Center: Brand House Icon & "FamilyTasks" Logo (matches reference)
+                // 2. Center: Brand House Icon & "FamilyTasks" Logo
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.clickable { onOpenProfile() }
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onOpenProfile() }
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Surface(
                         shape = RoundedCornerShape(10.dp),
-                        color = GoogleBlueLight,
+                        color = glass.primaryAccentSoftBg,
                         modifier = Modifier.size(32.dp)
                     ) {
                         Box(contentAlignment = Alignment.Center) {
-                            Text(text = "🏡", fontSize = 18.sp)
+                            Text(text = "🏡", fontSize = 17.sp)
                         }
                     }
 
@@ -99,15 +104,14 @@ fun TopFamilyBar(
                             text = "FamilyTasks",
                             style = MaterialTheme.typography.titleMedium.copy(
                                 fontWeight = FontWeight.ExtraBold,
-                                color = Color(0xFF1E293B),
+                                color = glass.textPrimary,
                                 letterSpacing = 0.2.sp
                             )
                         )
                         Text(
                             text = familyTitle,
                             style = MaterialTheme.typography.labelSmall.copy(
-                                color = TextSecondary,
-                                fontSize = 10.sp,
+                                color = glass.textSecondary,
                                 fontWeight = FontWeight.Medium
                             ),
                             maxLines = 1,
@@ -116,15 +120,14 @@ fun TopFamilyBar(
                     }
                 }
 
-                // 3. Right: Actions (Language Pill, Gemini AI, Notification Bell with red badge)
+                // 3. Actions (Language Pill, Gemini AI, Notification Bell, Settings)
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    // Language quick toggle
                     Surface(
                         shape = RoundedCornerShape(12.dp),
-                        color = Color(0xFFF1F5F9),
+                        color = glass.primaryAccentSoftBg,
                         modifier = Modifier
                             .clip(RoundedCornerShape(12.dp))
                             .clickable { onLanguageToggle() }
@@ -134,14 +137,12 @@ fun TopFamilyBar(
                             text = if (isHebrew) "עב" else "EN",
                             style = MaterialTheme.typography.labelSmall.copy(
                                 fontWeight = FontWeight.Bold,
-                                color = VibrantActionBlue,
-                                fontSize = 11.sp
+                                color = glass.primaryAccent
                             ),
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
                         )
                     }
 
-                    // Gemini AI button
                     IconButton(
                         onClick = onOpenGemini,
                         modifier = Modifier
@@ -151,12 +152,11 @@ fun TopFamilyBar(
                         Icon(
                             imageVector = Icons.Default.AutoAwesome,
                             contentDescription = "Gemini AI",
-                            tint = VibrantActionBlue,
+                            tint = glass.primaryAccent,
                             modifier = Modifier.size(20.dp)
                         )
                     }
 
-                    // Notification Bell with Red Badge (matches Image 1 Right phone)
                     IconButton(
                         onClick = onOpenNotifications,
                         modifier = Modifier
@@ -182,13 +182,12 @@ fun TopFamilyBar(
                             Icon(
                                 imageVector = Icons.Default.Notifications,
                                 contentDescription = if (isHebrew) "התראות" else "Notifications",
-                                tint = VibrantActionBlue,
-                                modifier = Modifier.size(22.dp)
+                                tint = glass.primaryAccent,
+                                modifier = Modifier.size(21.dp)
                             )
                         }
                     }
 
-                    // Settings icon button
                     IconButton(
                         onClick = onOpenSettings,
                         modifier = Modifier
@@ -198,7 +197,7 @@ fun TopFamilyBar(
                         Icon(
                             imageVector = Icons.Default.Settings,
                             contentDescription = if (isHebrew) "הגדרות" else "Settings",
-                            tint = TextSecondary,
+                            tint = glass.textSecondary,
                             modifier = Modifier.size(20.dp)
                         )
                     }

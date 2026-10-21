@@ -27,7 +27,35 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.*
+import com.example.ui.components.FamilyEmptyState
 import com.example.ui.theme.*
+import java.time.LocalDate
+import kotlin.math.abs
+
+private fun resolveSubjectAccentColor(subjectName: String, fallbackHex: Long, isDark: Boolean): Color {
+    val paletteLight = listOf(
+        Color(0xFF2563EB),
+        Color(0xFF0D9488),
+        Color(0xFF7C3AED),
+        Color(0xFFD97706),
+        Color(0xFF16A34A),
+        Color(0xFFDB2777),
+        Color(0xFF4F46E5)
+    )
+    val paletteDark = listOf(
+        Color(0xFF60A5FA),
+        Color(0xFF2DD4BF),
+        Color(0xFFA78BFA),
+        Color(0xFFFBBF24),
+        Color(0xFF4ADE80),
+        Color(0xFFF472B6),
+        Color(0xFF818CF8)
+    )
+    val palette = if (isDark) paletteDark else paletteLight
+    if (subjectName.isBlank()) return Color(fallbackHex)
+    val index = abs(subjectName.trim().hashCode()) % palette.size
+    return palette[index]
+}
 
 @Composable
 fun TimetableScreen(
@@ -44,8 +72,14 @@ fun TimetableScreen(
     onDeletePeriod: (String) -> Unit,
     onTestAlert: (SchedulePeriod, String) -> Unit
 ) {
+    val glass = LocalSoftGlassColors.current
     val kids = members.filter { it.role == UserRole.CHILD }
-    var selectedDay by remember { mutableStateOf(SchoolDay.SUNDAY) }
+
+    // Auto-select current school day (Sun-Fri) if today is a school day; otherwise default to Sunday
+    val defaultSchoolDay = remember {
+        SchoolDay.fromJavaDayOfWeek(LocalDate.now().dayOfWeek) ?: SchoolDay.SUNDAY
+    }
+    var selectedDay by remember { mutableStateOf(defaultSchoolDay) }
 
     val activeKid = members.find { it.id == selectedChildId } ?: kids.firstOrNull() ?: members.first()
     val kidPeriods = periods.filter { it.childId == activeKid.id }
@@ -54,28 +88,30 @@ fun TimetableScreen(
         .sortedBy { it.periodIndex }
 
     Scaffold(
+        containerColor = glass.screenBackground,
         floatingActionButton = {
             if (currentMember.isParent) {
                 Surface(
                     onClick = onAddPeriod,
-                    shape = RoundedCornerShape(24.dp),
-                    color = VibrantActionBlue,
-                    contentColor = Color.White,
+                    shape = RoundedCornerShape(22.dp),
+                    color = glass.primaryAccent,
+                    contentColor = if (glass.isDark) Color(0xFF0B1120) else Color.White,
                     shadowElevation = 4.dp,
                     modifier = Modifier
-                        .height(46.dp)
+                        .height(48.dp)
                         .testTag("add_period_fab")
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp),
+                        modifier = Modifier.padding(horizontal = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                         Text(
                             text = if (isHebrew) "הוסף שיעור" else "Add Period",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 12.sp
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontWeight = FontWeight.Bold
+                            )
                         )
                     }
                 }
@@ -89,15 +125,15 @@ fun TimetableScreen(
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
-                            Color(0xFFEBF3FE),
-                            Color(0xFFF7F9FD),
-                            Color.White
+                            glass.screenGradientTop,
+                            glass.screenBackground,
+                            glass.screenGradientBottom
                         )
                     )
                 )
         ) {
             // Quick Screen Help Guide
-            Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)) {
+            Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
                 com.example.ui.components.ScreenHelpBanner(
                     title = if (isHebrew) "מערכת שעות בית ספרית (א׳-ו׳)" else "School Timetable (Sun-Fri)",
                     tips = if (isHebrew) listOf(
@@ -123,7 +159,8 @@ fun TimetableScreen(
             ) {
                 Surface(
                     shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant
+                    color = glass.cardBackground,
+                    border = BorderStroke(1.dp, glass.cardBorder)
                 ) {
                     Row(modifier = Modifier.padding(3.dp)) {
                         TimetableViewPill(
@@ -142,15 +179,16 @@ fun TimetableScreen(
                 if (currentMember.isAdmin) {
                     Surface(
                         shape = RoundedCornerShape(12.dp),
-                        color = GoogleBlueLight
+                        color = glass.primaryAccentSoftBg,
+                        border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.3f))
                     ) {
                         Text(
                             text = if (isHebrew) "עריכת הורה ✏️" else "Parent Edit ✏️",
                             style = MaterialTheme.typography.labelSmall.copy(
-                                color = GoogleBlueDark,
+                                color = glass.primaryAccent,
                                 fontWeight = FontWeight.Bold
                             ),
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                         )
                     }
                 }
@@ -168,7 +206,11 @@ fun TimetableScreen(
                     val isSelected = kid.id == activeKid.id
                     Surface(
                         shape = RoundedCornerShape(18.dp),
-                        color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.surfaceVariant,
+                        color = if (isSelected) glass.primaryAccent else glass.cardBackground,
+                        border = BorderStroke(
+                            1.dp,
+                            if (isSelected) glass.primaryAccent else glass.cardBorder
+                        ),
                         modifier = Modifier
                             .clip(RoundedCornerShape(18.dp))
                             .clickable { onSelectChild(kid.id) }
@@ -184,7 +226,11 @@ fun TimetableScreen(
                                 text = kid.name + (if (kid.schoolGrade != null) " (${kid.schoolGrade})" else ""),
                                 style = MaterialTheme.typography.labelMedium.copy(
                                     fontWeight = FontWeight.Bold,
-                                    color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = if (isSelected) {
+                                        if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                    } else {
+                                        glass.textPrimary
+                                    }
                                 )
                             )
                         }
@@ -205,7 +251,7 @@ fun TimetableScreen(
                     onTestAlert = onTestAlert
                 )
             } else {
-                // Days of the Week Tabs (Sunday through Friday)
+                // School Days of the Week Selector (Strictly Sunday through Friday: א׳ | ב׳ | ג׳ | ד׳ | ה׳ | ו׳)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -217,11 +263,14 @@ fun TimetableScreen(
                         val dayPeriodsCount = kidPeriods.count { it.day == day }
                         Surface(
                             shape = RoundedCornerShape(14.dp),
-                            color = if (isDaySelected) GoogleBlueLight else MaterialTheme.colorScheme.surface,
-                            border = if (isDaySelected) BorderStroke(1.5.dp, GoogleBlue) else BorderStroke(0.5.dp, OutlineLight),
+                            color = if (isDaySelected) glass.primaryAccentSoftBg else glass.cardBackground,
+                            border = BorderStroke(
+                                if (isDaySelected) 1.5.dp else 1.dp,
+                                if (isDaySelected) glass.primaryAccent else glass.cardBorder
+                            ),
                             modifier = Modifier
                                 .weight(1f)
-                                .padding(2.dp)
+                                .padding(horizontal = 2.dp)
                                 .clip(RoundedCornerShape(14.dp))
                                 .clickable { selectedDay = day }
                                 .testTag("day_tab_${day.name}")
@@ -234,7 +283,7 @@ fun TimetableScreen(
                                     text = if (isHebrew) day.shortHe else day.getDisplayName(false).take(3),
                                     style = MaterialTheme.typography.labelSmall.copy(
                                         fontWeight = if (isDaySelected) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (isDaySelected) GoogleBlueDark else MaterialTheme.colorScheme.onSurfaceVariant
+                                        color = if (isDaySelected) glass.primaryAccent else glass.textSecondary
                                     ),
                                     maxLines = 1
                                 )
@@ -244,7 +293,7 @@ fun TimetableScreen(
                                         text = "$dayPeriodsCount",
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = if (isDaySelected) GoogleBlueDark else MaterialTheme.colorScheme.primary
+                                        color = glass.primaryAccent
                                     )
                                 }
                             }
@@ -258,29 +307,25 @@ fun TimetableScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(32.dp),
+                            .padding(24.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(text = "🎒", fontSize = 48.sp)
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text(
-                                text = if (isHebrew)
-                                    "אין שיעורים במערכת ליום ${selectedDay.getDisplayName(isHebrew)}"
-                                else
-                                    "No periods on ${selectedDay.getDisplayName(isHebrew)}",
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
-                            )
-                            if (currentMember.isParent) {
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Text(
-                                    text = if (isHebrew) "לחצו על + למטה להוספת שיעור" else "Tap + below to add a period",
-                                    style = MaterialTheme.typography.bodySmall.copy(
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                )
-                            }
-                        }
+                        FamilyEmptyState(
+                            emoji = "🎒",
+                            title = if (isHebrew)
+                                "אין שיעורים במערכת ליום ${selectedDay.getDisplayName(isHebrew)}"
+                            else
+                                "No periods on ${selectedDay.getDisplayName(isHebrew)}",
+                            subtitle = if (currentMember.isParent) {
+                                if (isHebrew) "לחצו על + למטה להוספת שיעור" else "Tap + below to add a period"
+                            } else {
+                                if (isHebrew) "יום חופשי משיעורים במערכת" else "No classes scheduled for this day"
+                            },
+                            actionLabel = if (currentMember.isParent) {
+                                if (isHebrew) "+ הוסף שיעור" else "+ Add Period"
+                            } else null,
+                            onActionClick = if (currentMember.isParent) onAddPeriod else null
+                        )
                     }
                 } else {
                     LazyColumn(
@@ -312,18 +357,23 @@ fun TimetableViewPill(
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
+    val glass = LocalSoftGlassColors.current
     Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = if (isSelected) GoogleBlue else Color.Transparent,
+        shape = RoundedCornerShape(13.dp),
+        color = if (isSelected) glass.primaryAccent else Color.Transparent,
         modifier = Modifier
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(13.dp))
             .clickable { onClick() }
     ) {
         Text(
             text = title,
             style = MaterialTheme.typography.labelSmall.copy(
                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                color = if (isSelected) {
+                    if (glass.isDark) Color(0xFF0B1120) else Color.White
+                } else {
+                    glass.textSecondary
+                }
             ),
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
         )
@@ -340,6 +390,7 @@ fun WeeklyTimetableTableView(
     onDeletePeriod: (String) -> Unit,
     onTestAlert: (SchedulePeriod, String) -> Unit
 ) {
+    val glass = LocalSoftGlassColors.current
     val schoolDays = SchoolDay.schoolDays
     val maxPeriod = maxOf(6, kidPeriods.maxOfOrNull { it.periodIndex } ?: 6)
     val periodIndices = (1..maxPeriod).toList()
@@ -352,16 +403,19 @@ fun WeeklyTimetableTableView(
     ) {
         Text(
             text = if (isHebrew) "לוח שעות שבועי (א׳-ו׳) - $childName" else "Weekly Timetable (Sun-Fri) - $childName",
-            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold, color = GoogleBlue)
+            style = MaterialTheme.typography.titleSmall.copy(
+                fontWeight = FontWeight.Bold,
+                color = glass.primaryAccent
+            )
         )
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Horizontally scrollable table matrix
         Surface(
-            shape = RoundedCornerShape(18.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 3.dp,
-            border = BorderStroke(1.dp, OutlineLight),
+            shape = RoundedCornerShape(20.dp),
+            color = glass.cardBackground,
+            tonalElevation = 2.dp,
+            shadowElevation = 2.dp,
+            border = BorderStroke(1.dp, glass.cardBorder),
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
@@ -372,7 +426,7 @@ fun WeeklyTimetableTableView(
                     .padding(8.dp)
                     .horizontalScroll(horizontalScrollState)
             ) {
-                // Header Row (Days of the week)
+                // Header Row (Days of the week: Sun-Fri)
                 Row(modifier = Modifier.padding(vertical = 6.dp)) {
                     Box(
                         modifier = Modifier
@@ -382,23 +436,26 @@ fun WeeklyTimetableTableView(
                     ) {
                         Text(
                             text = if (isHebrew) "שעה" else "#",
-                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = glass.textSecondary
+                            )
                         )
                     }
 
                     schoolDays.forEach { day ->
                         Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = GoogleBlueLight,
+                            shape = RoundedCornerShape(10.dp),
+                            color = glass.primaryAccentSoftBg,
                             modifier = Modifier
-                                .width(110.dp)
+                                .width(112.dp)
                                 .padding(horizontal = 2.dp)
                         ) {
                             Text(
                                 text = day.getDisplayName(isHebrew),
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     fontWeight = FontWeight.Bold,
-                                    color = GoogleBlueDark
+                                    color = glass.primaryAccent
                                 ),
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier.padding(vertical = 6.dp)
@@ -407,9 +464,8 @@ fun WeeklyTimetableTableView(
                     }
                 }
 
-                HorizontalDivider(color = OutlineLight.copy(alpha = 0.5f))
+                HorizontalDivider(color = glass.divider)
 
-                // Rows for Period 1 to maxPeriod
                 LazyColumn(
                     modifier = Modifier.fillMaxSize()
                 ) {
@@ -418,7 +474,6 @@ fun WeeklyTimetableTableView(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.padding(vertical = 4.dp)
                         ) {
-                            // Period Index column
                             Box(
                                 modifier = Modifier
                                     .width(44.dp)
@@ -429,35 +484,39 @@ fun WeeklyTimetableTableView(
                                     text = "$periodIndex",
                                     style = MaterialTheme.typography.titleSmall.copy(
                                         fontWeight = FontWeight.Bold,
-                                        color = GoogleBlue
+                                        color = glass.primaryAccent
                                     )
                                 )
                             }
 
-                            // Day cells
                             schoolDays.forEach { day ->
                                 val period = kidPeriods.find { it.day == day && it.periodIndex == periodIndex }
 
                                 Box(
                                     modifier = Modifier
-                                        .width(110.dp)
-                                        .height(72.dp)
+                                        .width(112.dp)
+                                        .height(74.dp)
                                         .padding(2.dp)
                                 ) {
                                     if (period != null) {
+                                        val subjectAccent = resolveSubjectAccentColor(
+                                            period.subjectName,
+                                            period.colorHex,
+                                            glass.isDark
+                                        )
                                         Surface(
-                                            shape = RoundedCornerShape(10.dp),
-                                            color = Color(period.colorHex).copy(alpha = 0.15f),
-                                            border = BorderStroke(1.dp, Color(period.colorHex).copy(alpha = 0.4f)),
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = subjectAccent.copy(alpha = if (glass.isDark) 0.18f else 0.12f),
+                                            border = BorderStroke(1.dp, subjectAccent.copy(alpha = 0.45f)),
                                             modifier = Modifier
                                                 .fillMaxSize()
-                                                .clip(RoundedCornerShape(10.dp))
+                                                .clip(RoundedCornerShape(12.dp))
                                                 .clickable {
                                                     if (isAdmin) onEditPeriod(period)
                                                 }
                                         ) {
                                             Column(
-                                                modifier = Modifier.padding(4.dp),
+                                                modifier = Modifier.padding(6.dp),
                                                 verticalArrangement = Arrangement.SpaceBetween
                                             ) {
                                                 Row(
@@ -469,7 +528,7 @@ fun WeeklyTimetableTableView(
                                                         text = period.subjectName,
                                                         style = MaterialTheme.typography.labelSmall.copy(
                                                             fontWeight = FontWeight.Bold,
-                                                            color = Color(period.colorHex)
+                                                            color = subjectAccent
                                                         ),
                                                         maxLines = 1,
                                                         overflow = TextOverflow.Ellipsis,
@@ -479,7 +538,7 @@ fun WeeklyTimetableTableView(
                                                         Icon(
                                                             imageVector = Icons.Default.Edit,
                                                             contentDescription = "Edit",
-                                                            tint = Color(period.colorHex),
+                                                            tint = subjectAccent,
                                                             modifier = Modifier.size(12.dp)
                                                         )
                                                     }
@@ -489,7 +548,7 @@ fun WeeklyTimetableTableView(
                                                     text = "${period.startTime}-${period.endTime}",
                                                     style = MaterialTheme.typography.labelSmall.copy(
                                                         fontSize = 8.5.sp,
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                        color = glass.textSecondary
                                                     )
                                                 )
 
@@ -498,7 +557,7 @@ fun WeeklyTimetableTableView(
                                                         text = period.roomNumber,
                                                         style = MaterialTheme.typography.labelSmall.copy(
                                                             fontSize = 8.sp,
-                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                            color = glass.textMuted
                                                         ),
                                                         maxLines = 1,
                                                         overflow = TextOverflow.Ellipsis
@@ -508,8 +567,9 @@ fun WeeklyTimetableTableView(
                                         }
                                     } else {
                                         Surface(
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = glass.screenBackground.copy(alpha = 0.6f),
+                                            border = BorderStroke(0.5.dp, glass.cardBorder.copy(alpha = 0.5f)),
                                             modifier = Modifier.fillMaxSize()
                                         ) {}
                                     }
@@ -533,10 +593,17 @@ fun PeriodCardItem(
     onDelete: () -> Unit,
     onTestAlert: () -> Unit
 ) {
+    val glass = LocalSoftGlassColors.current
+    val subjectAccent = remember(period.subjectName, period.colorHex, glass.isDark) {
+        resolveSubjectAccentColor(period.subjectName, period.colorHex, glass.isDark)
+    }
+
     Surface(
         shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 2.dp,
+        color = glass.cardBackground,
+        border = BorderStroke(1.dp, glass.cardBorder),
+        shadowElevation = 2.dp,
+        tonalElevation = 1.dp,
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
@@ -546,19 +613,19 @@ fun PeriodCardItem(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Period number circle badge
+            // Period number circle badge with subtle subject accent
             Box(
                 modifier = Modifier
                     .size(44.dp)
                     .clip(CircleShape)
-                    .background(Color(period.colorHex).copy(alpha = 0.15f)),
+                    .background(subjectAccent.copy(alpha = if (glass.isDark) 0.22f else 0.14f)),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = "${period.periodIndex}",
                     style = MaterialTheme.typography.titleMedium.copy(
                         fontWeight = FontWeight.Bold,
-                        color = Color(period.colorHex)
+                        color = subjectAccent
                     )
                 )
             }
@@ -572,21 +639,22 @@ fun PeriodCardItem(
                     Text(
                         text = period.subjectName,
                         style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            color = glass.textPrimary
                         )
                     )
 
                     Surface(
                         shape = RoundedCornerShape(10.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant
+                        color = glass.primaryAccentSoftBg
                     ) {
                         Text(
                             text = "${period.startTime} - ${period.endTime}",
                             style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                fontWeight = FontWeight.Bold,
+                                color = glass.primaryAccent
                             ),
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
                         )
                     }
                 }
@@ -595,18 +663,18 @@ fun PeriodCardItem(
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     if (period.roomNumber.isNotBlank()) {
                         Text(
                             text = "📍 " + period.roomNumber,
-                            style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            style = MaterialTheme.typography.bodySmall.copy(color = glass.textSecondary)
                         )
                     }
                     if (period.teacherName.isNotBlank()) {
                         Text(
                             text = "👤 " + period.teacherName,
-                            style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            style = MaterialTheme.typography.bodySmall.copy(color = glass.textSecondary)
                         )
                     }
                 }
@@ -626,7 +694,7 @@ fun PeriodCardItem(
                     Icon(
                         imageVector = Icons.Default.NotificationsActive,
                         contentDescription = "Test Notification",
-                        tint = GoogleBlue,
+                        tint = glass.primaryAccent,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -641,7 +709,7 @@ fun PeriodCardItem(
                         Icon(
                             imageVector = Icons.Default.Edit,
                             contentDescription = "Edit",
-                            tint = GoogleBlue,
+                            tint = glass.primaryAccent,
                             modifier = Modifier.size(18.dp)
                         )
                     }
@@ -653,7 +721,7 @@ fun PeriodCardItem(
                         Icon(
                             imageVector = Icons.Default.DeleteOutline,
                             contentDescription = "Delete",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            tint = glass.textMuted,
                             modifier = Modifier.size(18.dp)
                         )
                     }
