@@ -1745,8 +1745,10 @@ test("Family Alarm Clock Ownership & Editing Permissions: Parent-for-Child, Chil
     })
   );
 
-  // Child CANNOT modify, disable, delete, or acknowledge Parent's personal alarm -> MUST FAIL
+  // Child CANNOT read (get), modify, disable, delete, or acknowledge Parent's personal alarm -> MUST FAIL
   const childViewOfParentOwn = childDb.collection("families").doc("fam_alarms").collection("alarms").doc("alarm_parent_own");
+  await assertFails(childViewOfParentOwn.get());
+  await assertSucceeds(parentOwnAlarmRef.get());
   await assertFails(childViewOfParentOwn.update({ isEnabled: false }));
   await assertFails(
     childViewOfParentOwn.update({

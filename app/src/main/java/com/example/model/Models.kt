@@ -895,7 +895,7 @@ data class FamilyAlarm(
     val createdByMemberName: String = "",
     val createdByRole: String = "", // "PARENT" or "CHILD"
     val isPersonal: Boolean = false,
-    val soundType: String = "MELODY_ENERGETIC", // SYSTEM_ALARM, SYSTEM_NOTIFICATION, SYSTEM_RINGTONE, MELODY_CLASSIC, MELODY_GENTLE, MELODY_ENERGETIC, CUSTOM_URI
+    val soundType: String = "SYSTEM_ALARM", // SYSTEM_ALARM, SYSTEM_NOTIFICATION, SYSTEM_RINGTONE, MELODY_CLASSIC, MELODY_GENTLE, MELODY_ENERGETIC, CUSTOM_URI
     val customSoundUri: String = "",
     val customSoundTitle: String = "",
     val vibrateEnabled: Boolean = true,
@@ -953,6 +953,83 @@ data class FamilyAlarm(
     }
 
     /**
+     * Returns true if this alarm is a parent's personal alarm (created by a parent for themselves,
+     * or assigned to a parent member rather than a child).
+     * Parent personal alarms are strictly private to parents and must NEVER be visible to children.
+     */
+    fun isParentPersonalAlarm(members: List<FamilyMember> = emptyList()): Boolean {
+        val targetId = effectiveAssignedMemberId
+        val creatorIsParent = createdByRole.equals("PARENT", ignoreCase = true) ||
+            (createdByMemberId.isNotBlank() && members.find { it.id == createdByMemberId }?.isParent == true)
+        val targetMember = if (targetId.isNotBlank()) members.find { it.id == targetId } else null
+
+        if (targetMember != null && targetMember.isParent) {
+            return true
+        }
+        if (creatorIsParent) {
+            if (isPersonal) return true
+            if (targetId.isNotBlank() && createdByMemberId.isNotBlank() && targetId == createdByMemberId) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Determines whether [currentMember] is allowed to see this alarm in the Alarm Clock UI:
+     * - Parents can see their own personal alarms and all child/family alarms.
+     * - Children can NEVER see a parent's personal alarm; children only see alarms assigned to
+     *   them (or created by them for themselves, or family-wide non-personal alarms).
+     */
+    fun isVisibleToMember(
+        currentMember: FamilyMember,
+        authUid: String = "",
+        members: List<FamilyMember> = emptyList()
+    ): Boolean {
+        if (isDeleted || scheduleStatus == STATUS_DELETED) return false
+        if (currentMember.isParent) {
+            return true
+        }
+        // Child view: NEVER show a parent's personal alarm
+        if (isParentPersonalAlarm(members)) {
+            return false
+        }
+        val candidateIds = buildSet {
+            if (currentMember.id.isNotBlank()) add(currentMember.id)
+            if (authUid.isNotBlank()) add(authUid)
+        }
+        val targetId = effectiveAssignedMemberId
+        if (createdByMemberId.isNotBlank() && createdByMemberId in candidateIds) {
+            return true
+        }
+        if (targetId.isNotBlank() && targetId in candidateIds) {
+            return true
+        }
+        if (targetId.isNotBlank()) {
+            val matchedTargetMember = members.find { it.id == targetId }
+            if (matchedTargetMember != null && matchedTargetMember.id !in candidateIds) {
+                val sameChildByName = currentMember.name.isNotBlank() &&
+                    matchedTargetMember.name.trim().equals(currentMember.name.trim(), ignoreCase = true)
+                if (!sameChildByName) return false
+            }
+        }
+        if (assignedMemberName.isNotBlank() && currentMember.name.isNotBlank()) {
+            if (assignedMemberName.trim().equals(currentMember.name.trim(), ignoreCase = true)) {
+                return true
+            }
+        }
+        if (targetId.isBlank() && !isPersonal) {
+            return true
+        }
+        return isTargetedAtDeviceMember(
+            memberId = currentMember.id,
+            authUid = authUid,
+            currentMemberName = currentMember.name,
+            isChildDevice = true
+        )
+    }
+
+    /**
      * Checks whether [member] (or [authUid]) has permission to edit, enable/disable, or delete this alarm:
      * - PARENT can manage all alarms in the family (own, parent-created child alarms, and child-created alarms).
      * - CHILD can ONLY edit/enable/disable/delete alarms that the child created for themselves.
@@ -998,6 +1075,10 @@ data class FamilyAlarm(
         }
         if (candidateIds.isEmpty()) return false
         val targetId = effectiveAssignedMemberId
+
+        if (isChildDevice && isParentPersonalAlarm()) {
+            return false
+        }
 
         // 1. Direct ID or Auth UID match on target
         if (targetId.isNotBlank() && targetId in candidateIds) {

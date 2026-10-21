@@ -1859,8 +1859,127 @@ class ExampleRobolectricTest {
         activityController.pause().stop().destroy()
         com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(context, recurringAlarm.id)
     }
+
+    @Test
+    fun `test parent personal alarm privacy hidden from child and native android ringtone support`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = FamilyRepository()
+        repository.attachApplicationContext(context)
+
+        val parentMember = repository.members.value.first { it.isParent }
+        val childMember = repository.members.value.first { !it.isParent }
+
+        // 1. Parent creates a personal alarm for themselves
+        repository.switchCurrentMember(parentMember)
+        val parentPersonalAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_parent_private_test",
+            title = "פגישת בוקר להורה",
+            hour = 6,
+            minute = 15,
+            assignedMemberId = parentMember.id,
+            assignedToMemberId = parentMember.id,
+            assignedMemberName = parentMember.name,
+            createdByMemberId = parentMember.id,
+            createdByMemberName = parentMember.name,
+            createdByRole = "PARENT",
+            isPersonal = true
+        )
+        repository.addOrUpdateFamilyAlarm(parentPersonalAlarm)
+
+        // 2. Parent creates an alarm assigned to the child
+        val parentAssignedToChildAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_parent_for_child_privacy_test",
+            title = "בוקר טוב לבית הספר",
+            hour = 7,
+            minute = 0,
+            assignedMemberId = childMember.id,
+            assignedToMemberId = childMember.id,
+            assignedMemberName = childMember.name,
+            createdByMemberId = parentMember.id,
+            createdByMemberName = parentMember.name,
+            createdByRole = "PARENT",
+            isPersonal = false
+        )
+        repository.addOrUpdateFamilyAlarm(parentAssignedToChildAlarm)
+
+        assertTrue(
+            "Parent personal alarm must be recognized as a parent personal alarm",
+            parentPersonalAlarm.isParentPersonalAlarm(repository.members.value)
+        )
+        assertTrue(
+            "Parent must see their own personal alarm",
+            repository.familyAlarms.value.any { it.id == parentPersonalAlarm.id }
+        )
+        assertTrue(
+            "Parent must see the child-assigned alarm",
+            repository.familyAlarms.value.any { it.id == parentAssignedToChildAlarm.id }
+        )
+
+        // 3. Switch to Child -> Parent's personal alarm MUST be hidden, while child-assigned alarm remains visible
+        repository.switchCurrentMember(childMember)
+        assertFalse(
+            "Child MUST NOT see parent's personal alarm in familyAlarms list",
+            repository.familyAlarms.value.any { it.id == parentPersonalAlarm.id }
+        )
+        assertFalse(
+            "isVisibleToMember must return false for child viewing parent's personal alarm",
+            parentPersonalAlarm.isVisibleToMember(childMember, members = repository.members.value)
+        )
+        assertTrue(
+            "Child MUST see alarm assigned to them by parent",
+            repository.familyAlarms.value.any { it.id == parentAssignedToChildAlarm.id }
+        )
+
+        // 4. Child creates their own personal alarm -> visible to both Child and Parent
+        val childPersonalAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_child_own_privacy_test",
+            title = "חוג כדורגל",
+            hour = 16,
+            minute = 30,
+            assignedMemberId = childMember.id,
+            assignedToMemberId = childMember.id,
+            assignedMemberName = childMember.name,
+            createdByMemberId = childMember.id,
+            createdByMemberName = childMember.name,
+            createdByRole = "CHILD",
+            isPersonal = true
+        )
+        repository.addOrUpdateFamilyAlarm(childPersonalAlarm)
+        assertTrue(
+            "Child must see their own personal alarm",
+            repository.familyAlarms.value.any { it.id == childPersonalAlarm.id }
+        )
+
+        // 5. Switch back to Parent -> Parent sees their own personal alarm, child-assigned alarm, and child's own alarm
+        repository.switchCurrentMember(parentMember)
+        assertTrue(
+            "Parent must see their personal alarm again after switching back",
+            repository.familyAlarms.value.any { it.id == parentPersonalAlarm.id }
+        )
+        assertTrue(
+            "Parent must see child's personal alarm",
+            repository.familyAlarms.value.any { it.id == childPersonalAlarm.id }
+        )
+
+        // 6. Verify default FamilyAlarm soundType is SYSTEM_ALARM and native ringtone picker intent is valid
+        assertEquals(
+            "New alarms must default to native Android SYSTEM_ALARM soundType",
+            com.example.notifications.AlarmAudioController.SOUND_SYSTEM_ALARM,
+            parentPersonalAlarm.soundType
+        )
+        val pickerIntent = com.example.notifications.AlarmAudioController.createSystemRingtonePickerIntent(
+            context = context,
+            currentSoundType = com.example.notifications.AlarmAudioController.SOUND_SYSTEM_ALARM,
+            currentCustomUri = "",
+            isHebrew = true
+        )
+        assertEquals(
+            android.media.RingtoneManager.ACTION_RINGTONE_PICKER,
+            pickerIntent.action
+        )
+        assertEquals(
+            android.media.RingtoneManager.TYPE_ALARM or android.media.RingtoneManager.TYPE_RINGTONE,
+            pickerIntent.getIntExtra(android.media.RingtoneManager.EXTRA_RINGTONE_TYPE, -1)
+        )
+    }
 }
-
-
-
-

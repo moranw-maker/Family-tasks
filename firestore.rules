@@ -147,6 +147,16 @@ service cloud.firestore {
         && alarmTargetMemberId(resource.data) == request.auth.uid;
     }
 
+    function isParentPersonalAlarmRecord() {
+      let targetId = alarmTargetMemberId(resource.data);
+      let creatorId = resource.data.get('createdByMemberId', '');
+      return resource.data.get('createdByRole', '') == 'PARENT'
+        && (
+          resource.data.get('isPersonal', false) == true
+          || (targetId != '' && creatorId != '' && targetId == creatorId)
+        );
+    }
+
     // Allows the assigned child's device to update ONLY local scheduling acknowledgement fields
     // on a parent-created alarm assigned to that child, without modifying time, enabled state, sound, or recurrence.
     function isChildTargetDeviceAckOnly() {
@@ -490,7 +500,12 @@ service cloud.firestore {
       // - Child cannot edit, disable, delete, or acknowledge a parent's personal alarm.
       // -----------------------------------------------------------------------
       match /alarms/{alarmId} {
-        allow get, list: if isFamilyMember(familyId);
+        allow get: if isParent(familyId)
+          || (
+            isFamilyMember(familyId)
+            && (resource == null || !isParentPersonalAlarmRecord())
+          );
+        allow list: if isFamilyMember(familyId);
 
         allow create: if (
           isParent(familyId)

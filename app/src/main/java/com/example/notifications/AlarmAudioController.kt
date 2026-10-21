@@ -43,6 +43,12 @@ data class AlarmSoundOption(
     val isBuiltInMelody: Boolean
 )
 
+data class NativeDeviceRingtone(
+    val title: String,
+    val uriString: String,
+    val emoji: String = "🔔"
+)
+
 data class AudioPreviewState(
     val isPlaying: Boolean = false,
     val activeSoundType: String = "",
@@ -55,12 +61,12 @@ data class AudioPreviewState(
  * Central audio & vibration controller for FamilyTasks alarms.
  *
  * Handles:
- * 1. Immediate in-dialog sound & volume preview (with automatic stop on screen exit or timeout).
- * 2. Continuous foreground alarm ringing with `AudioAttributes.USAGE_ALARM`, audio focus,
- *    volume scaling, custom URI local caching, and multi-layer fallback so an alarm NEVER fails silently.
- * 3. Built-in synthesized melodies (`MELODY_ENERGETIC`, `MELODY_GENTLE`, `MELODY_CLASSIC`)
- *    rendered into standard 16-bit PCM RIFF `.wav` files played via `MediaPlayer` (`USAGE_ALARM`)
- *    and backed by streaming `AudioTrack(MODE_STREAM)` + `RingtoneManager`.
+ * 1. Native Android system alarm sounds, ringtones, and notification tones via [RingtoneManager]
+ *    and [MediaPlayer] on [AudioAttributes.USAGE_ALARM].
+ * 2. Native Android system ringtone picker ([RingtoneManager.ACTION_RINGTONE_PICKER]) and device
+ *    alarm sound discovery.
+ * 3. Immediate sound & volume preview (with automatic stop on screen exit or timeout).
+ * 4. Multi-layer fallback so an alarm NEVER fails silently on any device or test environment.
  */
 object AlarmAudioController {
 
@@ -74,45 +80,45 @@ object AlarmAudioController {
 
     val builtInSoundOptions: List<AlarmSoundOption> = listOf(
         AlarmSoundOption(
-            soundType = SOUND_MELODY_ENERGETIC,
-            titleHe = "מנגינת השכמה קצבית",
-            titleEn = "Energetic Wake-Up Melody",
-            emoji = "🎺",
-            isBuiltInMelody = true
-        ),
-        AlarmSoundOption(
-            soundType = SOUND_MELODY_GENTLE,
-            titleHe = "מנגינת בוקר עדינה",
-            titleEn = "Gentle Morning Chimes",
-            emoji = "🌅",
-            isBuiltInMelody = true
-        ),
-        AlarmSoundOption(
-            soundType = SOUND_MELODY_CLASSIC,
-            titleHe = "צפצוף שעון קלאסי",
-            titleEn = "Classic Digital Alarm",
-            emoji = "⏰",
-            isBuiltInMelody = true
-        ),
-        AlarmSoundOption(
             soundType = SOUND_SYSTEM_ALARM,
-            titleHe = "צליל שעון מעורר של המכשיר",
-            titleEn = "Device Default Alarm",
+            titleHe = "צליל שעון מעורר (ברירת מחדל)",
+            titleEn = "Default Android Alarm",
             emoji = "🔔",
+            isBuiltInMelody = false
+        ),
+        AlarmSoundOption(
+            soundType = SOUND_SYSTEM_RINGTONE,
+            titleHe = "צלצול הטלפון של המכשיר",
+            titleEn = "Device Phone Ringtone",
+            emoji = "📞",
             isBuiltInMelody = false
         ),
         AlarmSoundOption(
             soundType = SOUND_SYSTEM_NOTIFICATION,
             titleHe = "צליל התראה של המכשיר",
-            titleEn = "Device Notification Tone",
+            titleEn = "Device Notification Sound",
             emoji = "✨",
             isBuiltInMelody = false
         ),
         AlarmSoundOption(
-            soundType = SOUND_SYSTEM_RINGTONE,
-            titleHe = "צלצול טלפון של המכשיר",
-            titleEn = "Device Ringtone",
-            emoji = "📞",
+            soundType = SOUND_MELODY_ENERGETIC,
+            titleHe = "שעון מעורר קצבי (מערכת)",
+            titleEn = "Classic Wake-Up Alarm",
+            emoji = "⏰",
+            isBuiltInMelody = false
+        ),
+        AlarmSoundOption(
+            soundType = SOUND_MELODY_GENTLE,
+            titleHe = "השכמת בוקר עדינה (מערכת)",
+            titleEn = "Gentle Morning Alarm",
+            emoji = "🌅",
+            isBuiltInMelody = false
+        ),
+        AlarmSoundOption(
+            soundType = SOUND_MELODY_CLASSIC,
+            titleHe = "צלצול שעון קלאסי (מערכת)",
+            titleEn = "Standard System Alarm",
+            emoji = "🎵",
             isBuiltInMelody = false
         )
     )
@@ -141,16 +147,121 @@ object AlarmAudioController {
     val previewState: StateFlow<AudioPreviewState> = _previewState.asStateFlow()
 
     fun soundDisplayName(soundType: String, customTitle: String, isHebrew: Boolean): String {
+        if (customTitle.isNotBlank()) {
+            return "🔔 $customTitle"
+        }
         if (soundType == SOUND_CUSTOM_URI) {
-            return customTitle.ifBlank {
-                if (isHebrew) "קובץ שמע מותאם אישית 🎵" else "Custom Audio 🎵"
-            }
+            return if (isHebrew) "צליל מותאם אישית 🔔" else "Custom Alarm Sound 🔔"
         }
         val opt = builtInSoundOptions.find { it.soundType == soundType }
         if (opt != null) {
             return "${opt.emoji} ${if (isHebrew) opt.titleHe else opt.titleEn}"
         }
-        return if (isHebrew) "🔔 צליל שעון מעורר" else "🔔 System Alarm"
+        return if (isHebrew) "🔔 צליל שעון מעורר (ברירת מחדל)" else "🔔 Default Android Alarm"
+    }
+
+    /**
+     * Queries the device's native Android [RingtoneManager] for installed alarm and ringtone sounds
+     * so users can choose familiar native system tones directly.
+     */
+    fun getDeviceSystemAlarmRingtones(context: Context, maxCount: Int = 10): List<NativeDeviceRingtone> {
+        val results = mutableListOf<NativeDeviceRingtone>()
+        val seenUris = mutableSetOf<String>()
+        val appCtx = context.applicationContext ?: context
+
+        fun collectFromType(type: Int, emoji: String) {
+            runCatching {
+                val manager = RingtoneManager(appCtx).apply { setType(type) }
+                val cursor = manager.cursor ?: return@runCatching
+                cursor.use { c ->
+                    var idx = 0
+                    while (c.moveToNext() && results.size < maxCount && idx < 25) {
+                        val uri = runCatching { manager.getRingtoneUri(c.position) }.getOrNull()
+                        val title = runCatching { c.getString(RingtoneManager.TITLE_COLUMN_INDEX) }.getOrNull()
+                            ?.trim()
+                            .orEmpty()
+                        if (uri != null && title.isNotBlank()) {
+                            val uriStr = uri.toString()
+                            if (seenUris.add(uriStr)) {
+                                results.add(
+                                    NativeDeviceRingtone(
+                                        title = title,
+                                        uriString = uriStr,
+                                        emoji = emoji
+                                    )
+                                )
+                            }
+                        }
+                        idx++
+                    }
+                }
+            }
+        }
+
+        collectFromType(RingtoneManager.TYPE_ALARM, "⏰")
+        if (results.size < 4) {
+            collectFromType(RingtoneManager.TYPE_RINGTONE, "🔔")
+        }
+        return results
+    }
+
+    /**
+     * Creates an Intent to open Android's native system Ringtone Picker dialog for alarm sounds.
+     */
+    fun createSystemRingtonePickerIntent(
+        context: Context,
+        currentSoundType: String,
+        currentCustomUri: String,
+        isHebrew: Boolean
+    ): Intent {
+        val existingUri = when {
+            currentCustomUri.isNotBlank() -> runCatching { Uri.parse(currentCustomUri) }.getOrNull()
+            else -> resolveSystemToneUri(context, currentSoundType)
+        } ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+
+        return Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+            putExtra(
+                RingtoneManager.EXTRA_RINGTONE_TYPE,
+                RingtoneManager.TYPE_ALARM or RingtoneManager.TYPE_RINGTONE
+            )
+            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false)
+            putExtra(
+                RingtoneManager.EXTRA_RINGTONE_DEFAULT_URI,
+                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            )
+            putExtra(
+                RingtoneManager.EXTRA_RINGTONE_TITLE,
+                if (isHebrew) "בחירת צליל שעון מעורר" else "Select Alarm Sound"
+            )
+            if (existingUri != null) {
+                putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, existingUri)
+            }
+        }
+    }
+
+    /**
+     * Resolves the URI and human-readable title from [RingtoneManager.ACTION_RINGTONE_PICKER] result.
+     */
+    fun resolvePickedSystemRingtone(
+        context: Context,
+        resultData: Intent?,
+        isHebrew: Boolean
+    ): Pair<String, String>? {
+        val data = resultData ?: return null
+        val pickedUri: Uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            data.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI, Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            data.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+        } ?: return null
+
+        val title = runCatching {
+            RingtoneManager.getRingtone(context, pickedUri)?.getTitle(context)?.trim()
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+            ?: if (isHebrew) "צליל מערכת נבחר" else "System Alarm Sound"
+
+        return Pair(pickedUri.toString(), title)
     }
 
     /**
@@ -239,14 +350,20 @@ object AlarmAudioController {
                     isPlaying = false,
                     activeSoundType = soundType,
                     activeVolumePercent = clampedVolume,
-                    errorMessageHe = "לא נבחר קובץ שמע מותאם אישית",
-                    errorMessageEn = "No custom audio file selected"
+                    errorMessageHe = "לא נבחר צליל או קובץ שמע",
+                    errorMessageEn = "No sound or audio file selected"
                 )
                 return
             }
+            val parsedUri = Uri.parse(customSoundUri)
             val startedCustom = startMediaPlayerInternal(
                 context = appCtx,
-                uri = Uri.parse(customSoundUri),
+                uri = parsedUri,
+                volumeScalar = volumeScalar,
+                isPreview = true
+            ) || startRingtoneInternal(
+                context = appCtx,
+                uri = parsedUri,
                 volumeScalar = volumeScalar,
                 isPreview = true
             )
@@ -255,28 +372,18 @@ object AlarmAudioController {
                     isPlaying = false,
                     activeSoundType = soundType,
                     activeVolumePercent = clampedVolume,
-                    errorMessageHe = "לא ניתן לנגן את קובץ השמע שנבחר. ודאו שהקובץ תקין ונגיש.",
-                    errorMessageEn = "Unable to play selected audio file. Please choose another file."
+                    errorMessageHe = "לא ניתן לנגן את הצליל שנבחר. נסו לבחור צליל אחר.",
+                    errorMessageEn = "Unable to play selected sound. Please choose another sound."
                 )
                 return
             }
-        } else if (isBuiltInMelody(soundType)) {
-            val startedWav = startBuiltInMelodyWavMediaPlayer(
-                context = appCtx,
-                soundType = soundType,
-                volumeScalar = volumeScalar,
-                isPreview = true
-            )
-            if (!startedWav) {
-                startSynthesizedMelodyStreamingLoop(
-                    soundType = soundType,
-                    volumeScalar = volumeScalar,
-                    isPreview = true,
-                    maxDurationMillis = durationMillis
-                )
-            }
         } else {
-            val sysUri = resolveSystemToneUri(appCtx, soundType)
+            // Always prefer real native Android system alarm/ringtone sounds first
+            val sysUri = if (customSoundUri.isNotBlank()) {
+                runCatching { Uri.parse(customSoundUri) }.getOrNull()
+            } else {
+                resolveSystemToneUri(appCtx, soundType)
+            }
             val startedMedia = sysUri != null && startMediaPlayerInternal(
                 context = appCtx,
                 uri = sysUri,
@@ -286,15 +393,16 @@ object AlarmAudioController {
             if (!startedMedia) {
                 val startedRingtone = sysUri != null && startRingtoneInternal(appCtx, sysUri, volumeScalar, isPreview = true)
                 if (!startedRingtone) {
+                    val fallbackType = if (isBuiltInMelody(soundType)) soundType else SOUND_MELODY_CLASSIC
                     val startedWav = startBuiltInMelodyWavMediaPlayer(
                         context = appCtx,
-                        soundType = SOUND_MELODY_CLASSIC,
+                        soundType = fallbackType,
                         volumeScalar = volumeScalar,
                         isPreview = true
                     )
                     if (!startedWav) {
                         startSynthesizedMelodyStreamingLoop(
-                            soundType = SOUND_MELODY_CLASSIC,
+                            soundType = fallbackType,
                             volumeScalar = volumeScalar,
                             isPreview = true,
                             maxDurationMillis = durationMillis
@@ -382,10 +490,10 @@ object AlarmAudioController {
     /**
      * Starts continuous alarm playback + optional vibration for an active alarm trigger.
      * Guaranteed not to fail silently:
-     * 1. Tries requested sound (Custom URI / Built-in WAV melody via MediaPlayer / System tone via MediaPlayer or Ringtone).
-     * 2. Falls back to built-in WAV melody via MediaPlayer (`USAGE_ALARM`).
+     * 1. Tries requested custom/picked system ringtone URI via MediaPlayer or Ringtone (`USAGE_ALARM`).
+     * 2. Tries native Android system alarm / ringtone / notification URI via MediaPlayer or Ringtone (`USAGE_ALARM`).
      * 3. Falls back to default system alarm Ringtone (`USAGE_ALARM`).
-     * 4. Falls back to `AudioTrack(MODE_STREAM)` PCM streaming loop (`USAGE_ALARM`).
+     * 4. Falls back to built-in WAV / AudioTrack (`USAGE_ALARM`) if device has no media files.
      * Records the exact playback method or error in [FamilyAlarmScheduler] diagnostics.
      */
     fun startAlarmRinging(
@@ -409,40 +517,50 @@ object AlarmAudioController {
         var playbackStarted = false
         var activeMethod = ""
 
-        // 1. Custom URI if selected
-        if (soundType == SOUND_CUSTOM_URI && customSoundUri.isNotBlank()) {
-            if (startMediaPlayerInternal(appCtx, Uri.parse(customSoundUri), volumeScalar, isPreview = false)) {
-                playbackStarted = true
-                activeMethod = "MediaPlayer (Custom Audio • USAGE_ALARM)"
+        // 1. Custom or picked system ringtone URI if present
+        if (customSoundUri.isNotBlank()) {
+            val parsedUri = runCatching { Uri.parse(customSoundUri) }.getOrNull()
+            if (parsedUri != null) {
+                if (startMediaPlayerInternal(appCtx, parsedUri, volumeScalar, isPreview = false)) {
+                    playbackStarted = true
+                    activeMethod = "MediaPlayer (Picked/Custom URI • USAGE_ALARM)"
+                } else if (startRingtoneInternal(appCtx, parsedUri, volumeScalar, isPreview = false)) {
+                    playbackStarted = true
+                    activeMethod = "RingtoneManager (Picked URI • USAGE_ALARM)"
+                }
             }
         }
 
-        // 2. Built-in melody via generated RIFF WAV + MediaPlayer (USAGE_ALARM)
-        if (!playbackStarted && isBuiltInMelody(soundType)) {
-            if (startBuiltInMelodyWavMediaPlayer(appCtx, soundType, volumeScalar, isPreview = false)) {
-                playbackStarted = true
-                activeMethod = "MediaPlayer WAV ($soundType • USAGE_ALARM)"
-            }
-        }
-
-        // 3. System Alarm / Notification / Ringtone URI via MediaPlayer or Ringtone
-        if (!playbackStarted && !isBuiltInMelody(soundType)) {
+        // 2. Native Android System Alarm / Ringtone / Notification URI via MediaPlayer or Ringtone
+        if (!playbackStarted) {
             val sysUri = resolveSystemToneUri(appCtx, soundType)
                 ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
                 ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
             if (sysUri != null) {
                 if (startMediaPlayerInternal(appCtx, sysUri, volumeScalar, isPreview = false)) {
                     playbackStarted = true
-                    activeMethod = "MediaPlayer (System Tone • USAGE_ALARM)"
+                    activeMethod = "MediaPlayer (Native System Alarm • USAGE_ALARM)"
                 } else if (startRingtoneInternal(appCtx, sysUri, volumeScalar, isPreview = false)) {
                     playbackStarted = true
-                    activeMethod = "RingtoneManager (System Tone • USAGE_ALARM)"
+                    activeMethod = "RingtoneManager (Native System Alarm • USAGE_ALARM)"
                 }
             }
         }
 
-        // 4. Fallback A: Built-in WAV melody via MediaPlayer
+        // 3. Fallback A: System default alarm via RingtoneManager
+        if (!playbackStarted) {
+            val defaultAlarmUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            if (defaultAlarmUri != null && startRingtoneInternal(appCtx, defaultAlarmUri, volumeScalar, isPreview = false)) {
+                playbackStarted = true
+                activeMethod = "RingtoneManager Default Alarm (USAGE_ALARM)"
+            }
+        }
+
+        // 4. Fallback B: Built-in WAV via MediaPlayer (for headless test environments without system media)
         if (!playbackStarted) {
             val fallbackMelody = if (isBuiltInMelody(soundType)) soundType else SOUND_MELODY_ENERGETIC
             if (startBuiltInMelodyWavMediaPlayer(appCtx, fallbackMelody, volumeScalar, isPreview = false)) {
@@ -451,18 +569,7 @@ object AlarmAudioController {
             }
         }
 
-        // 5. Fallback B: System default alarm via RingtoneManager
-        if (!playbackStarted) {
-            val defaultAlarmUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-            if (defaultAlarmUri != null && startRingtoneInternal(appCtx, defaultAlarmUri, volumeScalar, isPreview = false)) {
-                playbackStarted = true
-                activeMethod = "RingtoneManager Default Alarm (USAGE_ALARM)"
-            }
-        }
-
-        // 6. Ultimate Fallback C: Streaming PCM AudioTrack (MODE_STREAM) on USAGE_ALARM
+        // 5. Ultimate Fallback C: Streaming PCM AudioTrack (MODE_STREAM) on USAGE_ALARM
         if (!playbackStarted) {
             val fallbackMelody = if (isBuiltInMelody(soundType)) soundType else SOUND_MELODY_ENERGETIC
             startSynthesizedMelodyStreamingLoop(
@@ -532,16 +639,17 @@ object AlarmAudioController {
 
     private fun resolveSystemToneUri(context: Context, soundType: String): Uri? {
         val primaryType = when (soundType) {
-            SOUND_SYSTEM_NOTIFICATION -> RingtoneManager.TYPE_NOTIFICATION
-            SOUND_SYSTEM_RINGTONE -> RingtoneManager.TYPE_RINGTONE
+            SOUND_SYSTEM_NOTIFICATION, SOUND_MELODY_GENTLE -> RingtoneManager.TYPE_NOTIFICATION
+            SOUND_SYSTEM_RINGTONE, SOUND_MELODY_CLASSIC -> RingtoneManager.TYPE_RINGTONE
             else -> RingtoneManager.TYPE_ALARM
         }
         return runCatching {
             RingtoneManager.getActualDefaultRingtoneUri(context, primaryType)
                 ?: RingtoneManager.getDefaultUri(primaryType)
+                ?: RingtoneManager.getActualDefaultRingtoneUri(context, RingtoneManager.TYPE_ALARM)
                 ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
                 ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
         }.getOrNull()
     }
 

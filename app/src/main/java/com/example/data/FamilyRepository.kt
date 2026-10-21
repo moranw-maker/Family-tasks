@@ -552,47 +552,59 @@ class FamilyRepository(
     val schedulePeriods: StateFlow<List<SchedulePeriod>> = _schedulePeriods.asStateFlow()
 
     // 7b. Shared Family Alarm Clocks (Wake-up, School Departure, Reminders)
-    private val _familyAlarms = MutableStateFlow(
-        listOf(
-            FamilyAlarm(
-                id = "alarm_wakeup",
-                title = "השכמה לבית הספר",
-                hour = 6,
-                minute = 45,
-                assignedMemberId = "",
-                assignedMemberName = "כל המשפחה",
-                daysOfWeek = listOf(
-                    SchoolDay.SUNDAY,
-                    SchoolDay.MONDAY,
-                    SchoolDay.TUESDAY,
-                    SchoolDay.WEDNESDAY,
-                    SchoolDay.THURSDAY,
-                    SchoolDay.FRIDAY
-                ),
-                isEnabled = true,
-                ringtoneEmoji = "⏰"
+    private var allFamilyAlarms: List<FamilyAlarm> = listOf(
+        FamilyAlarm(
+            id = "alarm_wakeup",
+            title = "השכמה לבית הספר",
+            hour = 6,
+            minute = 45,
+            assignedMemberId = "",
+            assignedMemberName = "כל המשפחה",
+            daysOfWeek = listOf(
+                SchoolDay.SUNDAY,
+                SchoolDay.MONDAY,
+                SchoolDay.TUESDAY,
+                SchoolDay.WEDNESDAY,
+                SchoolDay.THURSDAY,
+                SchoolDay.FRIDAY
             ),
-            FamilyAlarm(
-                id = "alarm_school_bus",
-                title = "יציאה להסעה / לבית הספר",
-                hour = 7,
-                minute = 30,
-                assignedMemberId = "",
-                assignedMemberName = "כל המשפחה",
-                daysOfWeek = listOf(
-                    SchoolDay.SUNDAY,
-                    SchoolDay.MONDAY,
-                    SchoolDay.TUESDAY,
-                    SchoolDay.WEDNESDAY,
-                    SchoolDay.THURSDAY,
-                    SchoolDay.FRIDAY
-                ),
-                isEnabled = true,
-                ringtoneEmoji = "🎒"
-            )
+            isEnabled = true,
+            ringtoneEmoji = "⏰"
+        ),
+        FamilyAlarm(
+            id = "alarm_school_bus",
+            title = "יציאה להסעה / לבית הספר",
+            hour = 7,
+            minute = 30,
+            assignedMemberId = "",
+            assignedMemberName = "כל המשפחה",
+            daysOfWeek = listOf(
+                SchoolDay.SUNDAY,
+                SchoolDay.MONDAY,
+                SchoolDay.TUESDAY,
+                SchoolDay.WEDNESDAY,
+                SchoolDay.THURSDAY,
+                SchoolDay.FRIDAY
+            ),
+            isEnabled = true,
+            ringtoneEmoji = "🎒"
         )
     )
+    private val _familyAlarms = MutableStateFlow(allFamilyAlarms)
     val familyAlarms: StateFlow<List<FamilyAlarm>> = _familyAlarms.asStateFlow()
+
+    private fun refreshVisibleFamilyAlarms() {
+        val current = _currentMember.value
+        val authUid = authProvider()?.currentUser?.uid.orEmpty()
+        val membersList = _members.value
+        _familyAlarms.value = allFamilyAlarms.filter { alarm ->
+            alarm.isVisibleToMember(
+                currentMember = current,
+                authUid = authUid,
+                members = membersList
+            )
+        }
+    }
 
     private val _deletedAlarmNotices = MutableStateFlow<List<DeletedAlarmSyncNotice>>(emptyList())
     val deletedAlarmNotices: StateFlow<List<DeletedAlarmSyncNotice>> = _deletedAlarmNotices.asStateFlow()
@@ -3717,7 +3729,8 @@ class FamilyRepository(
                         mergedAlarms
                     }
 
-                    _familyAlarms.value = syncedAlarms
+                    allFamilyAlarms = syncedAlarms
+                    refreshVisibleFamilyAlarms()
                 }
         }
     }
@@ -4219,6 +4232,8 @@ class FamilyRepository(
 
     fun switchCurrentMember(member: FamilyMember) {
         _currentMember.value = member
+        refreshVisibleFamilyAlarms()
+        resyncAlarmsForActiveMember()
     }
 
     /**
@@ -5298,6 +5313,7 @@ class FamilyRepository(
     // --- Shared Family Alarm Clock Operations (/families/{familyId}/alarms) ---
 
     fun resyncAlarmsForActiveMember() {
+        refreshVisibleFamilyAlarms()
         val ctx = appContext ?: return
         val current = _currentMember.value
         val authUid = authProvider()?.currentUser?.uid.orEmpty()
@@ -5308,7 +5324,7 @@ class FamilyRepository(
         val persistedDeleted = com.example.notifications.FamilyAlarmScheduler.getPersistedDeletedAlarmIds(ctx)
         explicitlyDeletedAlarmIds.addAll(persistedDeleted)
 
-        val currentAlarms = _familyAlarms.value.filterNot {
+        val currentAlarms = allFamilyAlarms.filterNot {
             it.id in explicitlyDeletedAlarmIds || it.isDeleted || it.scheduleStatus == FamilyAlarm.STATUS_DELETED
         }
         val localResults = com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
@@ -5345,7 +5361,8 @@ class FamilyRepository(
                 alarm
             }
         }
-        _familyAlarms.value = updatedList
+        allFamilyAlarms = updatedList
+        refreshVisibleFamilyAlarms()
     }
 
     /**
@@ -5363,7 +5380,8 @@ class FamilyRepository(
         val newlyCancelledOnDevice = mutableSetOf<String>()
 
         validIds.forEach { delId ->
-            val wasInMemory = _familyAlarms.value.any { it.id == delId } ||
+            val wasInMemory = allFamilyAlarms.any { it.id == delId } ||
+                _familyAlarms.value.any { it.id == delId } ||
                 delId in locallyManagedAlarms.keys ||
                 delId !in explicitlyDeletedAlarmIds
             val wasScheduledOrPersisted = ctx != null && (
@@ -5383,8 +5401,9 @@ class FamilyRepository(
             }
         }
 
-        if (_familyAlarms.value.any { it.id in validIds }) {
-            _familyAlarms.value = _familyAlarms.value.filterNot { it.id in validIds }
+        if (allFamilyAlarms.any { it.id in validIds } || _familyAlarms.value.any { it.id in validIds }) {
+            allFamilyAlarms = allFamilyAlarms.filterNot { it.id in validIds }
+            refreshVisibleFamilyAlarms()
         }
 
         if (newlyCancelledOnDevice.isNotEmpty() && familyId.isNotBlank()) {
@@ -5401,7 +5420,7 @@ class FamilyRepository(
         val authUid = authProvider()?.currentUser?.uid.orEmpty()
         val effectiveCallerId = authUid.ifBlank { current.id }
 
-        val existing = _familyAlarms.value.find { it.id == alarm.id }
+        val existing = allFamilyAlarms.find { it.id == alarm.id } ?: _familyAlarms.value.find { it.id == alarm.id }
         if (existing != null && !existing.canMemberModify(current, authUid)) {
             return false
         }
@@ -5499,12 +5518,13 @@ class FamilyRepository(
         locallyManagedAlarms[scheduledAlarm.id] = scheduledAlarm
         _deletedAlarmNotices.value = _deletedAlarmNotices.value.filterNot { it.alarmId == scheduledAlarm.id }
 
-        val existingIdx = _familyAlarms.value.indexOfFirst { it.id == scheduledAlarm.id }
-        _familyAlarms.value = if (existingIdx >= 0) {
-            _familyAlarms.value.map { if (it.id == scheduledAlarm.id) scheduledAlarm else it }
+        val existingIdx = allFamilyAlarms.indexOfFirst { it.id == scheduledAlarm.id }
+        allFamilyAlarms = if (existingIdx >= 0) {
+            allFamilyAlarms.map { if (it.id == scheduledAlarm.id) scheduledAlarm else it }
         } else {
-            (_familyAlarms.value + scheduledAlarm)
+            (allFamilyAlarms + scheduledAlarm)
         }.sortedWith(compareBy({ it.hour }, { it.minute }))
+        refreshVisibleFamilyAlarms()
 
         persistFamilyAlarmInFirestore(scheduledAlarm, isDelete = false)
         return true
@@ -5513,7 +5533,7 @@ class FamilyRepository(
     fun toggleFamilyAlarm(alarmId: String): Boolean {
         val current = _currentMember.value
         val authUid = authProvider()?.currentUser?.uid.orEmpty()
-        val target = _familyAlarms.value.find { it.id == alarmId } ?: return false
+        val target = allFamilyAlarms.find { it.id == alarmId } ?: _familyAlarms.value.find { it.id == alarmId } ?: return false
         if (!target.canMemberModify(current, authUid)) {
             return false
         }
@@ -5523,7 +5543,7 @@ class FamilyRepository(
     fun deleteFamilyAlarm(alarmId: String): Boolean {
         val current = _currentMember.value
         val authUid = authProvider()?.currentUser?.uid.orEmpty()
-        val target = _familyAlarms.value.find { it.id == alarmId } ?: return false
+        val target = allFamilyAlarms.find { it.id == alarmId } ?: _familyAlarms.value.find { it.id == alarmId } ?: return false
         if (!target.canMemberDelete(current, authUid)) {
             return false
         }
@@ -5531,7 +5551,8 @@ class FamilyRepository(
         locallyManagedAlarms.remove(alarmId)
         knownRemoteAlarmIds.remove(alarmId)
         appContext?.let { com.example.notifications.FamilyAlarmScheduler.markAlarmDeletedAndCancel(it, alarmId) }
-        _familyAlarms.value = _familyAlarms.value.filterNot { it.id == alarmId }
+        allFamilyAlarms = allFamilyAlarms.filterNot { it.id == alarmId }
+        refreshVisibleFamilyAlarms()
 
         val isTargetedAtThisDevice = target.isTargetedAtDeviceMember(
             memberId = current.id,
