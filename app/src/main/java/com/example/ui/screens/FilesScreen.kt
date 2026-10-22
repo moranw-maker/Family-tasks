@@ -74,6 +74,10 @@ import com.example.ui.dialogs.FilePreviewDialog
 import com.example.ui.dialogs.GoogleDrivePickerDialog
 import com.example.ui.dialogs.RenameFileDialog
 import com.example.ui.dialogs.RenameFolderDialog
+import com.example.ui.components.FamilyGlassCard
+import com.example.ui.components.FamilySectionHeader
+import com.example.ui.components.SoftGlassScreenBackground
+import com.example.ui.theme.LocalSoftGlassColors
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -392,6 +396,7 @@ fun FilesScreen(
 
     CompositionLocalProvider(LocalLayoutDirection provides layoutDir) {
         Scaffold(
+            containerColor = Color.Transparent,
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             floatingActionButton = {
                 FloatingActionButton(
@@ -416,22 +421,24 @@ fun FilesScreen(
                 }
             }
         ) { innerPadding ->
-            Column(
+            SoftGlassScreenBackground(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.background)
                     .padding(innerPadding)
             ) {
-                // --- Clean Top Header Bar ---
-                Surface(
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 1.dp,
-                    modifier = Modifier.fillMaxWidth()
+            Column(
+                modifier = Modifier.fillMaxSize()
+            ) {
+                // --- Clean Soft Glass Top Header Card ---
+                FamilyGlassCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    cornerRadius = 22.dp,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
                 ) {
                     Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -805,6 +812,7 @@ fun FilesScreen(
                     }
                 }
             }
+            }
         }
     }
 
@@ -1119,10 +1127,8 @@ fun FilesScreen(
 
 @Composable
 private fun SectionHeaderLabel(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    FamilySectionHeader(
+        title = text,
         modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
     )
 }
@@ -1482,20 +1488,17 @@ private fun FolderListRowCard(
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
-    Surface(
+    FamilyGlassCard(
         onClick = onClick,
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
-        shadowElevation = 1.dp,
+        cornerRadius = 18.dp,
+        accentColor = Color(folder.colorHex),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
         modifier = Modifier
             .fillMaxWidth()
             .testTag("folder_row_${folder.id}")
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
@@ -1580,17 +1583,16 @@ private fun FolderGridCard(
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
-    Surface(
+    FamilyGlassCard(
         onClick = onClick,
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
-        shadowElevation = 1.dp,
+        cornerRadius = 20.dp,
+        accentColor = Color(folder.colorHex),
+        contentPadding = PaddingValues(14.dp),
         modifier = Modifier
             .fillMaxWidth()
             .testTag("folder_grid_${folder.id}")
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
+        Column {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1690,14 +1692,13 @@ private fun FileListRowCard(
     val uploaderLabel = uploader?.getDisplayName(isHebrew)?.takeIf { it.isNotBlank() }
         ?: file.uploadedByName.ifBlank { if (isHebrew) "חבר משפחה" else "Family Member" }
 
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
-        shadowElevation = 1.dp,
+    FamilyGlassCard(
+        cornerRadius = 18.dp,
+        accentColor = typeColor,
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(18.dp))
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = { menuExpanded = true }
@@ -1705,9 +1706,7 @@ private fun FileListRowCard(
             .testTag("file_row_${file.id}")
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (thumbBitmap != null) {
@@ -1854,21 +1853,20 @@ private fun FileGridCard(
         }
     }
 
-    Surface(
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
-        shadowElevation = 1.dp,
+    FamilyGlassCard(
+        cornerRadius = 20.dp,
+        accentColor = typeColor,
+        contentPadding = PaddingValues(12.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(20.dp))
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = { menuExpanded = true }
             )
             .testTag("file_grid_${file.id}")
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()

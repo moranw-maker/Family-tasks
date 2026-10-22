@@ -2,7 +2,6 @@ package com.example.ui.screens
 
 import android.content.Intent
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,6 +26,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.model.*
+import com.example.ui.components.FamilyGlassCard
+import com.example.ui.components.FamilyMemberAvatar
+import com.example.ui.components.FamilyPrimaryButton
+import com.example.ui.components.FamilySecondaryButton
+import com.example.ui.components.FamilySectionHeader
+import com.example.ui.components.FamilyStatusChip
+import com.example.ui.components.SoftGlassScreenBackground
 import com.example.ui.theme.*
 
 @Composable
@@ -48,6 +54,7 @@ fun AdminDashboardScreen(
     onGenerateShareText: (name: String, role: UserRole) -> String = { _, _ -> "" },
     onFormatInvitationShareText: ((FamilyInvitation) -> String)? = null
 ) {
+    val glass = LocalSoftGlassColors.current
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
 
@@ -63,49 +70,44 @@ fun AdminDashboardScreen(
     val completedTasks = tasks.count { it.isCompleted }
     val completionRate = if (totalTasks > 0) (completedTasks * 100) / totalTasks else 0
 
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .testTag("admin_dashboard_screen"),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 110.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        // Quick Screen Help Guide
-        item {
-            com.example.ui.components.ScreenHelpBanner(
-                title = if (isHebrew)
-                    "ניהול משפחה והרשאות (${com.example.util.AppVersionManager.displayVersionLabel})"
-                else
-                    "Family & Permissions Management (${com.example.util.AppVersionManager.displayVersionLabel})",
-                tips = if (isHebrew) listOf(
-                    "שני תפקידים במשפחה: הורה (מנהל משפחה עם הרשאות מלאות) וילד/ה (צפייה וביצוע משימות אישיות).",
-                    "הזמנת חברים: צרו קוד הזמנה ייחודי לתפקיד הורה או ילד/ה ושתפו אותו ב-WhatsApp ללא צורך באתר חיצוני.",
-                    "עדכון בזמן אמת: ברגע שהמוזמן מאשר הצטרפות במכשיר שלו, הוא יופיע מיד ברשימת החברים הפעילים.",
-                    "הגנת הורה אחרון: המערכת מונעת הסרה או שנמוך של ההורה האחרון במשפחה."
-                ) else listOf(
-                    "Two Family Roles: PARENT (full management permissions) and CHILD (view & complete assigned tasks).",
-                    "Role-Specific Invitations: Generate a unique invite code for PARENT or CHILD and share via WhatsApp.",
-                    "Real-Time Member List: Newly joined members appear automatically without restarting.",
-                    "Last Parent Protection: The last remaining PARENT cannot be removed or demoted."
-                ),
-                isHebrew = isHebrew
-            )
-        }
+    SoftGlassScreenBackground(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("admin_dashboard_screen"),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 110.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Quick Screen Help Guide
+            item {
+                com.example.ui.components.ScreenHelpBanner(
+                    title = if (isHebrew)
+                        "ניהול משפחה והרשאות (${com.example.util.AppVersionManager.displayVersionLabel})"
+                    else
+                        "Family & Permissions Management (${com.example.util.AppVersionManager.displayVersionLabel})",
+                    tips = if (isHebrew) listOf(
+                        "שני תפקידים במשפחה: הורה (מנהל משפחה עם הרשאות מלאות) וילד/ה (צפייה וביצוע משימות אישיות).",
+                        "הזמנת חברים: צרו קוד הזמנה ייחודי לתפקיד הורה או ילד/ה ושתפו אותו ב-WhatsApp ללא צורך באתר חיצוני.",
+                        "עדכון בזמן אמת: ברגע שהמוזמן מאשר הצטרפות במכשיר שלו, הוא יופיע מיד ברשימת החברים הפעילים.",
+                        "הגנת הורה אחרון: המערכת מונעת הסרה או שנמוך של ההורה האחרון במשפחה."
+                    ) else listOf(
+                        "Two Family Roles: PARENT (full management permissions) and CHILD (view & complete assigned tasks).",
+                        "Role-Specific Invitations: Generate a unique invite code for PARENT or CHILD and share via WhatsApp.",
+                        "Real-Time Member List: Newly joined members appear automatically without restarting.",
+                        "Last Parent Protection: The last remaining PARENT cannot be removed or demoted."
+                    ),
+                    isHebrew = isHebrew
+                )
+            }
 
-        // 1. Family Header & Edit Name Card
-        item {
-            Surface(
-                shape = RoundedCornerShape(24.dp),
-                color = GoogleBlue,
-                contentColor = Color.White,
-                shadowElevation = 3.dp,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(18.dp)
+            // 1. Soft Glass Family Header & Stats Card
+            item {
+                FamilyGlassCard(
+                    cornerRadius = 26.dp,
+                    isTintedBlue = true,
+                    elevation = 5.dp,
+                    contentPadding = PaddingValues(18.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -114,18 +116,19 @@ fun AdminDashboardScreen(
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             Surface(
-                                shape = CircleShape,
-                                color = Color.White.copy(alpha = 0.2f),
-                                modifier = Modifier.size(46.dp)
+                                shape = RoundedCornerShape(16.dp),
+                                color = glass.primaryAccentSoftBg,
+                                border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.35f)),
+                                modifier = Modifier.size(48.dp)
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
                                     Icon(
                                         imageVector = Icons.Default.AdminPanelSettings,
                                         contentDescription = null,
-                                        tint = Color.White,
+                                        tint = glass.primaryAccent,
                                         modifier = Modifier.size(26.dp)
                                     )
                                 }
@@ -138,14 +141,15 @@ fun AdminDashboardScreen(
                                     else
                                         "Family Management • ${com.example.util.AppVersionManager.displayVersionLabel}",
                                     style = MaterialTheme.typography.labelMedium.copy(
-                                        color = Color.White.copy(alpha = 0.85f)
+                                        color = glass.primaryAccent,
+                                        fontWeight = FontWeight.Bold
                                     )
                                 )
                                 Text(
                                     text = familyName,
                                     style = MaterialTheme.typography.titleLarge.copy(
                                         fontWeight = FontWeight.ExtraBold,
-                                        color = Color.White
+                                        color = glass.textPrimary
                                     )
                                 )
                             }
@@ -155,8 +159,8 @@ fun AdminDashboardScreen(
                             FilledTonalIconButton(
                                 onClick = onEditFamilyName,
                                 colors = IconButtonDefaults.filledTonalIconButtonColors(
-                                    containerColor = Color.White.copy(alpha = 0.22f),
-                                    contentColor = Color.White
+                                    containerColor = glass.primaryAccentSoftBg,
+                                    contentColor = glass.primaryAccent
                                 ),
                                 modifier = Modifier.testTag("admin_edit_family_name_btn")
                             ) {
@@ -190,120 +194,95 @@ fun AdminDashboardScreen(
                     }
                 }
             }
-        }
 
-        // 2. Role Permissions Explanation Card (PARENT vs CHILD)
-        item {
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 2.dp,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+            // 2. Role Permissions Explanation Card (PARENT vs CHILD)
+            item {
+                FamilyGlassCard(
+                    cornerRadius = 22.dp,
+                    elevation = 2.dp,
+                    contentPadding = PaddingValues(16.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        text = if (isHebrew) "🔐 הרשאות במשפחה (2 תפקידים בלבד)" else "🔐 Family Roles (Strictly 2 Roles)",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
-                    )
-
-                    RoleBadgeExplainRow(
-                        badgeText = if (isHebrew) "הורה (PARENT)" else "PARENT",
-                        badgeColor = GoogleBlue,
-                        description = if (isHebrew)
-                            "הרשאות ניהול מלאות: יצירה, עריכה ומחיקה של משימות, הזמנת הורים או ילדים, שינוי תפקידים וניהול הגדרות."
-                        else
-                            "Full management permissions: create/edit/delete tasks, invite members, manage roles and settings."
-                    )
-
-                    RoleBadgeExplainRow(
-                        badgeText = if (isHebrew) "ילד/ה (CHILD)" else "CHILD",
-                        badgeColor = GoogleGreen,
-                        description = if (isHebrew)
-                            "צפייה במשימות המשפחה, סימון משימות אישיות כבוצע וצבירת נקודות לפרסים (ללא הרשאות ניהול או הזמנה)."
-                        else
-                            "View tasks, mark assigned tasks completed, and view rewards (cannot create/edit tasks or manage users)."
-                    )
-                }
-            }
-        }
-
-        // 3. Active Members Header + Invite Button (PARENT only)
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = if (isHebrew)
-                            "חברי המשפחה הפעילים (${activeMembers.size})"
-                        else
-                            "Active Family Members (${activeMembers.size})",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-                    )
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = PastelGreenBackground
-                    ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            text = "LIVE",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = PastelGreenDark,
+                            text = if (isHebrew) "🔐 הרשאות במשפחה (2 תפקידים בלבד)" else "🔐 Family Roles (Strictly 2 Roles)",
+                            style = MaterialTheme.typography.titleSmall.copy(
                                 fontWeight = FontWeight.ExtraBold,
-                                fontSize = 10.sp
-                            ),
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                color = glass.textPrimary
+                            )
                         )
-                    }
-                }
 
-                if (currentMember.isParent) {
-                    Button(
-                        onClick = onInviteMember,
-                        shape = RoundedCornerShape(16.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = GoogleBlue),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                        modifier = Modifier.testTag("admin_invite_member_btn")
-                    ) {
-                        Icon(imageVector = Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = if (isHebrew) "+ הזמן חבר משפחה" else "+ Invite Member",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp
+                        RoleBadgeExplainRow(
+                            badgeText = if (isHebrew) "הורה (PARENT)" else "PARENT",
+                            badgeColor = glass.primaryAccent,
+                            description = if (isHebrew)
+                                "הרשאות ניהול מלאות: יצירה, עריכה ומחיקה של משימות, הזמנת הורים או ילדים, שינוי תפקידים וניהול הגדרות."
+                            else
+                                "Full management permissions: create/edit/delete tasks, invite members, manage roles and settings."
+                        )
+
+                        RoleBadgeExplainRow(
+                            badgeText = if (isHebrew) "ילד/ה (CHILD)" else "CHILD",
+                            badgeColor = GoogleGreen,
+                            description = if (isHebrew)
+                                "צפייה במשימות המשפחה, סימון משימות אישיות כבוצע וצבירת נקודות לפרסים (ללא הרשאות ניהול או הזמנה)."
+                            else
+                                "View tasks, mark assigned tasks completed, and view rewards (cannot create/edit tasks or manage users)."
                         )
                     }
                 }
             }
-        }
 
-        // 4. Active Members List (Real-time updated from Firestore)
-        items(activeMembers, key = { it.id }) { member ->
-            val isActiveProfile = member.id == currentMember.id
-            val isLastParent = member.isParent && activeParentCount <= 1
+            // 3. Active Members Header + Invite Button (PARENT only)
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        FamilySectionHeader(
+                            title = if (isHebrew)
+                                "חברי המשפחה הפעילים (${activeMembers.size})"
+                            else
+                                "Active Family Members (${activeMembers.size})"
+                        )
+                        FamilyStatusChip(
+                            label = "LIVE",
+                            containerColor = glass.successBg,
+                            contentColor = glass.successText
+                        )
+                    }
 
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = if (isActiveProfile) BorderStroke(2.dp, GoogleBlue) else BorderStroke(1.dp, OutlineLight),
-                tonalElevation = 2.dp,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("admin_member_card_${member.id}")
-            ) {
-                Column(
+                    if (currentMember.isParent) {
+                        FamilyPrimaryButton(
+                            text = if (isHebrew) "+ הזמן חבר משפחה" else "+ Invite Member",
+                            leadingIcon = Icons.Default.PersonAdd,
+                            onClick = onInviteMember,
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                            modifier = Modifier.testTag("admin_invite_member_btn")
+                        )
+                    }
+                }
+            }
+
+            // 4. Active Members List (Real-time updated from Firestore)
+            items(activeMembers, key = { it.id }) { member ->
+                val isActiveProfile = member.id == currentMember.id
+                val isLastParent = member.isParent && activeParentCount <= 1
+
+                FamilyGlassCard(
+                    cornerRadius = 22.dp,
+                    isSelected = isActiveProfile,
+                    elevation = 3.dp,
+                    contentPadding = PaddingValues(14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(14.dp)
+                        .testTag("admin_member_card_${member.id}")
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -317,7 +296,7 @@ fun AdminDashboardScreen(
                                 .weight(1f)
                                 .clickable { onSwitchMember(member) }
                         ) {
-                            // Profile Picture when available, otherwise emoji avatar
+                            // Profile Picture when available, otherwise FamilyMemberAvatar
                             if (!member.photoUrl.isNullOrBlank()) {
                                 AsyncImage(
                                     model = member.photoUrl,
@@ -328,15 +307,11 @@ fun AdminDashboardScreen(
                                         .clip(CircleShape)
                                 )
                             } else {
-                                Box(
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(member.colorHex).copy(alpha = 0.16f)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(text = member.avatarEmoji, fontSize = 24.sp)
-                                }
+                                FamilyMemberAvatar(
+                                    member = member,
+                                    size = 48.dp,
+                                    isHighlighted = isActiveProfile
+                                )
                             }
 
                             Column {
@@ -346,26 +321,19 @@ fun AdminDashboardScreen(
                                 ) {
                                     Text(
                                         text = member.getDisplayName(isHebrew),
-                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                        style = MaterialTheme.typography.titleSmall.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = glass.textPrimary
+                                        )
                                     )
                                     if (isActiveProfile) {
-                                        Surface(
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = GoogleBlueLight
-                                        ) {
-                                            Text(
-                                                text = if (isHebrew) "פעיל" else "Active",
-                                                style = MaterialTheme.typography.labelSmall.copy(
-                                                    color = GoogleBlueDark,
-                                                    fontWeight = FontWeight.Bold
-                                                ),
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                            )
-                                        }
+                                        FamilyStatusChip(
+                                            label = if (isHebrew) "פעיל" else "Active"
+                                        )
                                     }
                                 }
 
-                                val roleColor = if (member.isParent) GoogleBlue else GoogleGreenDark
+                                val roleColor = if (member.isParent) glass.primaryAccent else glass.successText
                                 val roleBadge = if (member.isParent) {
                                     if (isHebrew) "הורה (PARENT)" else "PARENT"
                                 } else {
@@ -384,7 +352,7 @@ fun AdminDashboardScreen(
                                     Text(
                                         text = "📧 ${member.googleEmail}",
                                         style = MaterialTheme.typography.bodySmall.copy(
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            color = glass.textSecondary,
                                             fontSize = 11.sp
                                         )
                                     )
@@ -403,7 +371,7 @@ fun AdminDashboardScreen(
                                 Icon(
                                     imageVector = Icons.Default.PersonRemove,
                                     contentDescription = "Remove Member",
-                                    tint = GoogleRed,
+                                    tint = glass.dangerText,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
@@ -413,7 +381,7 @@ fun AdminDashboardScreen(
                     // Role Management Controls (Only PARENT can change roles; last PARENT is protected)
                     if (currentMember.isParent) {
                         Spacer(modifier = Modifier.height(10.dp))
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        HorizontalDivider(color = glass.divider)
                         Spacer(modifier = Modifier.height(8.dp))
 
                         Row(
@@ -429,7 +397,7 @@ fun AdminDashboardScreen(
                                     Icon(
                                         imageVector = Icons.Default.Shield,
                                         contentDescription = null,
-                                        tint = GoogleBlueDark,
+                                        tint = glass.primaryAccent,
                                         modifier = Modifier.size(16.dp)
                                     )
                                     Text(
@@ -438,7 +406,7 @@ fun AdminDashboardScreen(
                                         else
                                             "Last remaining Parent (protected)",
                                         style = MaterialTheme.typography.labelSmall.copy(
-                                            color = GoogleBlueDark,
+                                            color = glass.primaryAccent,
                                             fontWeight = FontWeight.Bold
                                         ),
                                         modifier = Modifier.testTag("last_parent_protected_badge_${member.id}")
@@ -452,26 +420,15 @@ fun AdminDashboardScreen(
                                     if (isHebrew) "הגדר כהורה (PARENT)" else "Promote to PARENT"
                                 }
 
-                                OutlinedButton(
+                                FamilySecondaryButton(
+                                    text = buttonLabel,
+                                    leadingIcon = Icons.Default.SwapHoriz,
                                     onClick = { onChangeRole(member.id, targetRole) },
-                                    shape = RoundedCornerShape(12.dp),
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                                     modifier = Modifier
                                         .height(34.dp)
                                         .testTag("change_role_btn_${member.id}")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.SwapHoriz,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(15.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = buttonLabel,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
+                                )
                             }
 
                             if (!isActiveProfile) {
@@ -484,7 +441,7 @@ fun AdminDashboardScreen(
                                         text = if (isHebrew) "החלף תצוגה" else "Preview as",
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = GoogleBlue
+                                        color = glass.primaryAccent
                                     )
                                 }
                             }
@@ -492,216 +449,181 @@ fun AdminDashboardScreen(
                     }
                 }
             }
-        }
 
-        // 5. Separate Pending Invitations Section (V1.6 Requirement 6)
-        item {
-            Spacer(modifier = Modifier.height(6.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = if (isHebrew)
+            // 5. Separate Pending Invitations Section (V1.6 Requirement 6)
+            item {
+                Spacer(modifier = Modifier.height(6.dp))
+                FamilySectionHeader(
+                    title = if (isHebrew)
                         "הזמנות ממתינות לאישור (${pendingInvitations.size})"
                     else
                         "Pending Invitations (${pendingInvitations.size})",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                     modifier = Modifier.testTag("pending_invitations_section_header")
                 )
             }
-        }
 
-        if (pendingInvitations.isEmpty()) {
-            item {
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, OutlineLight),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("no_pending_invitations_card")
-                ) {
-                    Row(
+            if (pendingInvitations.isEmpty()) {
+                item {
+                    FamilyGlassCard(
+                        cornerRadius = 20.dp,
+                        isTintedBlue = true,
+                        contentPadding = PaddingValues(16.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Text(text = "✉️", fontSize = 22.sp)
-                        Column {
-                            Text(
-                                text = if (isHebrew) "אין הזמנות ממתינות כרגע" else "No pending invitations",
-                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
-                            )
-                            Text(
-                                text = if (isHebrew)
-                                    "לחצו על \"+ הזמן חבר משפחה\" כדי ליצור קוד הזמנה להורה או לילד/ה."
-                                else
-                                    "Tap \"+ Invite Member\" to generate a PARENT or CHILD invitation code.",
-                                style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
-                            )
-                        }
-                    }
-                }
-            }
-        } else {
-            items(pendingInvitations, key = { it.code }) { invite ->
-                val roleLabel = if (invite.invitedRole == UserRole.PARENT) {
-                    if (isHebrew) "הורה (PARENT)" else "PARENT"
-                } else {
-                    if (isHebrew) "ילד/ה (CHILD)" else "CHILD"
-                }
-
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = PastelYellowBackground,
-                    border = BorderStroke(1.dp, PastelYellowBorder),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("pending_invite_card_${invite.code}")
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                            .testTag("no_pending_invitations_card")
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        text = if (invite.invitedNickname.isNotBlank())
-                                            "${invite.invitedNickname} ($roleLabel)"
-                                        else
-                                            if (isHebrew) "הזמנה לתפקיד $roleLabel" else "Invite for $roleLabel",
-                                        style = MaterialTheme.typography.titleSmall.copy(
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = PastelYellowDark
-                                        )
+                            Text(text = "✉️", fontSize = 22.sp)
+                            Column {
+                                Text(
+                                    text = if (isHebrew) "אין הזמנות ממתינות כרגע" else "No pending invitations",
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = glass.textPrimary
                                     )
-                                    Surface(
-                                        shape = RoundedCornerShape(8.dp),
-                                        color = Color.White
-                                    ) {
-                                        Text(
-                                            text = if (isHebrew) "ממתינה לאישור ⏳" else "Pending ⏳",
-                                            style = MaterialTheme.typography.labelSmall.copy(
-                                                color = PastelYellowDark,
-                                                fontWeight = FontWeight.Bold
-                                            ),
-                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                        )
-                                    }
-                                }
-
+                                )
                                 Text(
                                     text = if (isHebrew)
-                                        "קוד הזמנה: ${invite.code} • תפקיד קבוע: $roleLabel"
+                                        "לחצו על \"+ הזמן חבר משפחה\" כדי ליצור קוד הזמנה להורה או לילד/ה."
                                     else
-                                        "Invite Code: ${invite.code} • Locked Role: $roleLabel",
-                                    style = MaterialTheme.typography.bodySmall.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = TextPrimary
-                                    )
+                                        "Tap \"+ Invite Member\" to generate a PARENT or CHILD invitation code.",
+                                    style = MaterialTheme.typography.bodySmall.copy(color = glass.textSecondary)
                                 )
-                            }
-
-                            if (currentMember.isParent) {
-                                IconButton(
-                                    onClick = { onRevokeInvitation(invite.code) },
-                                    modifier = Modifier
-                                        .size(34.dp)
-                                        .testTag("revoke_invite_btn_${invite.code}")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Cancel,
-                                        contentDescription = "Revoke Invitation",
-                                        tint = GoogleRed
-                                    )
-                                }
                             }
                         }
+                    }
+                }
+            } else {
+                items(pendingInvitations, key = { it.code }) { invite ->
+                    val roleLabel = if (invite.invitedRole == UserRole.PARENT) {
+                        if (isHebrew) "הורה (PARENT)" else "PARENT"
+                    } else {
+                        if (isHebrew) "ילד/ה (CHILD)" else "CHILD"
+                    }
 
-                        // Copy & WhatsApp Share actions for pending invitation
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = {
-                                    clipboardManager.setText(AnnotatedString(invite.code))
-                                    android.widget.Toast.makeText(
-                                        context,
-                                        if (isHebrew) "קוד ${invite.code} הועתק!" else "Code ${invite.code} copied!",
-                                        android.widget.Toast.LENGTH_SHORT
-                                    ).show()
-                                },
-                                shape = RoundedCornerShape(12.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(36.dp)
-                                    .testTag("copy_pending_invite_${invite.code}")
+                    FamilyGlassCard(
+                        cornerRadius = 20.dp,
+                        accentColor = GoogleYellow,
+                        contentPadding = PaddingValues(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("pending_invite_card_${invite.code}")
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = if (isHebrew) "העתק ${invite.code}" else "Copy ${invite.code}",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-
-                            Button(
-                                onClick = {
-                                    val shareText = onFormatInvitationShareText?.invoke(invite)
-                                        ?: onGenerateShareText(invite.invitedNickname, invite.invitedRole)
-                                    val whatsappIntent = Intent(Intent.ACTION_SEND).apply {
-                                        type = "text/plain"
-                                        setPackage("com.whatsapp")
-                                        putExtra(Intent.EXTRA_TEXT, shareText)
-                                    }
-                                    try {
-                                        context.startActivity(whatsappIntent)
-                                    } catch (_: Exception) {
-                                        val fallbackIntent = Intent(Intent.ACTION_SEND).apply {
-                                            type = "text/plain"
-                                            putExtra(Intent.EXTRA_TEXT, shareText)
-                                        }
-                                        context.startActivity(
-                                            Intent.createChooser(
-                                                fallbackIntent,
-                                                if (isHebrew) "שתף הזמנה למשפחה" else "Share Family Invite"
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = if (invite.invitedNickname.isNotBlank())
+                                                "${invite.invitedNickname} ($roleLabel)"
+                                            else
+                                                if (isHebrew) "הזמנה לתפקיד $roleLabel" else "Invite for $roleLabel",
+                                            style = MaterialTheme.typography.titleSmall.copy(
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = glass.warningText
                                             )
                                         )
+                                        FamilyStatusChip(
+                                            label = if (isHebrew) "ממתינה לאישור ⏳" else "Pending ⏳",
+                                            containerColor = glass.warningBg,
+                                            contentColor = glass.warningText
+                                        )
                                     }
-                                },
-                                shape = RoundedCornerShape(12.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFF25D366),
-                                    contentColor = Color.White
-                                ),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(36.dp)
-                                    .testTag("whatsapp_pending_invite_${invite.code}")
+
+                                    Text(
+                                        text = if (isHebrew)
+                                            "קוד הזמנה: ${invite.code} • תפקיד קבוע: $roleLabel"
+                                        else
+                                            "Invite Code: ${invite.code} • Locked Role: $roleLabel",
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = glass.textPrimary
+                                        )
+                                    )
+                                }
+
+                                if (currentMember.isParent) {
+                                    IconButton(
+                                        onClick = { onRevokeInvitation(invite.code) },
+                                        modifier = Modifier
+                                            .size(34.dp)
+                                            .testTag("revoke_invite_btn_${invite.code}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Cancel,
+                                            contentDescription = "Revoke Invitation",
+                                            tint = glass.dangerText
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Copy & WhatsApp Share actions for pending invitation
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
+                                FamilySecondaryButton(
+                                    text = if (isHebrew) "העתק ${invite.code}" else "Copy ${invite.code}",
+                                    leadingIcon = Icons.Default.ContentCopy,
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(invite.code))
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            if (isHebrew) "קוד ${invite.code} הועתק!" else "Code ${invite.code} copied!",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(36.dp)
+                                        .testTag("copy_pending_invite_${invite.code}")
+                                )
+
+                                FamilyPrimaryButton(
                                     text = "WhatsApp 💬",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
+                                    leadingIcon = Icons.Default.Share,
+                                    containerColor = Color(0xFF25D366),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    onClick = {
+                                        val shareText = onFormatInvitationShareText?.invoke(invite)
+                                            ?: onGenerateShareText(invite.invitedNickname, invite.invitedRole)
+                                        val whatsappIntent = Intent(Intent.ACTION_SEND).apply {
+                                            type = "text/plain"
+                                            setPackage("com.whatsapp")
+                                            putExtra(Intent.EXTRA_TEXT, shareText)
+                                        }
+                                        try {
+                                            context.startActivity(whatsappIntent)
+                                        } catch (_: Exception) {
+                                            val fallbackIntent = Intent(Intent.ACTION_SEND).apply {
+                                                type = "text/plain"
+                                                putExtra(Intent.EXTRA_TEXT, shareText)
+                                            }
+                                            context.startActivity(
+                                                Intent.createChooser(
+                                                    fallbackIntent,
+                                                    if (isHebrew) "שתף הזמנה למשפחה" else "Share Family Invite"
+                                                )
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(36.dp)
+                                        .testTag("whatsapp_pending_invite_${invite.code}")
                                 )
                             }
                         }
@@ -718,9 +640,12 @@ private fun AdminStatBox(
     value: String,
     label: String
 ) {
+    val glass = LocalSoftGlassColors.current
     Surface(
         shape = RoundedCornerShape(16.dp),
-        color = Color.White.copy(alpha = 0.16f),
+        color = glass.cardBackground,
+        border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.25f)),
+        shadowElevation = 2.dp,
         modifier = modifier
     ) {
         Column(
@@ -731,13 +656,14 @@ private fun AdminStatBox(
                 text = value,
                 style = MaterialTheme.typography.titleMedium.copy(
                     fontWeight = FontWeight.ExtraBold,
-                    color = Color.White
+                    color = glass.primaryAccent
                 )
             )
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelSmall.copy(
-                    color = Color.White.copy(alpha = 0.85f)
+                    color = glass.textSecondary,
+                    fontWeight = FontWeight.SemiBold
                 )
             )
         }
@@ -750,20 +676,22 @@ private fun RoleBadgeExplainRow(
     badgeColor: Color,
     description: String
 ) {
+    val glass = LocalSoftGlassColors.current
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Surface(
-            shape = RoundedCornerShape(8.dp),
+            shape = RoundedCornerShape(10.dp),
             color = badgeColor.copy(alpha = 0.15f),
-            modifier = Modifier.width(105.dp)
+            border = BorderStroke(1.dp, badgeColor.copy(alpha = 0.35f)),
+            modifier = Modifier.width(108.dp)
         ) {
             Text(
                 text = badgeText,
                 style = MaterialTheme.typography.labelSmall.copy(
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.ExtraBold,
                     color = badgeColor
                 ),
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
@@ -773,7 +701,7 @@ private fun RoleBadgeExplainRow(
         Text(
             text = description,
             style = MaterialTheme.typography.bodySmall.copy(
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = glass.textSecondary,
                 fontSize = 11.sp
             ),
             modifier = Modifier.weight(1f)

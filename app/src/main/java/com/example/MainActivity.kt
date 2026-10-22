@@ -274,7 +274,7 @@ fun FamilyTasksApp(
                                 )
                             },
                             bottomBar = {
-                                FamilyBottomNavBar(
+                                FamilyBottomNavigation(
                                     currentScreen = currentScreen,
                                     isParent = currentMember.isParent,
                                     isHebrew = isHebrew,
@@ -282,7 +282,7 @@ fun FamilyTasksApp(
                                 )
                             }
                         ) { innerPadding ->
-                            Box(
+                            SoftGlassScreenBackground(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .padding(innerPadding)
@@ -785,99 +785,3 @@ fun FamilyTasksApp(
     }
 }
 
-@Composable
-private fun FamilyBottomNavBar(
-    currentScreen: AppScreen,
-    isParent: Boolean,
-    isHebrew: Boolean,
-    onNavigate: (AppScreen) -> Unit
-) {
-    val glassColors = LocalSoftGlassColors.current
-    // V1.6 Requirement 1:
-    // PARENT sees the Family Management tab; CHILD sees their permitted tasks, calendar, timetable, alarms, and files.
-    val items = buildList {
-        add(NavBarItem(AppScreen.HOME, if (isHebrew) "משימות" else "Tasks", Icons.Filled.CheckCircle, Icons.Outlined.CheckCircle, "nav_home"))
-        add(NavBarItem(AppScreen.CALENDAR, if (isHebrew) "לוח שנה" else "Calendar", Icons.Filled.CalendarMonth, Icons.Outlined.CalendarMonth, "nav_calendar"))
-        add(NavBarItem(AppScreen.TIMETABLE, if (isHebrew) "מערכת" else "Schedule", Icons.Filled.Schedule, Icons.Outlined.Schedule, "nav_timetable"))
-        add(NavBarItem(AppScreen.ALARMS, if (isHebrew) "שעון מעורר" else "Alarms", Icons.Filled.Alarm, Icons.Outlined.Alarm, "nav_alarms"))
-        add(NavBarItem(AppScreen.FILES, if (isHebrew) "מסמכים" else "Files", Icons.Filled.Folder, Icons.Outlined.Folder, "nav_files"))
-        if (isParent) {
-            add(NavBarItem(AppScreen.ADMIN_DASHBOARD, if (isHebrew) "משפחה" else "Family", Icons.Filled.AdminPanelSettings, Icons.Outlined.AdminPanelSettings, "nav_admin"))
-        }
-    }
-
-    Surface(
-        tonalElevation = 6.dp,
-        shadowElevation = 10.dp,
-        color = glassColors.cardBackground,
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("bottom_navigation_bar")
-    ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
-            HorizontalDivider(
-                thickness = 1.dp,
-                color = glassColors.divider
-            )
-            androidx.compose.foundation.layout.BoxWithConstraints(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-            ) {
-                val isCompactWidth = maxWidth < 380.dp || items.size >= 6
-                val iconSize = if (isCompactWidth) 19.dp else 21.dp
-                val labelFontSize = if (isCompactWidth) 9.5.sp else 10.5.sp
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = if (isCompactWidth) 2.dp else 6.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    items.forEach { item ->
-                        val isSelected = currentScreen == item.screen
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center,
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(14.dp))
-                                .clickable { onNavigate(item.screen) }
-                                .background(
-                                    if (isSelected) glassColors.primaryAccentSoft else Color.Transparent
-                                )
-                                .padding(horizontal = 2.dp, vertical = 5.dp)
-                                .defaultMinSize(minWidth = 44.dp, minHeight = 48.dp)
-                                .testTag(item.testTag)
-                        ) {
-                            Icon(
-                                imageVector = if (isSelected) item.selectedIcon else item.unselectedIcon,
-                                contentDescription = item.label,
-                                tint = if (isSelected) glassColors.primaryAccent else glassColors.textSecondary,
-                                modifier = Modifier.size(iconSize)
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = item.label,
-                                fontSize = labelFontSize,
-                                maxLines = 1,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                color = if (isSelected) glassColors.primaryAccent else glassColors.textSecondary
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-private data class NavBarItem(
-    val screen: AppScreen,
-    val label: String,
-    val selectedIcon: ImageVector,
-    val unselectedIcon: ImageVector,
-    val testTag: String
-)

@@ -1,12 +1,10 @@
 package com.example.ui.components
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -15,7 +13,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -34,7 +31,7 @@ fun RewardsSheet(
     onDismiss: () -> Unit
 ) {
     val glassColors = LocalSoftGlassColors.current
-    var selectedFilter by remember { mutableIntStateOf(0) } // 0 = All, 1 = Available, 2 = Mine
+    var selectedFilter by remember { mutableIntStateOf(0) } // 0 = All, 1 = Available
 
     // Preset catalog of family rewards
     val catalogRewards = remember(isHebrew) {
@@ -100,7 +97,7 @@ fun RewardsSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-        containerColor = glassColors.cardBackground,
+        containerColor = glassColors.screenBackground,
         modifier = Modifier.testTag("rewards_sheet")
     ) {
         Column(
@@ -115,87 +112,79 @@ fun RewardsSheet(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                IconButton(onClick = onDismiss) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Close",
-                        tint = glassColors.textPrimary
-                    )
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = glassColors.cardBackground,
+                    border = BorderStroke(1.dp, glassColors.cardBorder),
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onDismiss() }
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = glassColors.textPrimary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
 
                 Text(
                     text = if (isHebrew) "הפרסים והנקודות" else "Rewards & Points",
                     style = MaterialTheme.typography.titleMedium.copy(
-                        fontWeight = FontWeight.Bold,
+                        fontWeight = FontWeight.ExtraBold,
                         color = glassColors.textPrimary
                     )
                 )
 
-                Spacer(modifier = Modifier.size(40.dp))
+                FamilyMemberAvatar(member = currentMember, size = 36.dp, isHighlighted = true)
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            // Hero Points Card
-            Surface(
-                shape = RoundedCornerShape(22.dp),
-                color = if (glassColors.isDark) Color(0xFF2E1F47) else PastelPurpleBackground,
-                border = BorderStroke(1.dp, if (glassColors.isDark) Color(0xFF4C3575) else PastelPurpleBorder),
-                modifier = Modifier.fillMaxWidth()
+            // Hero Points Soft Glass Card
+            FamilyGlassCard(
+                cornerRadius = 24.dp,
+                accentColor = SoftLavender,
+                elevation = 4.dp,
+                contentPadding = PaddingValues(20.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("rewards_hero_points_card")
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(
-                            Brush.horizontalGradient(
-                                colors = if (glassColors.isDark) {
-                                    listOf(
-                                        Color(0xFF2D1B4E),
-                                        Color(0xFF23183C),
-                                        Color(0xFF33205A)
-                                    )
-                                } else {
-                                    listOf(
-                                        Color(0xFFEDE4FF),
-                                        Color(0xFFF7F3FF),
-                                        Color(0xFFE5D7FD)
-                                    )
-                                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column {
+                        Text(
+                            text = "${currentMember.earnedPoints} ${if (isHebrew) "נקודות" else "Points"}",
+                            style = MaterialTheme.typography.headlineMedium.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (glassColors.isDark) Color(0xFFD8B4FE) else PastelPurpleDark
                             )
                         )
-                        .padding(20.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column {
-                            Text(
-                                text = "${currentMember.earnedPoints} ${if (isHebrew) "נקודות" else "Points"}",
-                                style = MaterialTheme.typography.headlineMedium.copy(
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = if (glassColors.isDark) Color(0xFFD8B4FE) else PastelPurpleDark
-                                )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = if (isHebrew) "הנקודות שצברת מביצוע משימות ⭐" else "Your chore points balance ⭐",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = glassColors.textSecondary,
+                                fontWeight = FontWeight.SemiBold
                             )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = if (isHebrew) "הנקודות שצברת מביצוע משימות ⭐" else "Your chore points balance ⭐",
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    color = glassColors.textSecondary,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            )
-                        }
+                        )
+                    }
 
-                        Surface(
-                            shape = CircleShape,
-                            color = if (glassColors.isDark) Color(0xFF422006) else Color(0xFFFEF3C7),
-                            modifier = Modifier.size(56.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Text(text = "⭐", fontSize = 28.sp)
-                            }
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = if (glassColors.isDark) Color(0xFF422006) else Color(0xFFFEF3C7),
+                        border = BorderStroke(1.2.dp, GoogleYellow.copy(alpha = 0.45f)),
+                        modifier = Modifier.size(56.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(text = "⭐", fontSize = 28.sp)
                         }
                     }
                 }
@@ -222,7 +211,7 @@ fun RewardsSheet(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Rewards List
+            // Rewards List using FamilyGlassCard, FamilyStatusChip, and FamilyPrimaryButton
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier.fillMaxWidth()
@@ -230,22 +219,17 @@ fun RewardsSheet(
                 items(displayRewards) { item ->
                     val canAfford = currentMember.earnedPoints >= item.pointsCost
 
-                    Surface(
-                        shape = RoundedCornerShape(18.dp),
-                        color = glassColors.cardElevated,
-                        border = BorderStroke(
-                            1.dp,
-                            if (canAfford) glassColors.successBorder else glassColors.cardBorder
-                        ),
-                        tonalElevation = 2.dp,
+                    FamilyGlassCard(
+                        cornerRadius = 20.dp,
+                        accentColor = if (canAfford) GoogleGreen else null,
+                        elevation = 2.dp,
+                        contentPadding = PaddingValues(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("reward_item_${item.id}")
                     ) {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(14.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
@@ -256,53 +240,59 @@ fun RewardsSheet(
                             ) {
                                 Surface(
                                     shape = RoundedCornerShape(14.dp),
-                                    color = if (canAfford) glassColors.successContainer else glassColors.secondaryContainer,
-                                    modifier = Modifier.size(46.dp)
+                                    color = if (canAfford) glassColors.successBg else glassColors.primaryAccentSoftBg,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (canAfford) glassColors.successBorder else glassColors.cardBorder
+                                    ),
+                                    modifier = Modifier.size(48.dp)
                                 ) {
                                     Box(contentAlignment = Alignment.Center) {
                                         Text(text = item.iconEmoji, fontSize = 24.sp)
                                     }
                                 }
 
-                                Column {
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                     Text(
                                         text = item.title,
                                         style = MaterialTheme.typography.bodyLarge.copy(
-                                            fontWeight = FontWeight.Bold,
+                                            fontWeight = FontWeight.ExtraBold,
                                             color = glassColors.textPrimary
                                         )
                                     )
-                                    Text(
-                                        text = "${item.pointsCost} ${if (isHebrew) "נקודות" else "pts"}",
-                                        style = MaterialTheme.typography.bodySmall.copy(
-                                            color = if (canAfford) glassColors.successText else glassColors.textSecondary,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
+                                    FamilyStatusChip(
+                                        emoji = "⭐",
+                                        label = "${item.pointsCost} ${if (isHebrew) "נקודות" else "pts"}",
+                                        containerColor = if (canAfford) glassColors.successBg else glassColors.warningBg,
+                                        contentColor = if (canAfford) glassColors.successText else glassColors.warningText
                                     )
                                 }
                             }
 
                             if (canAfford) {
-                                Button(
+                                FamilyPrimaryButton(
+                                    text = if (isHebrew) "ממש" else "Claim",
                                     onClick = { onClaimReward(item) },
-                                    shape = RoundedCornerShape(12.dp),
-                                    colors = ButtonDefaults.buttonColors(containerColor = glassColors.primaryAccent),
-                                    modifier = Modifier.height(38.dp)
-                                ) {
-                                    Text(
-                                        text = if (isHebrew) "ממש" else "Claim",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp,
-                                        color = Color.White
-                                    )
-                                }
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.Lock,
-                                    contentDescription = "Locked",
-                                    tint = glassColors.textMuted,
-                                    modifier = Modifier.size(20.dp)
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                                    modifier = Modifier
+                                        .height(38.dp)
+                                        .testTag("claim_reward_btn_${item.id}")
                                 )
+                            } else {
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = glassColors.secondaryContainer,
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = Icons.Default.Lock,
+                                            contentDescription = "Locked",
+                                            tint = glassColors.textMuted,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -321,7 +311,11 @@ private fun RowScope.RewardFilterPill(
     val glassColors = LocalSoftGlassColors.current
     Surface(
         shape = RoundedCornerShape(16.dp),
-        color = if (isSelected) glassColors.primaryAccent else glassColors.secondaryContainer,
+        color = if (isSelected) glassColors.primaryAccent else glassColors.cardBackground,
+        border = BorderStroke(
+            1.dp,
+            if (isSelected) glassColors.primaryAccent else glassColors.cardBorder
+        ),
         modifier = Modifier
             .weight(1f)
             .clip(RoundedCornerShape(16.dp))
@@ -333,8 +327,12 @@ private fun RowScope.RewardFilterPill(
         ) {
             Text(
                 text = label,
-                color = if (isSelected) Color.White else glassColors.textSecondary,
-                fontWeight = FontWeight.Bold,
+                color = if (isSelected) {
+                    if (glassColors.isDark) Color(0xFF0B1120) else Color.White
+                } else {
+                    glassColors.textSecondary
+                },
+                fontWeight = FontWeight.ExtraBold,
                 fontSize = 13.sp
             )
         }

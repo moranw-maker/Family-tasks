@@ -9,7 +9,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -18,7 +17,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -28,6 +26,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.*
 import com.example.ui.components.FamilyEmptyState
+import com.example.ui.components.FamilyGlassCard
+import com.example.ui.components.FamilyMemberAvatar
+import com.example.ui.components.FamilyPrimaryButton
+import com.example.ui.components.FamilySectionHeader
+import com.example.ui.components.FamilyStatusChip
+import com.example.ui.components.SoftGlassScreenBackground
 import com.example.ui.theme.*
 import java.time.LocalDate
 import kotlin.math.abs
@@ -88,212 +92,127 @@ fun TimetableScreen(
         .sortedBy { it.periodIndex }
 
     Scaffold(
-        containerColor = glass.screenBackground,
+        containerColor = Color.Transparent,
         floatingActionButton = {
             if (currentMember.isParent) {
-                Surface(
+                FamilyPrimaryButton(
+                    text = if (isHebrew) "הוסף שיעור" else "Add Period",
+                    leadingIcon = Icons.Default.Add,
                     onClick = onAddPeriod,
-                    shape = RoundedCornerShape(22.dp),
-                    color = glass.primaryAccent,
-                    contentColor = if (glass.isDark) Color(0xFF0B1120) else Color.White,
-                    shadowElevation = 4.dp,
-                    modifier = Modifier
-                        .height(48.dp)
-                        .testTag("add_period_fab")
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Text(
-                            text = if (isHebrew) "הוסף שיעור" else "Add Period",
-                            style = MaterialTheme.typography.labelLarge.copy(
-                                fontWeight = FontWeight.Bold
-                            )
-                        )
-                    }
-                }
+                    modifier = Modifier.testTag("add_period_fab")
+                )
             }
         }
     ) { innerPadding ->
-        Column(
+        SoftGlassScreenBackground(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            glass.screenGradientTop,
-                            glass.screenBackground,
-                            glass.screenGradientBottom
-                        )
-                    )
-                )
+                .testTag("timetable_screen")
         ) {
-            // Quick Screen Help Guide
-            Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
-                com.example.ui.components.ScreenHelpBanner(
-                    title = if (isHebrew) "מערכת שעות בית ספרית (א׳-ו׳)" else "School Timetable (Sun-Fri)",
-                    tips = if (isHebrew) listOf(
-                        "בחירת תלמיד/ה: בחרו בלשוניות למעלה בין הילדים לצפייה במערכת האישית (א׳-ו׳).",
-                        "מעבר תצוגות: צפייה יומית מפורטת או טבלה שבועית מלאה.",
-                        "התראות שיעור: כל שיעור שולח התראת הכנה לפני תחילתו."
-                    ) else listOf(
-                        "Select Child: Tap child chips on top to view their schedule (Sun-Fri).",
-                        "Views: Toggle between Daily view and Weekly grid.",
-                        "Alerts: Receive notifications prior to school periods."
-                    ),
-                    isHebrew = isHebrew
-                )
-            }
-
-            // Top Switcher: Daily / Weekly Grid
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = glass.cardBackground,
-                    border = BorderStroke(1.dp, glass.cardBorder)
-                ) {
-                    Row(modifier = Modifier.padding(3.dp)) {
-                        TimetableViewPill(
-                            title = if (isHebrew) "יומי" else "Daily",
-                            isSelected = timetableViewMode == TimetableViewMode.DAILY_LIST,
-                            onClick = { onViewModeChange(TimetableViewMode.DAILY_LIST) }
-                        )
-                        TimetableViewPill(
-                            title = if (isHebrew) "טבלה שבועית" else "Weekly Grid",
-                            isSelected = timetableViewMode == TimetableViewMode.WEEKLY_TABLE,
-                            onClick = { onViewModeChange(TimetableViewMode.WEEKLY_TABLE) }
-                        )
-                    }
-                }
-
-                if (currentMember.isAdmin) {
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = glass.primaryAccentSoftBg,
-                        border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.3f))
-                    ) {
-                        Text(
-                            text = if (isHebrew) "עריכת הורה ✏️" else "Parent Edit ✏️",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = glass.primaryAccent,
-                                fontWeight = FontWeight.Bold
-                            ),
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-                        )
-                    }
-                }
-            }
-
-            // Kids Tabs Row
-            LazyRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                items(kids) { kid ->
-                    val isSelected = kid.id == activeKid.id
-                    Surface(
-                        shape = RoundedCornerShape(18.dp),
-                        color = if (isSelected) glass.primaryAccent else glass.cardBackground,
-                        border = BorderStroke(
-                            1.dp,
-                            if (isSelected) glass.primaryAccent else glass.cardBorder
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Quick Screen Help Guide
+                Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
+                    com.example.ui.components.ScreenHelpBanner(
+                        title = if (isHebrew) "מערכת שעות בית ספרית (א׳-ו׳)" else "School Timetable (Sun-Fri)",
+                        tips = if (isHebrew) listOf(
+                            "בחירת תלמיד/ה: בחרו בלשוניות למעלה בין הילדים לצפייה במערכת האישית (א׳-ו׳).",
+                            "מעבר תצוגות: צפייה יומית מפורטת או טבלה שבועית מלאה.",
+                            "התראות שיעור: כל שיעור שולח התראת הכנה לפני תחילתו."
+                        ) else listOf(
+                            "Select Child: Tap child chips on top to view their schedule (Sun-Fri).",
+                            "Views: Toggle between Daily view and Weekly grid.",
+                            "Alerts: Receive notifications prior to school periods."
                         ),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(18.dp))
-                            .clickable { onSelectChild(kid.id) }
-                            .testTag("child_tab_${kid.id}")
+                        isHebrew = isHebrew
+                    )
+                }
+
+                // Soft Glass Top Control Card: View Switcher + Child Selector Tabs
+                FamilyGlassCard(
+                    cornerRadius = 22.dp,
+                    isTintedBlue = true,
+                    elevation = 3.dp,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = glass.cardBackground,
+                            border = BorderStroke(1.dp, glass.cardBorder)
                         ) {
-                            Text(text = kid.avatarEmoji, fontSize = 16.sp)
-                            Text(
-                                text = kid.name + (if (kid.schoolGrade != null) " (${kid.schoolGrade})" else ""),
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSelected) {
-                                        if (glass.isDark) Color(0xFF0B1120) else Color.White
-                                    } else {
-                                        glass.textPrimary
-                                    }
+                            Row(modifier = Modifier.padding(3.dp)) {
+                                TimetableViewPill(
+                                    title = if (isHebrew) "יומי" else "Daily",
+                                    isSelected = timetableViewMode == TimetableViewMode.DAILY_LIST,
+                                    onClick = { onViewModeChange(TimetableViewMode.DAILY_LIST) }
                                 )
+                                TimetableViewPill(
+                                    title = if (isHebrew) "טבלה שבועית" else "Weekly Grid",
+                                    isSelected = timetableViewMode == TimetableViewMode.WEEKLY_TABLE,
+                                    onClick = { onViewModeChange(TimetableViewMode.WEEKLY_TABLE) }
+                                )
+                            }
+                        }
+
+                        if (currentMember.isAdmin) {
+                            FamilyStatusChip(
+                                emoji = "✏️",
+                                label = if (isHebrew) "עריכת הורה" else "Parent Edit"
                             )
                         }
                     }
-                }
-            }
 
-            Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
-            if (timetableViewMode == TimetableViewMode.WEEKLY_TABLE) {
-                WeeklyTimetableTableView(
-                    kidPeriods = kidPeriods,
-                    childName = activeKid.name,
-                    isAdmin = currentMember.isAdmin,
-                    isHebrew = isHebrew,
-                    onEditPeriod = onEditPeriod,
-                    onDeletePeriod = onDeletePeriod,
-                    onTestAlert = onTestAlert
-                )
-            } else {
-                // School Days of the Week Selector (Strictly Sunday through Friday: א׳ | ב׳ | ג׳ | ד׳ | ה׳ | ו׳)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    SchoolDay.schoolDays.forEach { day ->
-                        val isDaySelected = day == selectedDay
-                        val dayPeriodsCount = kidPeriods.count { it.day == day }
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = if (isDaySelected) glass.primaryAccentSoftBg else glass.cardBackground,
-                            border = BorderStroke(
-                                if (isDaySelected) 1.5.dp else 1.dp,
-                                if (isDaySelected) glass.primaryAccent else glass.cardBorder
-                            ),
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(horizontal = 2.dp)
-                                .clip(RoundedCornerShape(14.dp))
-                                .clickable { selectedDay = day }
-                                .testTag("day_tab_${day.name}")
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(vertical = 8.dp, horizontal = 2.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
+                    // Kids Tabs Row with FamilyMemberAvatar
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        items(kids) { kid ->
+                            val isSelected = kid.id == activeKid.id
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = if (isSelected) glass.primaryAccent else glass.cardBackground,
+                                border = BorderStroke(
+                                    if (isSelected) 1.5.dp else 1.dp,
+                                    if (isSelected) glass.primaryAccent else glass.cardBorder
+                                ),
+                                shadowElevation = if (isSelected) 3.dp else 1.dp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .clickable { onSelectChild(kid.id) }
+                                    .testTag("child_tab_${kid.id}")
                             ) {
-                                Text(
-                                    text = if (isHebrew) day.shortHe else day.getDisplayName(false).take(3),
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontWeight = if (isDaySelected) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (isDaySelected) glass.primaryAccent else glass.textSecondary
-                                    ),
-                                    maxLines = 1
-                                )
-                                if (dayPeriodsCount > 0) {
-                                    Spacer(modifier = Modifier.height(2.dp))
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(7.dp)
+                                ) {
+                                    FamilyMemberAvatar(
+                                        member = kid,
+                                        size = 24.dp,
+                                        isHighlighted = isSelected
+                                    )
                                     Text(
-                                        text = "$dayPeriodsCount",
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = glass.primaryAccent
+                                        text = kid.name + (if (kid.schoolGrade != null) " (${kid.schoolGrade})" else ""),
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (isSelected) {
+                                                if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                            } else {
+                                                glass.textPrimary
+                                            }
+                                        )
                                     )
                                 }
                             }
@@ -301,48 +220,123 @@ fun TimetableScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
-                if (dayPeriods.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(24.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        FamilyEmptyState(
-                            emoji = "🎒",
-                            title = if (isHebrew)
-                                "אין שיעורים במערכת ליום ${selectedDay.getDisplayName(isHebrew)}"
-                            else
-                                "No periods on ${selectedDay.getDisplayName(isHebrew)}",
-                            subtitle = if (currentMember.isParent) {
-                                if (isHebrew) "לחצו על + למטה להוספת שיעור" else "Tap + below to add a period"
-                            } else {
-                                if (isHebrew) "יום חופשי משיעורים במערכת" else "No classes scheduled for this day"
-                            },
-                            actionLabel = if (currentMember.isParent) {
-                                if (isHebrew) "+ הוסף שיעור" else "+ Add Period"
-                            } else null,
-                            onActionClick = if (currentMember.isParent) onAddPeriod else null
-                        )
-                    }
+                if (timetableViewMode == TimetableViewMode.WEEKLY_TABLE) {
+                    WeeklyTimetableTableView(
+                        kidPeriods = kidPeriods,
+                        childName = activeKid.name,
+                        isAdmin = currentMember.isAdmin,
+                        isHebrew = isHebrew,
+                        onEditPeriod = onEditPeriod,
+                        onDeletePeriod = onDeletePeriod,
+                        onTestAlert = onTestAlert
+                    )
                 } else {
-                    LazyColumn(
-                        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 110.dp, top = 6.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier.fillMaxSize()
+                    // School Days of the Week Selector (Strictly Sunday through Friday: א׳ | ב׳ | ג׳ | ד׳ | ה׳ | ו׳)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        items(dayPeriods, key = { it.id }) { period ->
-                            PeriodCardItem(
-                                period = period,
-                                childName = activeKid.name,
-                                isAdmin = currentMember.isAdmin,
-                                isHebrew = isHebrew,
-                                onEdit = { onEditPeriod(period) },
-                                onDelete = { onDeletePeriod(period.id) },
-                                onTestAlert = { onTestAlert(period, activeKid.name) }
+                        SchoolDay.schoolDays.forEach { day ->
+                            val isDaySelected = day == selectedDay
+                            val dayPeriodsCount = kidPeriods.count { it.day == day }
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = if (isDaySelected) glass.primaryAccentSoftBg else glass.cardBackground,
+                                border = BorderStroke(
+                                    if (isDaySelected) 1.6.dp else 1.dp,
+                                    if (isDaySelected) glass.primaryAccent else glass.cardBorder
+                                ),
+                                shadowElevation = if (isDaySelected) 3.dp else 1.dp,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(horizontal = 2.dp)
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .clickable { selectedDay = day }
+                                    .testTag("day_tab_${day.name}")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 2.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = if (isHebrew) day.shortHe else day.getDisplayName(false).take(3),
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = if (isDaySelected) FontWeight.ExtraBold else FontWeight.Medium,
+                                            color = if (isDaySelected) glass.primaryAccent else glass.textSecondary
+                                        ),
+                                        maxLines = 1
+                                    )
+                                    if (dayPeriodsCount > 0) {
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Surface(
+                                            shape = RoundedCornerShape(50),
+                                            color = if (isDaySelected) glass.primaryAccent else glass.primaryAccentSoftBg
+                                        ) {
+                                            Text(
+                                                text = "$dayPeriodsCount",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = if (isDaySelected) {
+                                                    if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                                } else {
+                                                    glass.primaryAccent
+                                                },
+                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    if (dayPeriods.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            FamilyEmptyState(
+                                emoji = "🎒",
+                                title = if (isHebrew)
+                                    "אין שיעורים במערכת ליום ${selectedDay.getDisplayName(isHebrew)}"
+                                else
+                                    "No periods on ${selectedDay.getDisplayName(isHebrew)}",
+                                subtitle = if (currentMember.isParent) {
+                                    if (isHebrew) "לחצו על + למטה להוספת שיעור" else "Tap + below to add a period"
+                                } else {
+                                    if (isHebrew) "יום חופשי משיעורים במערכת" else "No classes scheduled for this day"
+                                },
+                                actionLabel = if (currentMember.isParent) {
+                                    if (isHebrew) "+ הוסף שיעור" else "+ Add Period"
+                                } else null,
+                                onActionClick = if (currentMember.isParent) onAddPeriod else null
                             )
+                        }
+                    } else {
+                        LazyColumn(
+                            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 110.dp, top = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            items(dayPeriods, key = { it.id }) { period ->
+                                PeriodCardItem(
+                                    period = period,
+                                    childName = activeKid.name,
+                                    isAdmin = currentMember.isAdmin,
+                                    isHebrew = isHebrew,
+                                    onEdit = { onEditPeriod(period) },
+                                    onDelete = { onDeletePeriod(period.id) },
+                                    onTestAlert = { onTestAlert(period, activeKid.name) }
+                                )
+                            }
                         }
                     }
                 }
@@ -359,16 +353,16 @@ fun TimetableViewPill(
 ) {
     val glass = LocalSoftGlassColors.current
     Surface(
-        shape = RoundedCornerShape(13.dp),
+        shape = RoundedCornerShape(11.dp),
         color = if (isSelected) glass.primaryAccent else Color.Transparent,
         modifier = Modifier
-            .clip(RoundedCornerShape(13.dp))
+            .clip(RoundedCornerShape(11.dp))
             .clickable { onClick() }
     ) {
         Text(
             text = title,
             style = MaterialTheme.typography.labelSmall.copy(
-                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
                 color = if (isSelected) {
                     if (glass.isDark) Color(0xFF0B1120) else Color.White
                 } else {
@@ -401,21 +395,15 @@ fun WeeklyTimetableTableView(
             .fillMaxSize()
             .padding(14.dp)
     ) {
-        Text(
-            text = if (isHebrew) "לוח שעות שבועי (א׳-ו׳) - $childName" else "Weekly Timetable (Sun-Fri) - $childName",
-            style = MaterialTheme.typography.titleSmall.copy(
-                fontWeight = FontWeight.Bold,
-                color = glass.primaryAccent
-            )
+        FamilySectionHeader(
+            title = if (isHebrew) "לוח שעות שבועי (א׳-ו׳) - $childName" else "Weekly Timetable (Sun-Fri) - $childName"
         )
         Spacer(modifier = Modifier.height(8.dp))
 
-        Surface(
-            shape = RoundedCornerShape(20.dp),
-            color = glass.cardBackground,
-            tonalElevation = 2.dp,
-            shadowElevation = 2.dp,
-            border = BorderStroke(1.dp, glass.cardBorder),
+        FamilyGlassCard(
+            cornerRadius = 22.dp,
+            elevation = 3.dp,
+            contentPadding = PaddingValues(8.dp),
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
@@ -423,7 +411,6 @@ fun WeeklyTimetableTableView(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(8.dp)
                     .horizontalScroll(horizontalScrollState)
             ) {
                 // Header Row (Days of the week: Sun-Fri)
@@ -437,7 +424,7 @@ fun WeeklyTimetableTableView(
                         Text(
                             text = if (isHebrew) "שעה" else "#",
                             style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Bold,
+                                fontWeight = FontWeight.ExtraBold,
                                 color = glass.textSecondary
                             )
                         )
@@ -447,6 +434,7 @@ fun WeeklyTimetableTableView(
                         Surface(
                             shape = RoundedCornerShape(10.dp),
                             color = glass.primaryAccentSoftBg,
+                            border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.25f)),
                             modifier = Modifier
                                 .width(112.dp)
                                 .padding(horizontal = 2.dp)
@@ -454,7 +442,7 @@ fun WeeklyTimetableTableView(
                             Text(
                                 text = day.getDisplayName(isHebrew),
                                 style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.Bold,
+                                    fontWeight = FontWeight.ExtraBold,
                                     color = glass.primaryAccent
                                 ),
                                 textAlign = TextAlign.Center,
@@ -483,7 +471,7 @@ fun WeeklyTimetableTableView(
                                 Text(
                                     text = "$periodIndex",
                                     style = MaterialTheme.typography.titleSmall.copy(
-                                        fontWeight = FontWeight.Bold,
+                                        fontWeight = FontWeight.ExtraBold,
                                         color = glass.primaryAccent
                                     )
                                 )
@@ -598,39 +586,39 @@ fun PeriodCardItem(
         resolveSubjectAccentColor(period.subjectName, period.colorHex, glass.isDark)
     }
 
-    Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = glass.cardBackground,
-        border = BorderStroke(1.dp, glass.cardBorder),
-        shadowElevation = 2.dp,
-        tonalElevation = 1.dp,
-        modifier = Modifier.fillMaxWidth()
+    FamilyGlassCard(
+        cornerRadius = 22.dp,
+        accentColor = subjectAccent,
+        elevation = 3.dp,
+        contentPadding = PaddingValues(14.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("period_card_${period.id}")
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Period number circle badge with subtle subject accent
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(subjectAccent.copy(alpha = if (glass.isDark) 0.22f else 0.14f)),
-                contentAlignment = Alignment.Center
+            // Period number squircle badge with subject accent
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = subjectAccent.copy(alpha = if (glass.isDark) 0.24f else 0.14f),
+                border = BorderStroke(1.2.dp, subjectAccent.copy(alpha = 0.45f)),
+                modifier = Modifier.size(46.dp)
             ) {
-                Text(
-                    text = "${period.periodIndex}",
-                    style = MaterialTheme.typography.titleMedium.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = subjectAccent
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "${period.periodIndex}",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.ExtraBold,
+                            color = subjectAccent
+                        )
                     )
-                )
+                }
             }
 
-            // Subject & Details
+            // Subject & Soft Glass Chips
             Column(modifier = Modifier.weight(1f)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -639,42 +627,39 @@ fun PeriodCardItem(
                     Text(
                         text = period.subjectName,
                         style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.Bold,
+                            fontWeight = FontWeight.ExtraBold,
                             color = glass.textPrimary
                         )
                     )
 
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = glass.primaryAccentSoftBg
-                    ) {
-                        Text(
-                            text = "${period.startTime} - ${period.endTime}",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = glass.primaryAccent
-                            ),
-                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
-                        )
-                    }
+                    FamilyStatusChip(
+                        emoji = "🕒",
+                        label = "${period.startTime} - ${period.endTime}",
+                        containerColor = glass.primaryAccentSoftBg,
+                        contentColor = glass.primaryAccent
+                    )
                 }
 
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     if (period.roomNumber.isNotBlank()) {
-                        Text(
-                            text = "📍 " + period.roomNumber,
-                            style = MaterialTheme.typography.bodySmall.copy(color = glass.textSecondary)
+                        FamilyStatusChip(
+                            emoji = "📍",
+                            label = period.roomNumber,
+                            containerColor = glass.cardBackground,
+                            contentColor = glass.textSecondary
                         )
                     }
                     if (period.teacherName.isNotBlank()) {
-                        Text(
-                            text = "👤 " + period.teacherName,
-                            style = MaterialTheme.typography.bodySmall.copy(color = glass.textSecondary)
+                        FamilyStatusChip(
+                            emoji = "👤",
+                            label = period.teacherName,
+                            containerColor = glass.cardBackground,
+                            contentColor = glass.textSecondary
                         )
                     }
                 }
@@ -683,47 +668,64 @@ fun PeriodCardItem(
             // Actions: Edit, Test Notification, Delete
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                IconButton(
-                    onClick = onTestAlert,
+                Surface(
+                    shape = RoundedCornerShape(11.dp),
+                    color = glass.primaryAccentSoftBg,
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(11.dp))
+                        .clickable { onTestAlert() }
                         .testTag("test_alert_period_${period.id}")
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.NotificationsActive,
-                        contentDescription = "Test Notification",
-                        tint = glass.primaryAccent,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-
-                if (isAdmin) {
-                    IconButton(
-                        onClick = onEdit,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .testTag("edit_period_${period.id}")
-                    ) {
+                    Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            imageVector = Icons.Default.Edit,
-                            contentDescription = "Edit",
+                            imageVector = Icons.Default.NotificationsActive,
+                            contentDescription = "Test Notification",
                             tint = glass.primaryAccent,
                             modifier = Modifier.size(18.dp)
                         )
                     }
+                }
 
-                    IconButton(
-                        onClick = onDelete,
-                        modifier = Modifier.size(36.dp)
+                if (isAdmin) {
+                    Surface(
+                        shape = RoundedCornerShape(11.dp),
+                        color = glass.cardBackground,
+                        border = BorderStroke(1.dp, glass.cardBorder),
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(11.dp))
+                            .clickable { onEdit() }
+                            .testTag("edit_period_${period.id}")
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.DeleteOutline,
-                            contentDescription = "Delete",
-                            tint = glass.textMuted,
-                            modifier = Modifier.size(18.dp)
-                        )
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = "Edit",
+                                tint = glass.primaryAccent,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(11.dp),
+                        color = glass.dangerBg,
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(11.dp))
+                            .clickable { onDelete() }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.DeleteOutline,
+                                contentDescription = "Delete",
+                                tint = glass.dangerText,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
                     }
                 }
             }

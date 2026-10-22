@@ -13,6 +13,9 @@ import com.example.model.TaskCategory
 import com.example.model.TaskCompletionSyncState
 import com.example.model.TaskPriority
 import com.example.model.UserRole
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performScrollToNode
 import com.example.viewmodel.FamilyViewModel
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -2141,6 +2144,186 @@ class ExampleRobolectricTest {
         assertFalse("School timetable days must never include Saturday", schoolDays.contains(com.example.model.SchoolDay.SATURDAY))
         assertEquals(com.example.model.SchoolDay.SUNDAY, schoolDays.first())
         assertEquals(com.example.model.SchoolDay.FRIDAY, schoolDays.last())
+    }
+
+    @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+    @Test
+    fun `test soft glass visual redesign rendered screens and components`() = androidx.compose.ui.test.runComposeUiTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = FamilyRepository(context = context)
+        val members = repository.members.value
+        val currentMember = repository.currentMember.value
+        val tasks = repository.tasks.value
+        val periods = repository.schedulePeriods.value
+        val alarms = repository.familyAlarms.value
+
+        val activeScreenState = androidx.compose.runtime.mutableStateOf(com.example.model.AppScreen.HOME)
+
+        setContent {
+            val activeScreen = activeScreenState.value
+            com.example.ui.theme.MyApplicationTheme(
+                themeMode = com.example.model.AppThemeMode.LIGHT,
+                textScale = com.example.model.AppTextScale.NORMAL
+            ) {
+                androidx.compose.foundation.layout.Column {
+                    com.example.ui.components.TopFamilyBar(
+                        currentMember = currentMember,
+                        unreadNotificationsCount = 2,
+                        isDriveSyncActive = true,
+                        currentLanguage = com.example.model.AppLanguage.HEBREW,
+                        familyTitle = repository.familyName.value,
+                        onLanguageToggle = {},
+                        onOpenGemini = {},
+                        onOpenNotifications = {},
+                        onOpenProfile = {},
+                        onOpenSettings = {}
+                    )
+
+                    androidx.compose.foundation.layout.Box(
+                        modifier = androidx.compose.ui.Modifier.weight(1f)
+                    ) {
+                        when (activeScreen) {
+                            com.example.model.AppScreen.HOME -> {
+                                com.example.ui.screens.TasksScreen(
+                                    tasks = tasks,
+                                    members = members,
+                                    currentMember = currentMember,
+                                    selectedMemberFilter = null,
+                                    isHebrew = true,
+                                    onFilterChange = {},
+                                    onToggleTask = {},
+                                    onEditTask = {},
+                                    onDeleteTask = {},
+                                    onSendNudge = {},
+                                    onAddNewTask = {},
+                                    periods = periods,
+                                    alarms = alarms
+                                )
+                            }
+                            com.example.model.AppScreen.CALENDAR -> {
+                                com.example.ui.screens.CalendarScreen(
+                                    tasks = tasks,
+                                    periods = periods,
+                                    members = members,
+                                    currentMember = currentMember,
+                                    calendarMode = com.example.viewmodel.CalendarViewMode.MONTH,
+                                    selectedDate = LocalDate.now(),
+                                    firstDayOfWeek = com.example.model.FirstDayOfWeek.SUNDAY,
+                                    isHebrew = true,
+                                    onModeChange = {},
+                                    onDateSelect = {},
+                                    onToggleTask = {},
+                                    onEditTask = {},
+                                    onDeleteTask = {},
+                                    onSendNudge = {},
+                                    onAddNewTask = {}
+                                )
+                            }
+                            com.example.model.AppScreen.TIMETABLE -> {
+                                com.example.ui.screens.TimetableScreen(
+                                    periods = periods,
+                                    members = members,
+                                    currentMember = currentMember,
+                                    selectedChildId = members.firstOrNull { !it.isParent }?.id ?: currentMember.id,
+                                    timetableViewMode = com.example.model.TimetableViewMode.DAILY_LIST,
+                                    isHebrew = true,
+                                    onSelectChild = {},
+                                    onViewModeChange = {},
+                                    onAddPeriod = {},
+                                    onEditPeriod = {},
+                                    onDeletePeriod = {},
+                                    onTestAlert = { _, _ -> }
+                                )
+                            }
+                            com.example.model.AppScreen.SETTINGS -> {
+                                com.example.ui.screens.SettingsScreen(
+                                    familyName = repository.familyName.value,
+                                    currentMember = currentMember,
+                                    isGoogleSignedIn = true,
+                                    googleEmail = "parent@family.com",
+                                    cloudFamilyGroup = repository.cloudFamilyGroup.value,
+                                    autoSyncCalendar = true,
+                                    autoSyncDrive = true,
+                                    appLanguage = com.example.model.AppLanguage.HEBREW,
+                                    themeMode = com.example.model.AppThemeMode.LIGHT,
+                                    firstDayOfWeek = com.example.model.FirstDayOfWeek.SUNDAY,
+                                    biometricLockEnabled = false,
+                                    tenMinuteClassAlertsEnabled = true,
+                                    onEditFamilyName = {},
+                                    onOpenAdminDashboard = {},
+                                    onOpenGoogleSignIn = {},
+                                    onSignOutGoogle = {},
+                                    onAutoSyncCalendarChange = {},
+                                    onAutoSyncDriveChange = {},
+                                    onLanguageChange = {},
+                                    onThemeModeChange = {},
+                                    onFirstDayOfWeekChange = {},
+                                    onBiometricLockChange = {},
+                                    onLockNow = {},
+                                    onTenMinuteAlertsChange = {},
+                                    appTextScale = com.example.model.AppTextScale.NORMAL,
+                                    onTextScaleChange = {}
+                                )
+                            }
+                            else -> {}
+                        }
+                    }
+
+                    com.example.ui.components.FamilyBottomNavigation(
+                        currentScreen = activeScreen,
+                        isHebrew = true,
+                        isParent = currentMember.isParent,
+                        onNavigate = { activeScreenState.value = it }
+                    )
+                }
+            }
+        }
+
+        waitForIdle()
+
+        // 1. Verify TopFamilyBar & FamilyBottomNavigation Soft Glass bars are rendered
+        onNodeWithTag("top_family_bar").assertExists()
+        onNodeWithTag("bottom_navigation_bar").assertExists()
+        onNodeWithTag("nav_home").assertExists()
+        onNodeWithTag("nav_calendar").assertExists()
+        onNodeWithTag("nav_timetable").assertExists()
+        onNodeWithTag("nav_alarms").assertExists()
+        onNodeWithTag("nav_files").assertExists()
+
+        // 2. Verify Home / TasksScreen Soft Glass hero banner, Bento stat cards, and primary button
+        onNodeWithTag("tasks_screen").assertExists()
+        onNodeWithTag("our_family_banner_card").assertExists()
+        onNodeWithTag("stat_card_points").assertExists()
+        onNodeWithTag("stat_card_completed").assertExists()
+        onNodeWithTag("tasks_screen").performScrollToNode(hasTestTag("add_task_primary_button"))
+        onNodeWithTag("add_task_primary_button").assertExists()
+
+        // 3. Navigate to CalendarScreen and verify Soft Glass month grid and header
+        activeScreenState.value = com.example.model.AppScreen.CALENDAR
+        waitForIdle()
+        onNodeWithTag("calendar_screen").assertExists()
+        onNodeWithTag("calendar_month_grid").assertExists()
+        onNodeWithTag("calendar_selected_date_header").assertExists()
+
+        // 4. Navigate to TimetableScreen and verify Soft Glass timetable view and day selector
+        activeScreenState.value = com.example.model.AppScreen.TIMETABLE
+        waitForIdle()
+        onNodeWithTag("timetable_screen").assertExists()
+        onNodeWithTag("day_tab_SUNDAY").assertExists()
+        onNodeWithTag("day_tab_FRIDAY").assertExists()
+        onNodeWithTag("day_tab_SATURDAY").assertDoesNotExist()
+
+        // 5. Navigate to SettingsScreen and verify Soft Glass theme mode and text scale live preview
+        activeScreenState.value = com.example.model.AppScreen.SETTINGS
+        waitForIdle()
+        onNodeWithTag("settings_screen").assertExists()
+        onNodeWithTag("settings_screen").performScrollToNode(hasTestTag("theme_mode_LIGHT"))
+        onNodeWithTag("theme_mode_LIGHT").assertExists()
+        onNodeWithTag("theme_mode_DARK").assertExists()
+        onNodeWithTag("theme_mode_SYSTEM").assertExists()
+        onNodeWithTag("settings_screen").performScrollToNode(hasTestTag("settings_text_scale_preview"))
+        onNodeWithTag("settings_text_scale_preview").assertExists()
+        onNodeWithTag("text_scale_LARGE").assertExists()
     }
 }
 

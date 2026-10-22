@@ -6,7 +6,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
@@ -17,7 +16,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -29,7 +27,14 @@ import androidx.compose.ui.unit.sp
 import com.example.model.*
 import com.example.notifications.FamilyAlarmReceiver
 import com.example.notifications.FamilyAlarmScheduler
+import com.example.ui.components.FamilyGlassCard
+import com.example.ui.components.FamilyMemberAvatar
+import com.example.ui.components.FamilyPrimaryButton
+import com.example.ui.components.FamilySecondaryButton
 import com.example.ui.components.FamilySectionHeader
+import com.example.ui.components.FamilySettingsRow
+import com.example.ui.components.FamilyStatusChip
+import com.example.ui.components.SoftGlassScreenBackground
 import com.example.ui.theme.*
 
 @Composable
@@ -69,375 +74,350 @@ fun SettingsScreen(
     val diagnosticState by FamilyAlarmScheduler.diagnosticState.collectAsState()
     var showAlarmDiagnosticsPanel by remember { mutableStateOf(false) }
 
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        glass.screenGradientTop,
-                        glass.screenBackground,
-                        glass.screenGradientBottom
-                    )
+    SoftGlassScreenBackground(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("settings_screen"),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 110.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Quick Screen Help Guide
+            item {
+                com.example.ui.components.ScreenHelpBanner(
+                    title = if (isHebrew)
+                        "הגדרות, ענן ואבטחה (${com.example.util.AppVersionManager.displayVersionLabel})"
+                    else
+                        "Settings, Cloud & Security (${com.example.util.AppVersionManager.displayVersionLabel})",
+                    tips = if (isHebrew) listOf(
+                        "מראה ונגישות: בחרו ערכת נושא (בהיר, כהה או לפי הגדרות המכשיר) והתאימו את גודל הטקסט באפליקציה.",
+                        "ענן משפחתי משותף: נהלו את חיבור Google, קוד ההזמנה של המשפחה וסנכרון ליומן ו-Drive.",
+                        "הרשאות הורה מול ילד/ה: ניהול המשפחה ושינוי שם המשפחה פתוחים להורים (PARENT) בלבד.",
+                        "התראות ושעונים: כלי אבחון ובדיקת צלצול לשעונים מעוררים והתראות שיעור."
+                    ) else listOf(
+                        "Appearance & Accessibility: Choose Light/Dark/System theme and adjust global text size.",
+                        "Shared Family Cloud: Manage Google account sync, family invite code, Calendar & Drive.",
+                        "Parent vs Child Roles: Family management and renaming are restricted to PARENT members.",
+                        "Notifications & Alarms: Diagnostic tools and 15-second alarm test."
+                    ),
+                    isHebrew = isHebrew
                 )
-            )
-            .testTag("settings_screen"),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 110.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        // Quick Screen Help Guide
-        item {
-            com.example.ui.components.ScreenHelpBanner(
-                title = if (isHebrew)
-                    "הגדרות, ענן ואבטחה (${com.example.util.AppVersionManager.displayVersionLabel})"
-                else
-                    "Settings, Cloud & Security (${com.example.util.AppVersionManager.displayVersionLabel})",
-                tips = if (isHebrew) listOf(
-                    "מראה ונגישות: בחרו ערכת נושא (בהיר, כהה או לפי הגדרות המכשיר) והתאימו את גודל הטקסט באפליקציה.",
-                    "ענן משפחתי משותף: נהלו את חיבור Google, קוד ההזמנה של המשפחה וסנכרון ליומן ו-Drive.",
-                    "הרשאות הורה מול ילד/ה: ניהול המשפחה ושינוי שם המשפחה פתוחים להורים (PARENT) בלבד.",
-                    "התראות ושעונים: כלי אבחון ובדיקת צלצול לשעונים מעוררים והתראות שיעור."
-                ) else listOf(
-                    "Appearance & Accessibility: Choose Light/Dark/System theme and adjust global text size.",
-                    "Shared Family Cloud: Manage Google account sync, family invite code, Calendar & Drive.",
-                    "Parent vs Child Roles: Family management and renaming are restricted to PARENT members.",
-                    "Notifications & Alarms: Diagnostic tools and 15-second alarm test."
-                ),
-                isHebrew = isHebrew
-            )
-        }
+            }
 
-        // ============================================================
-        // SECTION 1: מראה ונגישות (Appearance & Accessibility)
-        // ============================================================
-        item {
-            FamilySectionHeader(
-                title = if (isHebrew) "מראה ונגישות" else "Appearance & Accessibility",
-                subtitle = if (isHebrew) "ערכת נושא, גודל טקסט, שפה וכיוון תצוגה" else "Theme mode, text size, language & layout"
-            )
-        }
+            // ============================================================
+            // SECTION 1: מראה ונגישות (Appearance & Accessibility)
+            // ============================================================
+            item {
+                FamilySectionHeader(
+                    title = if (isHebrew) "מראה ונגישות" else "Appearance & Accessibility",
+                    subtitle = if (isHebrew) "ערכת נושא, גודל טקסט, שפה וכיוון תצוגה" else "Theme mode, text size, language & layout"
+                )
+            }
 
-        // 1A. Theme Mode Selection ("ערכת נושא": "בהיר", "כהה", "לפי הגדרות המכשיר")
-        item {
-            SettingsCardContainer(
-                title = if (isHebrew) "ערכת נושא" else "Theme Mode",
-                icon = Icons.Default.Palette,
-                iconTint = glass.primaryAccent
-            ) {
-                val orderedModes = listOf(AppThemeMode.LIGHT, AppThemeMode.DARK, AppThemeMode.SYSTEM)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+            // 1A. Theme Mode Selection ("ערכת נושא": "בהיר", "כהה", "לפי הגדרות המכשיר")
+            item {
+                SettingsCardContainer(
+                    title = if (isHebrew) "ערכת נושא" else "Theme Mode",
+                    icon = Icons.Default.Palette,
+                    iconTint = glass.primaryAccent
                 ) {
-                    orderedModes.forEach { mode ->
-                        val isSelected = themeMode == mode
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = if (isSelected) glass.primaryAccent else glass.screenBackground,
-                            border = BorderStroke(
-                                1.dp,
-                                if (isSelected) glass.primaryAccent else glass.cardBorder
-                            ),
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(14.dp))
-                                .clickable { onThemeModeChange(mode) }
-                                .testTag("theme_mode_${mode.name}")
-                        ) {
-                            Box(
-                                modifier = Modifier.padding(vertical = 10.dp, horizontal = 6.dp),
-                                contentAlignment = Alignment.Center
+                    val orderedModes = listOf(AppThemeMode.LIGHT, AppThemeMode.DARK, AppThemeMode.SYSTEM)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        orderedModes.forEach { mode ->
+                            val isSelected = themeMode == mode
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (isSelected) glass.primaryAccent else glass.screenBackground,
+                                border = BorderStroke(
+                                    if (isSelected) 1.5.dp else 1.dp,
+                                    if (isSelected) glass.primaryAccent else glass.cardBorder
+                                ),
+                                shadowElevation = if (isSelected) 3.dp else 0.dp,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable { onThemeModeChange(mode) }
+                                    .testTag("theme_mode_${mode.name}")
                             ) {
-                                Text(
-                                    text = mode.getDisplayName(isHebrew),
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSelected) {
-                                            if (glass.isDark) Color(0xFF0B1120) else Color.White
-                                        } else {
-                                            glass.textPrimary
-                                        }
-                                    ),
-                                    textAlign = TextAlign.Center
-                                )
+                                Box(
+                                    modifier = Modifier.padding(vertical = 10.dp, horizontal = 6.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = mode.getDisplayName(isHebrew),
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (isSelected) {
+                                                if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                            } else {
+                                                glass.textPrimary
+                                            }
+                                        ),
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // 1B. Global Text Size Adjustment ("גודל טקסט" + Live Preview "כך ייראה הטקסט באפליקציה")
-        item {
-            SettingsCardContainer(
-                title = if (isHebrew) "גודל טקסט" else "Text Size",
-                icon = Icons.Default.FormatSize,
-                iconTint = SoftTeal
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+            // 1B. Global Text Size Adjustment ("גודל טקסט" + Live Preview "כך ייראה הטקסט באפליקציה")
+            item {
+                SettingsCardContainer(
+                    title = if (isHebrew) "גודל טקסט" else "Text Size",
+                    icon = Icons.Default.FormatSize,
+                    iconTint = SoftTeal
                 ) {
-                    AppTextScale.values().forEach { scaleOption ->
-                        val isSelected = appTextScale == scaleOption
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = if (isSelected) glass.primaryAccent else glass.screenBackground,
-                            border = BorderStroke(
-                                1.dp,
-                                if (isSelected) glass.primaryAccent else glass.cardBorder
-                            ),
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable { onTextScaleChange(scaleOption) }
-                                .testTag("text_scale_${scaleOption.name}")
-                        ) {
-                            Box(
-                                modifier = Modifier.padding(vertical = 10.dp, horizontal = 4.dp),
-                                contentAlignment = Alignment.Center
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        AppTextScale.values().forEach { scaleOption ->
+                            val isSelected = appTextScale == scaleOption
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isSelected) glass.primaryAccent else glass.screenBackground,
+                                border = BorderStroke(
+                                    if (isSelected) 1.5.dp else 1.dp,
+                                    if (isSelected) glass.primaryAccent else glass.cardBorder
+                                ),
+                                shadowElevation = if (isSelected) 2.dp else 0.dp,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { onTextScaleChange(scaleOption) }
+                                    .testTag("text_scale_${scaleOption.name}")
                             ) {
-                                Text(
-                                    text = scaleOption.getDisplayName(isHebrew),
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSelected) {
-                                            if (glass.isDark) Color(0xFF0B1120) else Color.White
-                                        } else {
-                                            glass.textPrimary
-                                        }
-                                    ),
-                                    textAlign = TextAlign.Center,
-                                    maxLines = 2
-                                )
+                                Box(
+                                    modifier = Modifier.padding(vertical = 10.dp, horizontal = 4.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = scaleOption.getDisplayName(isHebrew),
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (isSelected) {
+                                                if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                            } else {
+                                                glass.textPrimary
+                                            }
+                                        ),
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 2
+                                    )
+                                }
                             }
                         }
                     }
-                }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                // Live Preview inside Settings
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = glass.cardTintedBlueBackground,
-                    border = BorderStroke(1.dp, glass.cardBorder),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("settings_text_scale_preview")
-                ) {
-                    Row(
+                    // Live Preview inside Settings using FamilyGlassCard
+                    FamilyGlassCard(
+                        cornerRadius = 16.dp,
+                        isTintedBlue = true,
+                        elevation = 1.dp,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                            .testTag("settings_text_scale_preview")
                     ) {
-                        Text(
-                            text = if (isHebrew) "כך ייראה הטקסט באפליקציה" else "This is how text will look in the app",
-                            style = MaterialTheme.typography.bodyLarge.copy(
-                                fontWeight = FontWeight.SemiBold,
-                                color = glass.textPrimary
-                            ),
-                            modifier = Modifier.weight(1f)
-                        )
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = glass.primaryAccentSoftBg
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = "${(appTextScale.scaleFactor * 100).toInt()}%",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = glass.primaryAccent
+                                text = if (isHebrew) "כך ייראה הטקסט באפליקציה" else "This is how text will look in the app",
+                                style = MaterialTheme.typography.bodyLarge.copy(
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = glass.textPrimary
                                 ),
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                modifier = Modifier.weight(1f)
+                            )
+                            FamilyStatusChip(
+                                label = "${(appTextScale.scaleFactor * 100).toInt()}%"
                             )
                         }
                     }
                 }
             }
-        }
 
-        // 1C. Language & RTL Direction
-        item {
-            SettingsCardContainer(
-                title = if (isHebrew) "שפה וכיוון תצוגה (RTL / LTR)" else "Language & Layout Direction",
-                icon = Icons.Default.Language,
-                iconTint = SoftLavender
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+            // 1C. Language & RTL Direction
+            item {
+                SettingsCardContainer(
+                    title = if (isHebrew) "שפה וכיוון תצוגה (RTL / LTR)" else "Language & Layout Direction",
+                    icon = Icons.Default.Language,
+                    iconTint = SoftLavender
                 ) {
-                    AppLanguage.values().forEach { lang ->
-                        val isSelected = appLanguage == lang
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = if (isSelected) glass.primaryAccent else glass.screenBackground,
-                            border = BorderStroke(
-                                1.dp,
-                                if (isSelected) glass.primaryAccent else glass.cardBorder
-                            ),
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(14.dp))
-                                .clickable { onLanguageChange(lang) }
-                                .testTag("lang_option_${lang.code}")
-                        ) {
-                            Box(
-                                modifier = Modifier.padding(vertical = 12.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = lang.displayName,
-                                    style = MaterialTheme.typography.labelLarge.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSelected) {
-                                            if (glass.isDark) Color(0xFF0B1120) else Color.White
-                                        } else {
-                                            glass.textPrimary
-                                        }
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 1D. First Day of Week Selection (Sunday vs Monday)
-        item {
-            SettingsCardContainer(
-                title = if (isHebrew) "היום הראשון בשבוע בלוח השנה" else "Calendar First Day of Week",
-                icon = Icons.Default.DateRange,
-                iconTint = GoogleYellow
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    FirstDayOfWeek.values().forEach { dayOption ->
-                        val isSelected = firstDayOfWeek == dayOption
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = if (isSelected) glass.primaryAccent else glass.screenBackground,
-                            border = BorderStroke(
-                                1.dp,
-                                if (isSelected) glass.primaryAccent else glass.cardBorder
-                            ),
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(14.dp))
-                                .clickable { onFirstDayOfWeekChange(dayOption) }
-                                .testTag("first_day_${dayOption.name}")
-                        ) {
-                            Box(
-                                modifier = Modifier.padding(vertical = 12.dp, horizontal = 8.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = dayOption.getDisplayName(isHebrew),
-                                    style = MaterialTheme.typography.labelMedium.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSelected) {
-                                            if (glass.isDark) Color(0xFF0B1120) else Color.White
-                                        } else {
-                                            glass.textPrimary
-                                        }
-                                    ),
-                                    textAlign = TextAlign.Center
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ============================================================
-        // SECTION 2: התראות ושעונים (Notifications & Alarms)
-        // ============================================================
-        item {
-            FamilySectionHeader(
-                title = if (isHebrew) "התראות ושעונים" else "Notifications & Alarms",
-                subtitle = if (isHebrew) "התראות שיעור, נעילה ביומטרית ואבחון שעון מעורר" else "Class alerts, biometric lock & alarm diagnostics"
-            )
-        }
-
-        // 2A. Security (Biometric Lock) & Smart School Alerts
-        item {
-            SettingsCardContainer(
-                title = if (isHebrew) "אבטחה והתראות חכמות" else "Security & Smart Alerts",
-                icon = Icons.Default.Security,
-                iconTint = GoogleRed
-            ) {
-                SettingsSwitchRow(
-                    title = if (isHebrew) "התראת שיעור 10 דקות לפני תחילתו 🔔" else "10-Minute Pre-Class Alert 🔔",
-                    subtitle = if (isHebrew) "שליחת התראה אוטומטית לילדים 10 דקות לפני כל שיעור במערכת" else "Alert children 10 minutes before each school period",
-                    checked = tenMinuteClassAlertsEnabled,
-                    onCheckedChange = onTenMinuteAlertsChange,
-                    testTag = "switch_ten_min_alerts"
-                )
-
-                HorizontalDivider(color = glass.divider, modifier = Modifier.padding(vertical = 8.dp))
-
-                SettingsSwitchRow(
-                    title = if (isHebrew) "נעילה ביומטרית / קוד גישה 🔒" else "Biometric / PIN App Lock 🔒",
-                    subtitle = if (isHebrew) "הגנה על פרטיות המסמכים והמשימות המשפחתיות" else "Protect family files and settings with fingerprint/PIN",
-                    checked = biometricLockEnabled,
-                    onCheckedChange = onBiometricLockChange,
-                    testTag = "switch_biometric_lock"
-                )
-
-                if (biometricLockEnabled) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedButton(
-                        onClick = onLockNow,
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, glass.cardBorder),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("lock_app_now_btn")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Icon(imageVector = Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
+                        AppLanguage.values().forEach { lang ->
+                            val isSelected = appLanguage == lang
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (isSelected) glass.primaryAccent else glass.screenBackground,
+                                border = BorderStroke(
+                                    if (isSelected) 1.5.dp else 1.dp,
+                                    if (isSelected) glass.primaryAccent else glass.cardBorder
+                                ),
+                                shadowElevation = if (isSelected) 2.dp else 0.dp,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable { onLanguageChange(lang) }
+                                    .testTag("lang_option_${lang.code}")
+                            ) {
+                                Box(
+                                    modifier = Modifier.padding(vertical = 12.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = lang.displayName,
+                                        style = MaterialTheme.typography.labelLarge.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (isSelected) {
+                                                if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                            } else {
+                                                glass.textPrimary
+                                            }
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 1D. First Day of Week Selection (Sunday vs Monday)
+            item {
+                SettingsCardContainer(
+                    title = if (isHebrew) "היום הראשון בשבוע בלוח השנה" else "Calendar First Day of Week",
+                    icon = Icons.Default.DateRange,
+                    iconTint = GoogleYellow
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        FirstDayOfWeek.values().forEach { dayOption ->
+                            val isSelected = firstDayOfWeek == dayOption
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (isSelected) glass.primaryAccent else glass.screenBackground,
+                                border = BorderStroke(
+                                    if (isSelected) 1.5.dp else 1.dp,
+                                    if (isSelected) glass.primaryAccent else glass.cardBorder
+                                ),
+                                shadowElevation = if (isSelected) 2.dp else 0.dp,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable { onFirstDayOfWeekChange(dayOption) }
+                                    .testTag("first_day_${dayOption.name}")
+                            ) {
+                                Box(
+                                    modifier = Modifier.padding(vertical = 12.dp, horizontal = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = dayOption.getDisplayName(isHebrew),
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (isSelected) {
+                                                if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                            } else {
+                                                glass.textPrimary
+                                            }
+                                        ),
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ============================================================
+            // SECTION 2: התראות ושעונים (Notifications & Alarms)
+            // ============================================================
+            item {
+                FamilySectionHeader(
+                    title = if (isHebrew) "התראות ושעונים" else "Notifications & Alarms",
+                    subtitle = if (isHebrew) "התראות שיעור, נעילה ביומטרית ואבחון שעון מעורר" else "Class alerts, biometric lock & alarm diagnostics"
+                )
+            }
+
+            // 2A. Security (Biometric Lock) & Smart School Alerts
+            item {
+                SettingsCardContainer(
+                    title = if (isHebrew) "אבטחה והתראות חכמות" else "Security & Smart Alerts",
+                    icon = Icons.Default.Security,
+                    iconTint = GoogleRed
+                ) {
+                    SettingsSwitchRow(
+                        title = if (isHebrew) "התראת שיעור 10 דקות לפני תחילתו 🔔" else "10-Minute Pre-Class Alert 🔔",
+                        subtitle = if (isHebrew) "שליחת התראה אוטומטית לילדים 10 דקות לפני כל שיעור במערכת" else "Alert children 10 minutes before each school period",
+                        checked = tenMinuteClassAlertsEnabled,
+                        onCheckedChange = onTenMinuteAlertsChange,
+                        testTag = "switch_ten_min_alerts"
+                    )
+
+                    HorizontalDivider(color = glass.divider, modifier = Modifier.padding(vertical = 8.dp))
+
+                    SettingsSwitchRow(
+                        title = if (isHebrew) "נעילה ביומטרית / קוד גישה 🔒" else "Biometric / PIN App Lock 🔒",
+                        subtitle = if (isHebrew) "הגנה על פרטיות המסמכים והמשימות המשפחתיות" else "Protect family files and settings with fingerprint/PIN",
+                        checked = biometricLockEnabled,
+                        onCheckedChange = onBiometricLockChange,
+                        testTag = "switch_biometric_lock"
+                    )
+
+                    if (biometricLockEnabled) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        FamilySecondaryButton(
                             text = if (isHebrew) "נעל את האפליקציה עכשיו" else "Lock App Now",
-                            fontWeight = FontWeight.Bold
+                            leadingIcon = Icons.Default.Lock,
+                            onClick = onLockNow,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("lock_app_now_btn")
                         )
                     }
                 }
             }
-        }
 
-        // 2B. Alarm Clock Advanced Settings & Diagnostics ("שעונים מעוררים והשכמה")
-        item(key = "settings_alarm_diagnostics_card") {
-            val hasExactPermission = remember(diagnosticState, showAlarmDiagnosticsPanel) {
-                FamilyAlarmScheduler.canScheduleExactAlarms(context)
-            }
-            val canUseFullScreen = remember(diagnosticState, showAlarmDiagnosticsPanel) {
-                FamilyAlarmScheduler.canUseFullScreenIntent(context)
-            }
-            val hasNotifications = remember(diagnosticState, showAlarmDiagnosticsPanel) {
-                FamilyAlarmScheduler.hasNotificationPermission(context)
-            }
-            val isBatteryUnrestricted = remember(showAlarmDiagnosticsPanel) {
-                FamilyAlarmScheduler.isIgnoringBatteryOptimizations(context)
-            }
+            // 2B. Alarm Clock Advanced Settings & Diagnostics ("שעונים מעוררים והשכמה")
+            item(key = "settings_alarm_diagnostics_card") {
+                val hasExactPermission = remember(diagnosticState, showAlarmDiagnosticsPanel) {
+                    FamilyAlarmScheduler.canScheduleExactAlarms(context)
+                }
+                val canUseFullScreen = remember(diagnosticState, showAlarmDiagnosticsPanel) {
+                    FamilyAlarmScheduler.canUseFullScreenIntent(context)
+                }
+                val hasNotifications = remember(diagnosticState, showAlarmDiagnosticsPanel) {
+                    FamilyAlarmScheduler.hasNotificationPermission(context)
+                }
+                val isBatteryUnrestricted = remember(showAlarmDiagnosticsPanel) {
+                    FamilyAlarmScheduler.isIgnoringBatteryOptimizations(context)
+                }
 
-            Surface(
-                shape = RoundedCornerShape(22.dp),
-                color = glass.cardBackground,
-                tonalElevation = 2.dp,
-                shadowElevation = 2.dp,
-                border = BorderStroke(1.dp, glass.cardBorder),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("settings_alarm_diagnostics_section")
-            ) {
-                Column(modifier = Modifier.fillMaxWidth()) {
+                FamilyGlassCard(
+                    cornerRadius = 24.dp,
+                    elevation = 3.dp,
+                    contentPadding = PaddingValues(0.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("settings_alarm_diagnostics_section")
+                ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -452,19 +432,20 @@ fun SettingsScreen(
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                             modifier = Modifier.weight(1f)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .clip(CircleShape)
-                                    .background(glass.primaryAccentSoftBg),
-                                contentAlignment = Alignment.Center
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = glass.primaryAccentSoftBg,
+                                border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.35f)),
+                                modifier = Modifier.size(44.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Alarm,
-                                    contentDescription = null,
-                                    tint = glass.primaryAccent,
-                                    modifier = Modifier.size(22.dp)
-                                )
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.Alarm,
+                                        contentDescription = null,
+                                        tint = glass.primaryAccent,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
                             }
 
                             Column(modifier = Modifier.weight(1f)) {
@@ -510,20 +491,18 @@ fun SettingsScreen(
                             HorizontalDivider(color = glass.divider)
 
                             // Permission Readiness Checks
-                            Surface(
-                                shape = RoundedCornerShape(14.dp),
-                                color = glass.cardTintedBlueBackground,
-                                border = BorderStroke(1.dp, glass.cardBorder),
+                            FamilyGlassCard(
+                                cornerRadius = 16.dp,
+                                isTintedBlue = true,
+                                elevation = 1.dp,
+                                contentPadding = PaddingValues(12.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Text(
                                         text = if (isHebrew) "סטטוס הרשאות מערכת לשעון מעורר" else "System Alarm Permissions Status",
                                         style = MaterialTheme.typography.labelLarge.copy(
-                                            fontWeight = FontWeight.Bold,
+                                            fontWeight = FontWeight.ExtraBold,
                                             color = glass.primaryAccent
                                         )
                                     )
@@ -597,271 +576,252 @@ fun SettingsScreen(
                     }
                 }
             }
-        }
 
-        // ============================================================
-        // SECTION 3: משפחה וחשבון (Family & Account)
-        // ============================================================
-        item {
-            FamilySectionHeader(
-                title = if (isHebrew) "משפחה וחשבון" else "Family & Account",
-                subtitle = if (isHebrew) "פרופיל משפחתי, הרשאות הורה/ילד וסנכרון Google" else "Family profile, roles & Google cloud sync"
-            )
-        }
+            // ============================================================
+            // SECTION 3: משפחה וחשבון (Family & Account)
+            // ============================================================
+            item {
+                FamilySectionHeader(
+                    title = if (isHebrew) "משפחה וחשבון" else "Family & Account",
+                    subtitle = if (isHebrew) "פרופיל משפחתי, הרשאות הורה/ילד וסנכרון Google" else "Family profile, roles & Google cloud sync"
+                )
+            }
 
-        // 3A. Family Identity & Admin Management Card
-        item {
-            SettingsCardContainer(
-                title = if (isHebrew) "משפחה והרשאות ניהול" else "Family & Admin Management",
-                icon = Icons.Default.FamilyRestroom,
-                iconTint = glass.primaryAccent
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+            // 3A. Family Identity & Admin Management Card
+            item {
+                SettingsCardContainer(
+                    title = if (isHebrew) "משפחה והרשאות ניהול" else "Family & Admin Management",
+                    icon = Icons.Default.FamilyRestroom,
+                    iconTint = glass.primaryAccent
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = familyName,
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.ExtraBold,
-                                color = glass.textPrimary
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            FamilyMemberAvatar(member = currentMember, size = 42.dp, isHighlighted = true)
+                            Column {
+                                Text(
+                                    text = familyName,
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = glass.textPrimary
+                                    )
+                                )
+                                val identityLabel = currentMember.familyIdentity.getDisplayName(isHebrew)
+                                val roleLabel = currentMember.role.getDisplayName(isHebrew)
+                                Text(
+                                    text = if (isHebrew)
+                                        "פרופיל פעיל: ${currentMember.name} • זהות: $identityLabel ($roleLabel)"
+                                    else
+                                        "Active: ${currentMember.nameEn} • Identity: $identityLabel ($roleLabel)",
+                                    style = MaterialTheme.typography.bodySmall.copy(color = glass.textSecondary),
+                                    modifier = Modifier.testTag("settings_member_identity_badge")
+                                )
+                            }
+                        }
+
+                        if (currentMember.isParent) {
+                            FamilySecondaryButton(
+                                text = if (isHebrew) "שנה שם" else "Rename",
+                                leadingIcon = Icons.Default.Edit,
+                                onClick = onEditFamilyName,
+                                modifier = Modifier.testTag("settings_edit_family_name_btn")
                             )
-                        )
-                        val identityLabel = currentMember.familyIdentity.getDisplayName(isHebrew)
-                        val roleLabel = currentMember.role.getDisplayName(isHebrew)
-                        Text(
-                            text = if (isHebrew)
-                                "פרופיל פעיל: ${currentMember.name} • זהות: $identityLabel ($roleLabel)"
-                            else
-                                "Active: ${currentMember.nameEn} • Identity: $identityLabel ($roleLabel)",
-                            style = MaterialTheme.typography.bodySmall.copy(color = glass.textSecondary),
-                            modifier = Modifier.testTag("settings_member_identity_badge")
-                        )
+                        }
                     }
 
                     if (currentMember.isParent) {
-                        OutlinedButton(
-                            onClick = onEditFamilyName,
-                            shape = RoundedCornerShape(14.dp),
-                            border = BorderStroke(1.dp, glass.cardBorder),
-                            modifier = Modifier.testTag("settings_edit_family_name_btn")
-                        ) {
-                            Icon(imageVector = Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(if (isHebrew) "שנה שם" else "Rename", fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-
-                if (currentMember.isParent) {
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text(
-                        text = if (isHebrew) "זהות הורה בפרופיל (נשמר בענן):" else "Parent Identity in Profile:",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            color = glass.textSecondary,
-                            fontWeight = FontWeight.Bold
-                        )
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        val isFather = currentMember.familyIdentity == FamilyIdentity.FATHER
-                        val isMother = currentMember.familyIdentity == FamilyIdentity.MOTHER
-                        FilterChip(
-                            selected = isFather,
-                            onClick = { onUpdateFamilyIdentity(FamilyIdentity.FATHER) },
-                            label = {
-                                Text(
-                                    text = if (isHebrew) "👨 אבא (Father)" else "👨 Father",
-                                    fontWeight = if (isFather) FontWeight.Bold else FontWeight.Normal
-                                )
-                            },
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("settings_identity_father_chip")
-                        )
-                        FilterChip(
-                            selected = isMother,
-                            onClick = { onUpdateFamilyIdentity(FamilyIdentity.MOTHER) },
-                            label = {
-                                Text(
-                                    text = if (isHebrew) "👩 אמא (Mother)" else "👩 Mother",
-                                    fontWeight = if (isMother) FontWeight.Bold else FontWeight.Normal
-                                )
-                            },
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("settings_identity_mother_chip")
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    Button(
-                        onClick = onOpenAdminDashboard,
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = glass.primaryAccent,
-                            contentColor = if (glass.isDark) Color(0xFF0B1120) else Color.White
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("settings_open_admin_btn")
-                    ) {
-                        Icon(imageVector = Icons.Default.AdminPanelSettings, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = if (isHebrew) "פתח לוח ניהול משפחה והזמנות" else "Open Family & Invitations Dashboard",
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                } else {
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = glass.successBg,
-                        border = BorderStroke(1.dp, glass.successBorder),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("child_role_info_banner")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.VerifiedUser,
-                                contentDescription = null,
-                                tint = glass.successText,
-                                modifier = Modifier.size(20.dp)
+                            text = if (isHebrew) "זהות הורה בפרופיל (נשמר בענן):" else "Parent Identity in Profile:",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = glass.textSecondary,
+                                fontWeight = FontWeight.Bold
                             )
-                            Column {
-                                Text(
-                                    text = if (isHebrew)
-                                        "מחובר כילד/ה (${currentMember.name})"
-                                    else
-                                        "Signed in as Child (${currentMember.name})",
-                                    style = MaterialTheme.typography.labelMedium.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = glass.successText
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            val isFather = currentMember.familyIdentity == FamilyIdentity.FATHER
+                            val isMother = currentMember.familyIdentity == FamilyIdentity.MOTHER
+                            FilterChip(
+                                selected = isFather,
+                                onClick = { onUpdateFamilyIdentity(FamilyIdentity.FATHER) },
+                                label = {
+                                    Text(
+                                        text = if (isHebrew) "👨 אבא (Father)" else "👨 Father",
+                                        fontWeight = if (isFather) FontWeight.Bold else FontWeight.Normal
                                     )
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("settings_identity_father_chip")
+                            )
+                            FilterChip(
+                                selected = isMother,
+                                onClick = { onUpdateFamilyIdentity(FamilyIdentity.MOTHER) },
+                                label = {
+                                    Text(
+                                        text = if (isHebrew) "👩 אמא (Mother)" else "👩 Mother",
+                                        fontWeight = if (isMother) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("settings_identity_mother_chip")
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        FamilyPrimaryButton(
+                            text = if (isHebrew) "פתח לוח ניהול משפחה והזמנות" else "Open Family & Invitations Dashboard",
+                            leadingIcon = Icons.Default.AdminPanelSettings,
+                            onClick = onOpenAdminDashboard,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("settings_open_admin_btn")
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        FamilyGlassCard(
+                            cornerRadius = 16.dp,
+                            accentColor = GoogleGreen,
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("child_role_info_banner")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.VerifiedUser,
+                                    contentDescription = null,
+                                    tint = glass.successText,
+                                    modifier = Modifier.size(20.dp)
                                 )
-                                Text(
-                                    text = if (isHebrew)
-                                        "משויך למשפחת $familyName • סמנו משימות כבוצע לשליחה לאישור הורה וצבירת נקודות"
-                                    else
-                                        "Connected to $familyName • Complete tasks to submit for parent approval",
-                                    style = MaterialTheme.typography.labelSmall.copy(color = glass.textSecondary)
-                                )
+                                Column {
+                                    Text(
+                                        text = if (isHebrew)
+                                            "מחובר כילד/ה (${currentMember.name})"
+                                        else
+                                            "Signed in as Child (${currentMember.name})",
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = glass.successText
+                                        )
+                                    )
+                                    Text(
+                                        text = if (isHebrew)
+                                            "משויך למשפחת $familyName • סמנו משימות כבוצע לשליחה לאישור הורה וצבירת נקודות"
+                                        else
+                                            "Connected to $familyName • Complete tasks to submit for parent approval",
+                                        style = MaterialTheme.typography.labelSmall.copy(color = glass.textSecondary)
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // 3B. Google Workspace & Cloud Family Group Synchronization Card
-        item {
-            SettingsCardContainer(
-                title = if (isHebrew) "סנכרון חשבון Google וענן משפחתי" else "Google Account & Cloud Family Sync",
-                icon = Icons.Default.CloudDone,
-                iconTint = GoogleGreen
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = glass.cardTintedBlueBackground,
-                    border = BorderStroke(1.dp, glass.cardBorder),
-                    modifier = Modifier.fillMaxWidth()
+            // 3B. Google Workspace & Cloud Family Group Synchronization Card
+            item {
+                SettingsCardContainer(
+                    title = if (isHebrew) "סנכרון חשבון Google וענן משפחתי" else "Google Account & Cloud Family Sync",
+                    icon = Icons.Default.CloudDone,
+                    iconTint = GoogleGreen
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                    FamilyGlassCard(
+                        cornerRadius = 16.dp,
+                        isTintedBlue = true,
+                        elevation = 1.dp,
+                        contentPadding = PaddingValues(12.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = googleEmail,
-                                style = MaterialTheme.typography.bodyMedium.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = glass.primaryAccent
-                                )
-                            )
-                            Text(
-                                text = if (isHebrew)
-                                    "חברים מסונכרנים: ${cloudFamilyGroup.syncedMembersCount} • תפקיד: ${currentMember.role.getDisplayName(true)}"
-                                else
-                                    "Synced members: ${cloudFamilyGroup.syncedMembersCount} • Role: ${currentMember.role.getDisplayName(false)}",
-                                style = MaterialTheme.typography.labelSmall.copy(color = glass.textSecondary)
-                            )
-                        }
-
-                        Button(
-                            onClick = onOpenGoogleSignIn,
-                            shape = RoundedCornerShape(12.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = glass.primaryAccent,
-                                contentColor = if (glass.isDark) Color(0xFF0B1120) else Color.White
-                            ),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier.testTag("settings_google_connect_btn")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = googleEmail,
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = glass.primaryAccent
+                                    )
+                                )
+                                Text(
+                                    text = if (isHebrew)
+                                        "חברים מסונכרנים: ${cloudFamilyGroup.syncedMembersCount} • תפקיד: ${currentMember.role.getDisplayName(true)}"
+                                    else
+                                        "Synced members: ${cloudFamilyGroup.syncedMembersCount} • Role: ${currentMember.role.getDisplayName(false)}",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = glass.textSecondary)
+                                )
+                            }
+
+                            FamilyPrimaryButton(
                                 text = if (isHebrew) "החלף / חבר" else "Connect",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
+                                onClick = onOpenGoogleSignIn,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier.testTag("settings_google_connect_btn")
                             )
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    SettingsSwitchRow(
+                        title = if (isHebrew) "סנכרון אוטומטי ל-Google Calendar" else "Auto-Sync to Google Calendar",
+                        subtitle = if (isHebrew) "כל משימה חדשה מתווספת ליומן המשותף" else "Sync chores to shared Google Calendar",
+                        checked = autoSyncCalendar,
+                        onCheckedChange = onAutoSyncCalendarChange,
+                        testTag = "switch_auto_sync_calendar"
+                    )
+
+                    HorizontalDivider(color = glass.divider, modifier = Modifier.padding(vertical = 6.dp))
+
+                    SettingsSwitchRow(
+                        title = if (isHebrew) "גיבוי מסמכים אוטומטי ל-Google Drive" else "Auto-Backup Files to Google Drive",
+                        subtitle = if (isHebrew) "שמירת קבצי לימודים, רפואה וציורים בענן" else "Sync family documents to Google Drive",
+                        checked = autoSyncDrive,
+                        onCheckedChange = onAutoSyncDriveChange,
+                        testTag = "switch_auto_sync_drive"
+                    )
                 }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                SettingsSwitchRow(
-                    title = if (isHebrew) "סנכרון אוטומטי ל-Google Calendar" else "Auto-Sync to Google Calendar",
-                    subtitle = if (isHebrew) "כל משימה חדשה מתווספת ליומן המשותף" else "Sync chores to shared Google Calendar",
-                    checked = autoSyncCalendar,
-                    onCheckedChange = onAutoSyncCalendarChange,
-                    testTag = "switch_auto_sync_calendar"
-                )
-
-                HorizontalDivider(color = glass.divider, modifier = Modifier.padding(vertical = 6.dp))
-
-                SettingsSwitchRow(
-                    title = if (isHebrew) "גיבוי מסמכים אוטומטי ל-Google Drive" else "Auto-Backup Files to Google Drive",
-                    subtitle = if (isHebrew) "שמירת קבצי לימודים, רפואה וציורים בענן" else "Sync family documents to Google Drive",
-                    checked = autoSyncDrive,
-                    onCheckedChange = onAutoSyncDriveChange,
-                    testTag = "switch_auto_sync_drive"
-                )
             }
-        }
 
-        // ============================================================
-        // SECTION 4: מידע (Information & Version Footer)
-        // ============================================================
-        item {
-            FamilySectionHeader(
-                title = if (isHebrew) "מידע" else "Information"
-            )
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = "FamilyTasks Workspace ${com.example.util.AppVersionManager.displayVersionLabel} (Build ${com.example.util.AppVersionManager.currentVersionCode}) • Google Calendar & Drive Edition",
-                    style = MaterialTheme.typography.labelSmall.copy(color = glass.textSecondary),
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.testTag("settings_app_version_footer")
+            // ============================================================
+            // SECTION 4: מידע (Information & Version Footer)
+            // ============================================================
+            item {
+                FamilySectionHeader(
+                    title = if (isHebrew) "מידע" else "Information"
                 )
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "FamilyTasks Workspace ${com.example.util.AppVersionManager.displayVersionLabel} (Build ${com.example.util.AppVersionManager.currentVersionCode}) • Google Calendar & Drive Edition",
+                        style = MaterialTheme.typography.labelSmall.copy(color = glass.textSecondary),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.testTag("settings_app_version_footer")
+                    )
+                }
             }
         }
     }
@@ -902,19 +862,11 @@ private fun AlarmPermissionDiagnosticRow(
         }
 
         if (isGranted) {
-            Surface(
-                shape = RoundedCornerShape(8.dp),
-                color = glass.successBg
-            ) {
-                Text(
-                    text = "תקין",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        color = glass.successText,
-                        fontWeight = FontWeight.Bold
-                    ),
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                )
-            }
+            FamilyStatusChip(
+                label = "תקין",
+                containerColor = glass.successBg,
+                contentColor = glass.successText
+            )
         } else {
             TextButton(
                 onClick = onAction,
@@ -958,18 +910,16 @@ private fun SettingsDeveloperAlarmDiagnosticsContent(
         0L
     }
 
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = glass.cardTintedBlueBackground,
-        border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.35f)),
+    FamilyGlassCard(
+        cornerRadius = 16.dp,
+        isTintedBlue = true,
+        elevation = 1.dp,
+        contentPadding = PaddingValues(12.dp),
         modifier = Modifier
             .fillMaxWidth()
             .testTag("developer_alarm_diagnostics_card")
     ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1000,47 +950,25 @@ private fun SettingsDeveloperAlarmDiagnosticsContent(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Button(
+                FamilyPrimaryButton(
+                    text = if (isHebrew) "בדיקת צלצול בעוד 15 שניות" else "Test Alarm in 15 Seconds",
                     onClick = onSchedule15sTest,
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = glass.primaryAccent,
-                        contentColor = if (glass.isDark) Color(0xFF0B1120) else Color.White
-                    ),
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                     modifier = Modifier
                         .weight(1f)
                         .defaultMinSize(minHeight = 44.dp)
                         .testTag("diagnostic_alarm_15s_button")
-                ) {
-                    Text(
-                        text = if (isHebrew) "בדיקת צלצול בעוד 15 שניות" else "Test Alarm in 15 Seconds",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                )
 
-                OutlinedButton(
+                FamilySecondaryButton(
+                    text = if (isHebrew) "השתק" else "Silence",
+                    leadingIcon = Icons.Default.AlarmOff,
                     onClick = onStopRinging,
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, glass.cardBorder),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                     modifier = Modifier
                         .defaultMinSize(minHeight = 44.dp)
                         .testTag("stop_active_alarm_ringing_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.AlarmOff,
-                        contentDescription = if (isHebrew) "השתק" else "Silence",
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = if (isHebrew) "השתק" else "Silence",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                )
             }
 
             Column(
@@ -1144,51 +1072,44 @@ private fun SettingsCardContainer(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val glass = LocalSoftGlassColors.current
-    Surface(
-        shape = RoundedCornerShape(22.dp),
-        color = glass.cardBackground,
-        border = BorderStroke(1.dp, glass.cardBorder),
-        shadowElevation = 2.dp,
-        tonalElevation = 1.dp,
+    FamilyGlassCard(
+        cornerRadius = 24.dp,
+        elevation = 3.dp,
+        contentPadding = PaddingValues(16.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            Surface(
+                shape = RoundedCornerShape(13.dp),
+                color = iconTint.copy(alpha = if (glass.isDark) 0.24f else 0.14f),
+                border = BorderStroke(1.dp, iconTint.copy(alpha = 0.35f)),
+                modifier = Modifier.size(38.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(CircleShape)
-                        .background(iconTint.copy(alpha = if (glass.isDark) 0.24f else 0.14f)),
-                    contentAlignment = Alignment.Center
-                ) {
+                Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = icon,
                         contentDescription = null,
                         tint = iconTint,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(19.dp)
                     )
                 }
-
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleSmall.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = glass.textPrimary
-                    )
-                )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            content()
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall.copy(
+                    fontWeight = FontWeight.ExtraBold,
+                    color = glass.textPrimary
+                )
+            )
         }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        content()
     }
 }
 
@@ -1200,33 +1121,15 @@ private fun SettingsSwitchRow(
     onCheckedChange: (Boolean) -> Unit,
     testTag: String
 ) {
-    val glass = LocalSoftGlassColors.current
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    fontWeight = FontWeight.Bold,
-                    color = glass.textPrimary
-                )
-            )
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodySmall.copy(
-                    color = glass.textSecondary,
-                    fontSize = 11.sp
-                )
+    FamilySettingsRow(
+        title = title,
+        subtitle = subtitle,
+        trailingContent = {
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                modifier = Modifier.testTag(testTag)
             )
         }
-
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            modifier = Modifier.testTag(testTag)
-        )
-    }
+    )
 }

@@ -22,9 +22,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -34,6 +32,11 @@ import androidx.compose.ui.unit.sp
 import com.example.model.*
 import com.example.ui.components.FamilyEmptyState
 import com.example.ui.components.FamilyGlassCard
+import com.example.ui.components.FamilyMemberAvatar
+import com.example.ui.components.FamilyPrimaryButton
+import com.example.ui.components.FamilySectionHeader
+import com.example.ui.components.FamilyStatusChip
+import com.example.ui.components.SoftGlassScreenBackground
 import com.example.ui.components.TimeFormatUtils
 import com.example.ui.dialogs.TaskDetailDialog
 import com.example.ui.theme.*
@@ -192,678 +195,654 @@ fun TasksScreen(
     }
 
     Scaffold(
-        containerColor = glass.screenBackground,
+        containerColor = Color.Transparent,
         floatingActionButton = {
             if (currentMember.isParent) {
                 FloatingActionButton(
                     onClick = onAddNewTask,
-                    shape = RoundedCornerShape(20.dp),
+                    shape = RoundedCornerShape(22.dp),
                     containerColor = glass.primaryAccent,
                     contentColor = if (glass.isDark) Color(0xFF0B1120) else Color.White,
                     elevation = FloatingActionButtonDefaults.elevation(
-                        defaultElevation = 4.dp,
-                        pressedElevation = 8.dp
+                        defaultElevation = 6.dp,
+                        pressedElevation = 10.dp
                     ),
                     modifier = Modifier.testTag("add_task_fab")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Add,
                         contentDescription = if (isHebrew) "הוסף משימה" else "Add Task",
-                        modifier = Modifier.size(24.dp)
+                        modifier = Modifier.size(26.dp)
                     )
                 }
             }
         }
     ) { innerPadding ->
-        LazyColumn(
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = 10.dp,
-                bottom = innerPadding.calculateBottomPadding() + 88.dp
-            ),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            glass.screenGradientTop,
-                            glass.screenBackground,
-                            glass.screenGradientBottom
-                        )
-                    )
-                )
-                .testTag("tasks_screen")
-        ) {
-            // 1. Soft Glass Greeting + Current Date + Family Profile Banner
-            item {
-                FamilyGlassCard(
-                    cornerRadius = 22.dp,
-                    isTintedBlue = true,
-                    onClick = if (currentMember.isParent) onOpenFamilyAdmin else null,
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("our_family_banner_card")
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            // Stacked family avatars
-                            Row(horizontalArrangement = Arrangement.spacedBy((-6).dp)) {
-                                members.take(4).forEach { m ->
-                                    Box(
-                                        modifier = Modifier
-                                            .size(34.dp)
-                                            .clip(CircleShape)
-                                            .background(Color(m.colorHex).copy(alpha = if (glass.isDark) 0.30f else 0.18f))
-                                            .border(1.5.dp, glass.cardBackground, CircleShape),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(text = m.avatarEmoji, fontSize = 15.sp)
-                                    }
-                                }
-                            }
-
-                            Column {
-                                Text(
-                                    text = formatDashboardGreeting(currentMember.name, isHebrew),
-                                    style = MaterialTheme.typography.titleMedium.copy(
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = glass.textPrimary
-                                    )
-                                )
-                                Text(
-                                    text = formatHebrewDashboardDate(todayDate, isHebrew),
-                                    style = MaterialTheme.typography.bodySmall.copy(
-                                        color = glass.primaryAccent,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                )
-                                Text(
-                                    text = if (isHebrew)
-                                        "המשפחה שלנו • ${members.size} חברים פעילים"
-                                    else
-                                        "Our Family • ${members.size} active members",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        color = glass.textSecondary,
-                                        fontWeight = FontWeight.Medium
-                                    )
-                                )
-                            }
-                        }
-
-                        if (currentMember.isParent) {
-                            Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = glass.cardBackground,
-                                border = BorderStroke(1.dp, glass.cardBorder)
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(
-                                        text = if (isHebrew) "ניהול" else "Manage",
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            fontWeight = FontWeight.Bold,
-                                            color = glass.primaryAccent
-                                        )
-                                    )
-                                    Icon(
-                                        imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
-                                        contentDescription = null,
-                                        tint = glass.primaryAccent,
-                                        modifier = Modifier.size(11.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 2. Quick Action Shortcuts Row ("משימה חדשה", "לוח שנה", "מערכת שעות", "שעון מעורר")
-            item {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    if (currentMember.isParent) {
-                        DashboardQuickShortcutChip(
-                            emoji = "✨",
-                            label = if (isHebrew) "משימה חדשה" else "New Task",
-                            isPrimary = true,
-                            onClick = onAddNewTask,
-                            modifier = Modifier.testTag("quick_action_new_task")
-                        )
-                    }
-                    DashboardQuickShortcutChip(
-                        emoji = "📅",
-                        label = if (isHebrew) "לוח שנה" else "Calendar",
-                        onClick = { onNavigateToScreen(AppScreen.CALENDAR) },
-                        modifier = Modifier.testTag("quick_action_calendar")
-                    )
-                    DashboardQuickShortcutChip(
-                        emoji = "📚",
-                        label = if (isHebrew) "מערכת שעות" else "Timetable",
-                        onClick = { onNavigateToScreen(AppScreen.TIMETABLE) },
-                        modifier = Modifier.testTag("quick_action_timetable")
-                    )
-                    DashboardQuickShortcutChip(
-                        emoji = "⏰",
-                        label = if (isHebrew) "שעון מעורר" else "Alarms",
-                        onClick = { onNavigateToScreen(AppScreen.ALARMS) },
-                        modifier = Modifier.testTag("quick_action_alarms")
-                    )
-                }
-            }
-
-            // 3. Compact Dashboard Summary Cards (Points + Completed + Live Family Overview)
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        // Total Points Card
-                        Surface(
-                            onClick = onOpenRewards,
-                            shape = RoundedCornerShape(20.dp),
-                            color = if (glass.isDark) glass.warningBg else PastelYellowBackground,
-                            border = BorderStroke(1.dp, if (glass.isDark) glass.warningText.copy(alpha = 0.4f) else PastelYellowBorder),
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = 76.dp)
-                                .testTag("stat_card_points")
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Column(verticalArrangement = Arrangement.Center) {
-                                    Text(
-                                        text = "$totalPoints",
-                                        style = MaterialTheme.typography.titleLarge.copy(
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = if (glass.isDark) glass.warningText else PastelYellowDark
-                                        )
-                                    )
-                                    Text(
-                                        text = if (isHebrew) "נקודות לפרסים" else "Reward Points",
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            color = if (glass.isDark) glass.textSecondary else PastelYellowDark.copy(alpha = 0.85f),
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                    )
-                                }
-                                Surface(
-                                    shape = CircleShape,
-                                    color = (if (glass.isDark) glass.warningText else PastelYellowBorder).copy(alpha = 0.25f),
-                                    modifier = Modifier.size(36.dp)
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Icon(
-                                            imageVector = Icons.Default.EmojiEvents,
-                                            contentDescription = null,
-                                            tint = if (glass.isDark) glass.warningText else PastelYellowDark,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Completed Chores Card
-                        Surface(
-                            onClick = { filterTab = 3 },
-                            shape = RoundedCornerShape(20.dp),
-                            color = if (glass.isDark) glass.successBg else PastelGreenBackground,
-                            border = BorderStroke(1.dp, if (glass.isDark) glass.successBorder else PastelGreenBorder),
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = 76.dp)
-                                .testTag("stat_card_completed")
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Column(verticalArrangement = Arrangement.Center) {
-                                    Text(
-                                        text = "$completedThisMonth",
-                                        style = MaterialTheme.typography.titleLarge.copy(
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = if (glass.isDark) glass.successText else PastelGreenDark
-                                        )
-                                    )
-                                    Text(
-                                        text = if (isHebrew) "הושלמו החודש" else "Done This Month",
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            color = if (glass.isDark) glass.textSecondary else PastelGreenDark.copy(alpha = 0.85f),
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                    )
-                                }
-                                Surface(
-                                    shape = CircleShape,
-                                    color = (if (glass.isDark) glass.successText else PastelGreenBorder).copy(alpha = 0.25f),
-                                    modifier = Modifier.size(36.dp)
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Icon(
-                                            imageVector = Icons.Default.TaskAlt,
-                                            contentDescription = null,
-                                            tint = if (glass.isDark) glass.successText else PastelGreenDark,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Compact 4-Mini-Metric Overview Strip (Today's Tasks, Next Alarm, School Lessons, Upcoming Events)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        MiniOverviewMetricCard(
-                            emoji = "📋",
-                            valueText = "$todayActiveCount / $awaitingCompletionCount",
-                            label = if (isHebrew) "היום / ממתינות" else "Today / Open",
-                            onClick = { filterTab = 1 },
-                            modifier = Modifier.weight(1f)
-                        )
-                        MiniOverviewMetricCard(
-                            emoji = "⏰",
-                            valueText = nextScheduledAlarm?.formattedTime24h ?: (if (isHebrew) "אין פעיל" else "None"),
-                            label = if (isHebrew) "השעון הבא" else "Next Alarm",
-                            onClick = { onNavigateToScreen(AppScreen.ALARMS) },
-                            modifier = Modifier.weight(1f)
-                        )
-                        MiniOverviewMetricCard(
-                            emoji = "🏫",
-                            valueText = if (todayLessonsCount > 0) "$todayLessonsCount" else "—",
-                            label = if (isHebrew) "שיעורים היום" else "Lessons Today",
-                            onClick = { onNavigateToScreen(AppScreen.TIMETABLE) },
-                            modifier = Modifier.weight(1f)
-                        )
-                        MiniOverviewMetricCard(
-                            emoji = "📅",
-                            valueText = "$upcomingEventsCount",
-                            label = if (isHebrew) "בלוח השנה" else "In Calendar",
-                            onClick = { onNavigateToScreen(AppScreen.CALENDAR) },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-            }
-
-            // 4. Compact Horizontal Points Leader Row
-            item {
-                Surface(
-                    onClick = onOpenRewards,
-                    shape = RoundedCornerShape(16.dp),
-                    color = if (glass.isDark) Color(0xFF2E1065).copy(alpha = 0.65f) else PastelPurpleBackground,
-                    border = BorderStroke(1.dp, if (glass.isDark) Color(0xFF7C3AED).copy(alpha = 0.5f) else PastelPurpleBorder),
-                    tonalElevation = 1.dp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("achievement_champion_card")
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Surface(
-                                shape = CircleShape,
-                                color = (if (glass.isDark) Color(0xFFA78BFA) else PastelPurpleBorder).copy(alpha = 0.35f),
-                                modifier = Modifier.size(30.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = Icons.Default.WorkspacePremium,
-                                        contentDescription = null,
-                                        tint = if (glass.isDark) Color(0xFFDDD6FE) else PastelPurpleDark,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            }
-                            Text(
-                                text = if (isHebrew) "מוביל הנקודות:" else "Points Leader:",
-                                style = MaterialTheme.typography.labelLarge.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (glass.isDark) Color(0xFFDDD6FE) else PastelPurpleDark
-                                )
-                            )
-                            Text(
-                                text = "${topChampion.avatarEmoji} ${topChampion.name}",
-                                style = MaterialTheme.typography.labelLarge.copy(
-                                    color = glass.textPrimary,
-                                    fontWeight = FontWeight.ExtraBold
-                                )
-                            )
-                        }
-
-                        Surface(
-                            shape = RoundedCornerShape(50),
-                            color = (if (glass.isDark) Color(0xFF7C3AED) else PastelPurpleBorder).copy(alpha = 0.45f)
-                        ) {
-                            Text(
-                                text = "${topChampion.earnedPoints} ${if (isHebrew) "נק׳" else "pts"}",
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    color = if (glass.isDark) Color(0xFFF5F3FF) else PastelPurpleDark,
-                                    fontWeight = FontWeight.Bold
-                                ),
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 5. Role-Appropriate Action Header
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = if (isHebrew) "משימות המשפחה" else "Family Tasks",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = glass.textPrimary
-                        )
-                    )
-
-                    if (currentMember.isParent) {
-                        Button(
-                            onClick = onAddNewTask,
-                            shape = RoundedCornerShape(14.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = glass.primaryAccent,
-                                contentColor = if (glass.isDark) Color(0xFF0B1120) else Color.White
-                            ),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                            elevation = ButtonDefaults.buttonElevation(defaultElevation = 1.dp),
-                            modifier = Modifier
-                                .heightIn(min = 38.dp)
-                                .testTag("add_task_primary_button")
-                        ) {
-                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = if (isHebrew) "+ הוסף משימה" else "+ Add Task",
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    fontWeight = FontWeight.Bold
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 6. Compact Filter Tabs, Search Bar & Member Chips
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        FilterPillChip(
-                            label = if (isHebrew) "הכל" else "All",
-                            isSelected = filterTab == 0,
-                            onClick = { filterTab = 0 }
-                        )
-                        FilterPillChip(
-                            label = if (isHebrew) "היום" else "Today",
-                            isSelected = filterTab == 1,
-                            onClick = { filterTab = 1 }
-                        )
-                        FilterPillChip(
-                            label = if (isHebrew) "השבוע" else "Week",
-                            isSelected = filterTab == 2,
-                            onClick = { filterTab = 2 }
-                        )
-                        FilterPillChip(
-                            label = if (isHebrew) "הושלמו" else "Done",
-                            isSelected = filterTab == 3,
-                            onClick = { filterTab = 3 }
-                        )
-                    }
-
-                    OutlinedTextField(
-                        value = searchQuery,
-                        onValueChange = { searchQuery = it },
-                        placeholder = {
-                            Text(
-                                text = if (isHebrew) "חיפוש משימות..." else "Search tasks...",
-                                style = MaterialTheme.typography.bodySmall.copy(color = glass.textMuted)
-                            )
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Default.Search,
-                                contentDescription = null,
-                                tint = glass.textSecondary,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        },
-                        trailingIcon = {
-                            if (searchQuery.isNotBlank()) {
-                                IconButton(onClick = { searchQuery = "" }) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "Clear",
-                                        tint = glass.textSecondary,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            }
-                        },
-                        singleLine = true,
-                        shape = RoundedCornerShape(16.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedContainerColor = glass.cardBackground,
-                            unfocusedContainerColor = glass.cardBackground,
-                            focusedBorderColor = glass.primaryAccent,
-                            unfocusedBorderColor = glass.cardBorder
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("task_search_field")
-                    )
-
-                    LazyRow(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        item {
-                            val isAllSelected = selectedMemberFilter == null
-                            Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = if (isAllSelected) glass.primaryAccentSoftBg else glass.cardBackground,
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (isAllSelected) glass.primaryAccent else glass.cardBorder
-                                ),
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .clickable { onFilterChange(null) }
-                                    .testTag("filter_member_all")
-                            ) {
-                                Text(
-                                    text = if (isHebrew) "כל החברים" else "All Members",
-                                    style = MaterialTheme.typography.labelMedium.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isAllSelected) glass.primaryAccent else glass.textSecondary
-                                    ),
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                                )
-                            }
-                        }
-
-                        items(members) { m ->
-                            val isSelected = selectedMemberFilter == m.id
-                            Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = if (isSelected) glass.primaryAccentSoftBg else glass.cardBackground,
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (isSelected) glass.primaryAccent else glass.cardBorder
-                                ),
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .clickable { onFilterChange(m.id) }
-                                    .testTag("filter_member_${m.id}")
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                ) {
-                                    Text(text = m.avatarEmoji, fontSize = 13.sp)
-                                    Text(
-                                        text = m.name,
-                                        style = MaterialTheme.typography.labelMedium.copy(
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                            color = if (isSelected) glass.primaryAccent else glass.textPrimary
-                                        )
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 7. Error Banner when a task write or approval fails
-            if (!taskOperationError.isNullOrBlank()) {
+        SoftGlassScreenBackground(modifier = Modifier.fillMaxSize()) {
+            LazyColumn(
+                contentPadding = PaddingValues(
+                    start = 16.dp,
+                    end = 16.dp,
+                    top = 12.dp,
+                    bottom = innerPadding.calculateBottomPadding() + 92.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("tasks_screen")
+            ) {
+                // 1. Soft Glass Hero Greeting + Current Date + Family Profile Banner
                 item {
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = glass.dangerBg,
-                        border = BorderStroke(1.dp, glass.dangerText),
+                    FamilyGlassCard(
+                        cornerRadius = 26.dp,
+                        isTintedBlue = true,
+                        elevation = 5.dp,
+                        onClick = if (currentMember.isParent) onOpenFamilyAdmin else null,
+                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 16.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("task_operation_error_banner")
+                            .testTag("our_family_banner_card")
                     ) {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Row(
-                                modifier = Modifier.weight(1f),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                modifier = Modifier.weight(1f)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.ErrorOutline,
-                                    contentDescription = null,
-                                    tint = glass.dangerText,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Column {
+                                // Stacked FamilyMemberAvatars
+                                Row(horizontalArrangement = Arrangement.spacedBy((-8).dp)) {
+                                    members.take(4).forEach { m ->
+                                        FamilyMemberAvatar(
+                                            member = m,
+                                            size = 38.dp,
+                                            isHighlighted = m.id == currentMember.id
+                                        )
+                                    }
+                                }
+
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Text(
-                                        text = if (isHebrew) "שגיאה בשמירת המשימה בענן" else "Cloud Task Sync Error",
-                                        style = MaterialTheme.typography.labelLarge.copy(
-                                            fontWeight = FontWeight.Bold,
-                                            color = glass.dangerText
+                                        text = formatDashboardGreeting(currentMember.name, isHebrew),
+                                        style = MaterialTheme.typography.titleMedium.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = glass.textPrimary
                                         )
                                     )
                                     Text(
-                                        text = taskOperationError,
+                                        text = formatHebrewDashboardDate(todayDate, isHebrew),
                                         style = MaterialTheme.typography.bodySmall.copy(
-                                            color = glass.textPrimary,
-                                            fontWeight = FontWeight.Medium
+                                            color = glass.primaryAccent,
+                                            fontWeight = FontWeight.Bold
                                         )
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    FamilyStatusChip(
+                                        emoji = "👨‍👩‍👧‍👦",
+                                        label = if (isHebrew)
+                                            "המשפחה שלנו • ${members.size} חברים פעילים"
+                                        else
+                                            "Our Family • ${members.size} active members",
+                                        containerColor = glass.cardBackground.copy(alpha = 0.85f),
+                                        contentColor = glass.textSecondary
                                     )
                                 }
                             }
-                            IconButton(
-                                onClick = onDismissTaskError,
-                                modifier = Modifier.testTag("dismiss_task_error_btn")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Dismiss error",
-                                    tint = glass.dangerText
-                                )
+
+                            if (currentMember.isParent) {
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = glass.cardBackground,
+                                    border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.35f)),
+                                    shadowElevation = 2.dp
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            text = if (isHebrew) "ניהול" else "Manage",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = glass.primaryAccent
+                                            )
+                                        )
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
+                                            contentDescription = null,
+                                            tint = glass.primaryAccent,
+                                            modifier = Modifier.size(11.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // 8. Tasks List
-            if (filteredTasks.isEmpty()) {
+                // 2. Quick Action Shortcuts Row ("משימה חדשה", "לוח שנה", "מערכת שעות", "שעון מעורר")
                 item {
-                    FamilyEmptyState(
-                        emoji = if (filterTab == 3) "🏆" else "✨",
-                        title = if (filterTab == 3) {
-                            if (isHebrew) "אין משימות שהושלמו בסינון זה" else "No completed tasks in this view"
-                        } else {
-                            if (isHebrew) "אין משימות ממתינות! הכל נקי ומסודר" else "All tasks are done!"
-                        },
-                        subtitle = if (isHebrew) {
-                            "כל המשימות המשפחתיות מסונכרנות בזמן אמת"
-                        } else {
-                            "All family tasks are synced in real time"
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (currentMember.isParent) {
+                            DashboardQuickShortcutChip(
+                                emoji = "✨",
+                                label = if (isHebrew) "משימה חדשה" else "New Task",
+                                isPrimary = true,
+                                onClick = onAddNewTask,
+                                modifier = Modifier.testTag("quick_action_new_task")
+                            )
                         }
-                    )
-                }
-            } else {
-                items(filteredTasks, key = { it.id }) { task ->
-                    val assignedMember = members.find { it.id == task.assignedToMemberId }
-                    val syncState = taskSyncStates[task.id] ?: when {
-                        task.isCompleted && task.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
-                        task.isCompleted && !task.approvedByParent -> TaskCompletionSyncState.PENDING_APPROVAL
-                        else -> TaskCompletionSyncState.IDLE
+                        DashboardQuickShortcutChip(
+                            emoji = "📅",
+                            label = if (isHebrew) "לוח שנה" else "Calendar",
+                            onClick = { onNavigateToScreen(AppScreen.CALENDAR) },
+                            modifier = Modifier.testTag("quick_action_calendar")
+                        )
+                        DashboardQuickShortcutChip(
+                            emoji = "📚",
+                            label = if (isHebrew) "מערכת שעות" else "Timetable",
+                            onClick = { onNavigateToScreen(AppScreen.TIMETABLE) },
+                            modifier = Modifier.testTag("quick_action_timetable")
+                        )
+                        DashboardQuickShortcutChip(
+                            emoji = "⏰",
+                            label = if (isHebrew) "שעון מעורר" else "Alarms",
+                            onClick = { onNavigateToScreen(AppScreen.ALARMS) },
+                            modifier = Modifier.testTag("quick_action_alarms")
+                        )
                     }
-                    TaskItemCardModern(
-                        task = task,
-                        assignedMember = assignedMember,
-                        currentMember = currentMember,
-                        syncState = syncState,
-                        isHebrew = isHebrew,
-                        onToggle = { onToggleTask(task.id) },
-                        onApprove = { onApproveTask(task.id) },
-                        onEdit = { onEditTask(task) },
-                        onDelete = { onDeleteTask(task.id) },
-                        onSendNudge = { onSendNudge(task) },
-                        onCardClick = { selectedTaskForDetail = task }
-                    )
+                }
+
+                // 3. Soft Glass Bento Dashboard Summary Cards (Points + Completed + Live Family Overview)
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            // Total Points Soft Glass Card
+                            FamilyGlassCard(
+                                cornerRadius = 22.dp,
+                                accentColor = GoogleYellow,
+                                onClick = onOpenRewards,
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 82.dp)
+                                    .testTag("stat_card_points")
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(verticalArrangement = Arrangement.Center) {
+                                        Text(
+                                            text = "$totalPoints",
+                                            style = MaterialTheme.typography.headlineSmall.copy(
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = if (glass.isDark) glass.warningText else PastelYellowDark
+                                            )
+                                        )
+                                        Text(
+                                            text = if (isHebrew) "נקודות לפרסים" else "Reward Points",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                color = if (glass.isDark) glass.textSecondary else PastelYellowDark.copy(alpha = 0.85f),
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        )
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = (if (glass.isDark) glass.warningText else PastelYellowBorder).copy(alpha = 0.30f),
+                                        border = BorderStroke(1.dp, (if (glass.isDark) glass.warningText else PastelYellowAccent).copy(alpha = 0.35f)),
+                                        modifier = Modifier.size(40.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Default.EmojiEvents,
+                                                contentDescription = null,
+                                                tint = if (glass.isDark) glass.warningText else PastelYellowDark,
+                                                modifier = Modifier.size(21.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Completed Chores Soft Glass Card
+                            FamilyGlassCard(
+                                cornerRadius = 22.dp,
+                                accentColor = GoogleGreen,
+                                onClick = { filterTab = 3 },
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 82.dp)
+                                    .testTag("stat_card_completed")
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(verticalArrangement = Arrangement.Center) {
+                                        Text(
+                                            text = "$completedThisMonth",
+                                            style = MaterialTheme.typography.headlineSmall.copy(
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = if (glass.isDark) glass.successText else PastelGreenDark
+                                            )
+                                        )
+                                        Text(
+                                            text = if (isHebrew) "הושלמו החודש" else "Done This Month",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                color = if (glass.isDark) glass.textSecondary else PastelGreenDark.copy(alpha = 0.85f),
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        )
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = (if (glass.isDark) glass.successText else PastelGreenBorder).copy(alpha = 0.30f),
+                                        border = BorderStroke(1.dp, (if (glass.isDark) glass.successText else PastelGreenAccent).copy(alpha = 0.35f)),
+                                        modifier = Modifier.size(40.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Default.TaskAlt,
+                                                contentDescription = null,
+                                                tint = if (glass.isDark) glass.successText else PastelGreenDark,
+                                                modifier = Modifier.size(21.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Compact 4-Mini-Metric Overview Strip (Today's Tasks, Next Alarm, School Lessons, Upcoming Events)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            MiniOverviewMetricCard(
+                                emoji = "📋",
+                                valueText = "$todayActiveCount / $awaitingCompletionCount",
+                                label = if (isHebrew) "היום / ממתינות" else "Today / Open",
+                                onClick = { filterTab = 1 },
+                                modifier = Modifier.weight(1f)
+                            )
+                            MiniOverviewMetricCard(
+                                emoji = "⏰",
+                                valueText = nextScheduledAlarm?.formattedTime24h ?: (if (isHebrew) "אין פעיל" else "None"),
+                                label = if (isHebrew) "השעון הבא" else "Next Alarm",
+                                onClick = { onNavigateToScreen(AppScreen.ALARMS) },
+                                modifier = Modifier.weight(1f)
+                            )
+                            MiniOverviewMetricCard(
+                                emoji = "🏫",
+                                valueText = if (todayLessonsCount > 0) "$todayLessonsCount" else "—",
+                                label = if (isHebrew) "שיעורים היום" else "Lessons Today",
+                                onClick = { onNavigateToScreen(AppScreen.TIMETABLE) },
+                                modifier = Modifier.weight(1f)
+                            )
+                            MiniOverviewMetricCard(
+                                emoji = "📅",
+                                valueText = "$upcomingEventsCount",
+                                label = if (isHebrew) "בלוח השנה" else "In Calendar",
+                                onClick = { onNavigateToScreen(AppScreen.CALENDAR) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+
+                // 4. Soft Glass Points Leader Card
+                item {
+                    FamilyGlassCard(
+                        cornerRadius = 20.dp,
+                        accentColor = SoftLavender,
+                        elevation = 3.dp,
+                        onClick = onOpenRewards,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 11.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("achievement_champion_card")
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = SoftLavender.copy(alpha = if (glass.isDark) 0.28f else 0.16f),
+                                    border = BorderStroke(1.dp, SoftLavender.copy(alpha = 0.4f)),
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = Icons.Default.WorkspacePremium,
+                                            contentDescription = null,
+                                            tint = if (glass.isDark) Color(0xFFDDD6FE) else PastelPurpleDark,
+                                            modifier = Modifier.size(19.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = if (isHebrew) "מוביל הנקודות:" else "Points Leader:",
+                                    style = MaterialTheme.typography.labelLarge.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (glass.isDark) Color(0xFFDDD6FE) else PastelPurpleDark
+                                    )
+                                )
+                                Text(
+                                    text = "${topChampion.avatarEmoji} ${topChampion.name}",
+                                    style = MaterialTheme.typography.labelLarge.copy(
+                                        color = glass.textPrimary,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                )
+                            }
+
+                            FamilyStatusChip(
+                                emoji = "⭐",
+                                label = "${topChampion.earnedPoints} ${if (isHebrew) "נק׳" else "pts"}",
+                                containerColor = SoftLavender.copy(alpha = if (glass.isDark) 0.35f else 0.18f),
+                                contentColor = if (glass.isDark) Color(0xFFF5F3FF) else PastelPurpleDark
+                            )
+                        }
+                    }
+                }
+
+                // 5. Role-Appropriate Soft Glass Section Header + Primary Button
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        FamilySectionHeader(
+                            title = if (isHebrew) "משימות המשפחה" else "Family Tasks",
+                            subtitle = if (isHebrew) "מעקב ביצועים ואישור משימות בזמן אמת" else "Real-time family chore tracking",
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        if (currentMember.isParent) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            FamilyPrimaryButton(
+                                text = if (isHebrew) "+ הוסף משימה" else "+ Add Task",
+                                onClick = onAddNewTask,
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                modifier = Modifier.testTag("add_task_primary_button")
+                            )
+                        }
+                    }
+                }
+
+                // 6. Soft Glass Filter Tabs, Search Bar & Member Chips
+                item {
+                    FamilyGlassCard(
+                        cornerRadius = 22.dp,
+                        elevation = 2.dp,
+                        contentPadding = PaddingValues(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                FilterPillChip(
+                                    label = if (isHebrew) "הכל" else "All",
+                                    isSelected = filterTab == 0,
+                                    onClick = { filterTab = 0 }
+                                )
+                                FilterPillChip(
+                                    label = if (isHebrew) "היום" else "Today",
+                                    isSelected = filterTab == 1,
+                                    onClick = { filterTab = 1 }
+                                )
+                                FilterPillChip(
+                                    label = if (isHebrew) "השבוע" else "Week",
+                                    isSelected = filterTab == 2,
+                                    onClick = { filterTab = 2 }
+                                )
+                                FilterPillChip(
+                                    label = if (isHebrew) "הושלמו" else "Done",
+                                    isSelected = filterTab == 3,
+                                    onClick = { filterTab = 3 }
+                                )
+                            }
+
+                            OutlinedTextField(
+                                value = searchQuery,
+                                onValueChange = { searchQuery = it },
+                                placeholder = {
+                                    Text(
+                                        text = if (isHebrew) "חיפוש משימות..." else "Search tasks...",
+                                        style = MaterialTheme.typography.bodySmall.copy(color = glass.textMuted)
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Search,
+                                        contentDescription = null,
+                                        tint = glass.primaryAccent,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                },
+                                trailingIcon = {
+                                    if (searchQuery.isNotBlank()) {
+                                        IconButton(onClick = { searchQuery = "" }) {
+                                            Icon(
+                                                imageVector = Icons.Default.Close,
+                                                contentDescription = "Clear",
+                                                tint = glass.textSecondary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                },
+                                singleLine = true,
+                                shape = RoundedCornerShape(16.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = glass.screenBackground,
+                                    unfocusedContainerColor = glass.screenBackground.copy(alpha = 0.7f),
+                                    focusedBorderColor = glass.primaryAccent,
+                                    unfocusedBorderColor = glass.cardBorder
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("task_search_field")
+                            )
+
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                item {
+                                    val isAllSelected = selectedMemberFilter == null
+                                    Surface(
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = if (isAllSelected) glass.primaryAccent else glass.screenBackground,
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (isAllSelected) glass.primaryAccent else glass.cardBorder
+                                        ),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .clickable { onFilterChange(null) }
+                                            .testTag("filter_member_all")
+                                    ) {
+                                        Text(
+                                            text = if (isHebrew) "כל החברים" else "All Members",
+                                            style = MaterialTheme.typography.labelMedium.copy(
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isAllSelected) {
+                                                    if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                                } else {
+                                                    glass.textSecondary
+                                                }
+                                            ),
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+                                        )
+                                    }
+                                }
+
+                                items(members) { m ->
+                                    val isSelected = selectedMemberFilter == m.id
+                                    Surface(
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = if (isSelected) glass.primaryAccentSoftBg else glass.screenBackground,
+                                        border = BorderStroke(
+                                            if (isSelected) 1.5.dp else 1.dp,
+                                            if (isSelected) glass.primaryAccent else glass.cardBorder
+                                        ),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .clickable { onFilterChange(m.id) }
+                                            .testTag("filter_member_${m.id}")
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            FamilyMemberAvatar(
+                                                member = m,
+                                                size = 22.dp,
+                                                isHighlighted = isSelected
+                                            )
+                                            Text(
+                                                text = m.name,
+                                                style = MaterialTheme.typography.labelMedium.copy(
+                                                    fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+                                                    color = if (isSelected) glass.primaryAccent else glass.textPrimary
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 7. Error Banner when a task write or approval fails
+                if (!taskOperationError.isNullOrBlank()) {
+                    item {
+                        FamilyGlassCard(
+                            cornerRadius = 18.dp,
+                            accentColor = glass.dangerText,
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("task_operation_error_banner")
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ErrorOutline,
+                                        contentDescription = null,
+                                        tint = glass.dangerText,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Column {
+                                        Text(
+                                            text = if (isHebrew) "שגיאה בשמירת המשימה בענן" else "Cloud Task Sync Error",
+                                            style = MaterialTheme.typography.labelLarge.copy(
+                                                fontWeight = FontWeight.Bold,
+                                                color = glass.dangerText
+                                            )
+                                        )
+                                        Text(
+                                            text = taskOperationError,
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = glass.textPrimary,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        )
+                                    }
+                                }
+                                IconButton(
+                                    onClick = onDismissTaskError,
+                                    modifier = Modifier.testTag("dismiss_task_error_btn")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Dismiss error",
+                                        tint = glass.dangerText
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 8. Tasks List
+                if (filteredTasks.isEmpty()) {
+                    item {
+                        FamilyEmptyState(
+                            emoji = if (filterTab == 3) "🏆" else "✨",
+                            title = if (filterTab == 3) {
+                                if (isHebrew) "אין משימות שהושלמו בסינון זה" else "No completed tasks in this view"
+                            } else {
+                                if (isHebrew) "אין משימות ממתינות! הכל נקי ומסודר" else "All tasks are done!"
+                            },
+                            subtitle = if (isHebrew) {
+                                "כל המשימות המשפחתיות מסונכרנות בזמן אמת"
+                            } else {
+                                "All family tasks are synced in real time"
+                            }
+                        )
+                    }
+                } else {
+                    items(filteredTasks, key = { it.id }) { task ->
+                        val assignedMember = members.find { it.id == task.assignedToMemberId }
+                        val syncState = taskSyncStates[task.id] ?: when {
+                            task.isCompleted && task.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
+                            task.isCompleted && !task.approvedByParent -> TaskCompletionSyncState.PENDING_APPROVAL
+                            else -> TaskCompletionSyncState.IDLE
+                        }
+                        TaskItemCardModern(
+                            task = task,
+                            assignedMember = assignedMember,
+                            currentMember = currentMember,
+                            syncState = syncState,
+                            isHebrew = isHebrew,
+                            onToggle = { onToggleTask(task.id) },
+                            onApprove = { onApproveTask(task.id) },
+                            onEdit = { onEditTask(task) },
+                            onDelete = { onDeleteTask(task.id) },
+                            onSendNudge = { onSendNudge(task) },
+                            onCardClick = { selectedTaskForDetail = task }
+                        )
+                    }
                 }
             }
         }
@@ -904,27 +883,39 @@ private fun DashboardQuickShortcutChip(
 ) {
     val glass = LocalSoftGlassColors.current
     Surface(
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         color = if (isPrimary) glass.primaryAccent else glass.cardBackground,
         border = BorderStroke(
-            1.dp,
-            if (isPrimary) glass.primaryAccent else glass.cardBorder
+            1.1.dp,
+            if (isPrimary) glass.primaryAccent else glass.primaryAccent.copy(alpha = 0.25f)
         ),
-        shadowElevation = 1.dp,
+        shadowElevation = if (isPrimary) 4.dp else 2.dp,
         modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(16.dp))
             .clickable(onClick = onClick)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement = Arrangement.spacedBy(7.dp)
         ) {
-            Text(text = emoji, fontSize = 13.sp)
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = if (isPrimary) {
+                    Color.White.copy(alpha = 0.22f)
+                } else {
+                    glass.primaryAccentSoftBg
+                },
+                modifier = Modifier.size(24.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(text = emoji, fontSize = 13.sp)
+                }
+            }
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelMedium.copy(
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.ExtraBold,
                     color = if (isPrimary) {
                         if (glass.isDark) Color(0xFF0B1120) else Color.White
                     } else {
@@ -945,21 +936,27 @@ private fun MiniOverviewMetricCard(
     modifier: Modifier = Modifier
 ) {
     val glass = LocalSoftGlassColors.current
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = glass.cardBackground,
-        border = BorderStroke(1.dp, glass.cardBorder),
-        shadowElevation = 1.dp,
+    FamilyGlassCard(
+        cornerRadius = 18.dp,
+        elevation = 2.dp,
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp),
         modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+            modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text(text = emoji, fontSize = 14.sp)
-            Spacer(modifier = Modifier.height(2.dp))
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = glass.primaryAccentSoftBg.copy(alpha = 0.7f),
+                modifier = Modifier.size(28.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(text = emoji, fontSize = 14.sp)
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = valueText,
                 style = MaterialTheme.typography.labelLarge.copy(
@@ -973,7 +970,8 @@ private fun MiniOverviewMetricCard(
                 text = label,
                 style = MaterialTheme.typography.labelSmall.copy(
                     color = glass.textSecondary,
-                    fontSize = 10.sp
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium
                 ),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -1013,333 +1011,320 @@ private fun TaskItemCardModern(
             isFailed -> glass.dangerBg
             isFullyApproved -> GoogleGreen
             isPendingApproval -> GoogleYellow
-            else -> Color.Transparent
+            else -> glass.primaryAccentSoftBg.copy(alpha = 0.35f)
         },
         animationSpec = spring(),
         label = "checkBg"
     )
 
-    val cardBorderColor = when {
+    val cardAccentColor = when {
         isFailed -> glass.dangerText
         isSaving -> glass.primaryAccent
-        isFullyApproved -> glass.successBorder
-        isPendingApproval -> if (glass.isDark) glass.warningText.copy(alpha = 0.55f) else PastelYellowBorder
-        else -> glass.cardBorder
+        isFullyApproved -> GoogleGreen
+        isPendingApproval -> GoogleYellow
+        else -> null
     }
 
     val normalizedTime = remember(task.dueTimeFormatted) {
         TimeFormatUtils.normalize24HourString(task.dueTimeFormatted)
     }
 
-    Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = glass.cardBackground,
-        border = BorderStroke(1.dp, cardBorderColor),
-        shadowElevation = 2.dp,
-        tonalElevation = 1.dp,
+    FamilyGlassCard(
+        cornerRadius = 22.dp,
+        isSelected = isSaving,
+        accentColor = cardAccentColor,
+        elevation = 3.dp,
+        onClick = onCardClick,
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 13.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .clickable { onCardClick() }
             .testTag("task_card_${task.id}")
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                // Checkbox button
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(CircleShape)
-                        .background(checkBgColor)
-                        .border(
-                            2.dp,
-                            when {
-                                isFailed -> glass.dangerText
-                                isSaving -> glass.primaryAccent
-                                isFullyApproved -> GoogleGreen
-                                isPendingApproval -> GoogleYellow
-                                canToggle -> glass.textMuted
-                                else -> glass.cardBorder
-                            },
-                            CircleShape
-                        )
-                        .clickable(enabled = !isSaving && canToggle) { onToggle() }
-                        .testTag("task_toggle_${task.id}"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    when {
-                        isSaving -> {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp,
-                                color = glass.primaryAccent
-                            )
-                        }
-                        task.isCompleted -> {
-                            Icon(
-                                imageVector = Icons.Default.Check,
-                                contentDescription = "Completed",
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                        !canToggle -> {
-                            Icon(
-                                imageVector = Icons.Default.Lock,
-                                contentDescription = "Read Only",
-                                tint = glass.textMuted,
-                                modifier = Modifier.size(14.dp)
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(12.dp))
-
-                // Task Title, Optional Description, 24h Time, Points, Sync Status & Member info
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = task.title,
-                        style = MaterialTheme.typography.bodyLarge.copy(
-                            fontWeight = FontWeight.SemiBold,
-                            textDecoration = if (isFullyApproved) TextDecoration.LineThrough else TextDecoration.None,
-                            color = if (isFullyApproved) glass.textSecondary else glass.textPrimary
-                        ),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-
-                    if (task.description.isNotBlank()) {
-                        Text(
-                            text = task.description,
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                color = glass.textSecondary
-                            ),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    val statusLabel = when {
-                        isSaving -> if (isHebrew) "שומר בענן..." else "Saving..."
-                        isFailed -> if (isHebrew) "שגיאה בשמירה • שוחזר" else "Save failed"
-                        isPendingApproval -> if (isHebrew) "נשמר • ממתין לאישור הורה" else "Pending approval"
-                        isFullyApproved -> if (isHebrew) "נשמר • הושלם ואושר ✓" else "Saved & Approved ✓"
-                        else -> normalizedTime
-                    }
-                    val statusTag = when {
-                        isSaving -> "task_status_saving_${task.id}"
-                        isFailed -> "task_status_failed_${task.id}"
-                        isPendingApproval -> "task_status_pending_approval_${task.id}"
-                        isFullyApproved -> "task_status_saved_approved_${task.id}"
-                        else -> "task_status_idle_${task.id}"
-                    }
-                    val statusColor = when {
-                        isSaving -> glass.primaryAccent
-                        isFailed -> glass.dangerText
-                        isPendingApproval -> glass.warningText
-                        isFullyApproved -> glass.successText
-                        else -> glass.textSecondary
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = "+${task.points} ${if (isHebrew) "נק׳" else "pts"}",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = if (isFullyApproved) glass.successText else glass.warningText
-                            )
-                        )
-
-                        Text(text = "•", color = glass.textMuted, fontSize = 11.sp)
-
-                        Text(
-                            text = statusLabel,
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = statusColor,
-                                fontWeight = FontWeight.Bold
-                            ),
-                            modifier = Modifier.testTag(statusTag)
-                        )
-
-                        if (task.recurrence.isRecurring) {
-                            Text(text = "•", color = glass.textMuted, fontSize = 11.sp)
-                            Text(
-                                text = "🔁 ${task.recurrence.getDisplayName(isHebrew)}",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = glass.primaryAccent,
-                                    fontWeight = FontWeight.SemiBold
-                                ),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-
-                        if (assignedMember != null) {
-                            Text(text = "•", color = glass.textMuted, fontSize = 11.sp)
-                            Text(
-                                text = "${assignedMember.avatarEmoji} ${assignedMember.name}",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = glass.textSecondary,
-                                    fontWeight = FontWeight.Medium
-                                ),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                // Category badge + Contextual menu for PARENT secondary actions
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = if (glass.isDark) {
-                            glass.primaryAccentSoftBg.copy(alpha = 0.55f)
-                        } else {
-                            when (task.category) {
-                                TaskCategory.BEDROOM -> GoogleBlueLight
-                                TaskCategory.DISHES -> PastelGreenBackground
-                                TaskCategory.HOMEWORK -> SoftLavenderLight
-                                TaskCategory.CLEANING -> SoftTealLight
-                                TaskCategory.GROCERIES -> WarmCoralLight
-                                TaskCategory.PETS -> PastelYellowBackground
-                                else -> glass.primaryAccentSoftBg
-                            }
+            // Tactile Soft Glass Completion Button
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(checkBgColor)
+                    .border(
+                        2.dp,
+                        when {
+                            isFailed -> glass.dangerText
+                            isSaving -> glass.primaryAccent
+                            isFullyApproved -> GoogleGreen
+                            isPendingApproval -> GoogleYellow
+                            canToggle -> glass.primaryAccent.copy(alpha = 0.65f)
+                            else -> glass.cardBorder
                         },
-                        modifier = Modifier.size(38.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Text(text = task.category.defaultEmoji, fontSize = 18.sp)
-                        }
+                        CircleShape
+                    )
+                    .clickable(enabled = !isSaving && canToggle) { onToggle() }
+                    .testTag("task_toggle_${task.id}"),
+                contentAlignment = Alignment.Center
+            ) {
+                when {
+                    isSaving -> {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = glass.primaryAccent
+                        )
                     }
-
-                    if (currentMember.isParent) {
-                        Box {
-                            IconButton(
-                                onClick = { showContextMenu = true },
-                                modifier = Modifier
-                                    .size(32.dp)
-                                    .testTag("task_menu_${task.id}")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.MoreVert,
-                                    contentDescription = if (isHebrew) "אפשרויות משימה" else "Task Options",
-                                    tint = glass.textSecondary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-
-                            DropdownMenu(
-                                expanded = showContextMenu,
-                                onDismissRequest = { showContextMenu = false }
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text(if (isHebrew) "ערוך משימה" else "Edit Task") },
-                                    leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
-                                    onClick = {
-                                        showContextMenu = false
-                                        onEdit()
-                                    }
-                                )
-                                if (!task.isCompleted) {
-                                    DropdownMenuItem(
-                                        text = { Text(if (isHebrew) "שלח תזכורת" else "Send Reminder") },
-                                        leadingIcon = { Icon(Icons.Default.NotificationsActive, contentDescription = null) },
-                                        onClick = {
-                                            showContextMenu = false
-                                            onSendNudge()
-                                        }
-                                    )
-                                }
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            text = if (isHebrew) "מחק משימה" else "Delete Task",
-                                            color = glass.dangerText
-                                        )
-                                    },
-                                    leadingIcon = {
-                                        Icon(
-                                            Icons.Default.DeleteOutline,
-                                            contentDescription = null,
-                                            tint = glass.dangerText
-                                        )
-                                    },
-                                    onClick = {
-                                        showContextMenu = false
-                                        onDelete()
-                                    }
-                                )
-                            }
-                        }
+                    task.isCompleted -> {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Completed",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    !canToggle -> {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = "Read Only",
+                            tint = glass.textMuted,
+                            modifier = Modifier.size(14.dp)
+                        )
                     }
                 }
             }
 
-            // Parent Approval Action Bar when a child has marked the task completed
-            if (currentMember.isParent && isPendingApproval && !isSaving) {
-                Spacer(modifier = Modifier.height(10.dp))
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = glass.warningBg,
-                    border = BorderStroke(1.dp, glass.warningText.copy(alpha = 0.45f)),
-                    modifier = Modifier.fillMaxWidth()
+            Spacer(modifier = Modifier.width(12.dp))
+
+            // Task Title, Optional Description, and Soft Glass Status Chips
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = task.title,
+                    style = MaterialTheme.typography.bodyLarge.copy(
+                        fontWeight = FontWeight.Bold,
+                        textDecoration = if (isFullyApproved) TextDecoration.LineThrough else TextDecoration.None,
+                        color = if (isFullyApproved) glass.textSecondary else glass.textPrimary
+                    ),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                if (task.description.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = task.description,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = glass.textSecondary
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                val statusLabel = when {
+                    isSaving -> if (isHebrew) "שומר בענן..." else "Saving..."
+                    isFailed -> if (isHebrew) "שגיאה בשמירה • שוחזר" else "Save failed"
+                    isPendingApproval -> if (isHebrew) "נשמר • ממתין לאישור הורה" else "Pending approval"
+                    isFullyApproved -> if (isHebrew) "נשמר • הושלם ואושר ✓" else "Saved & Approved ✓"
+                    else -> normalizedTime
+                }
+                val statusTag = when {
+                    isSaving -> "task_status_saving_${task.id}"
+                    isFailed -> "task_status_failed_${task.id}"
+                    isPendingApproval -> "task_status_pending_approval_${task.id}"
+                    isFullyApproved -> "task_status_saved_approved_${task.id}"
+                    else -> "task_status_idle_${task.id}"
+                }
+                val statusColor = when {
+                    isSaving -> glass.primaryAccent
+                    isFailed -> glass.dangerText
+                    isPendingApproval -> glass.warningText
+                    isFullyApproved -> glass.successText
+                    else -> glass.primaryAccent
+                }
+                val statusBg = when {
+                    isSaving -> glass.primaryAccentSoftBg
+                    isFailed -> glass.dangerBg
+                    isPendingApproval -> glass.warningBg
+                    isFullyApproved -> glass.successBg
+                    else -> glass.primaryAccentSoftBg.copy(alpha = 0.65f)
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = if (isHebrew)
-                                "סומן כבוצע ע\"י ${assignedMember?.name ?: "הילד/ה"} וממתין לאישורך"
-                            else
-                                "Completed by ${assignedMember?.name ?: "child"} — awaiting approval",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = glass.warningText,
-                                fontWeight = FontWeight.SemiBold
-                            ),
-                            modifier = Modifier.weight(1f)
+                    // Points Badge
+                    FamilyStatusChip(
+                        emoji = "⭐",
+                        label = "+${task.points} ${if (isHebrew) "נק׳" else "pts"}",
+                        containerColor = if (isFullyApproved) glass.successBg else glass.warningBg,
+                        contentColor = if (isFullyApproved) glass.successText else glass.warningText
+                    )
+
+                    // Status / Due Time Chip
+                    FamilyStatusChip(
+                        label = statusLabel,
+                        containerColor = statusBg,
+                        contentColor = statusColor,
+                        modifier = Modifier.testTag(statusTag)
+                    )
+
+                    // Recurrence Chip
+                    if (task.recurrence.isRecurring) {
+                        FamilyStatusChip(
+                            emoji = "🔁",
+                            label = task.recurrence.getDisplayName(isHebrew),
+                            containerColor = glass.primaryAccentSoftBg,
+                            contentColor = glass.primaryAccent
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Button(
-                            onClick = onApprove,
-                            shape = RoundedCornerShape(10.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = GoogleGreen),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    }
+
+                    // Assigned Member Chip
+                    if (assignedMember != null) {
+                        FamilyStatusChip(
+                            emoji = assignedMember.avatarEmoji,
+                            label = assignedMember.name,
+                            containerColor = Color(assignedMember.colorHex).copy(alpha = if (glass.isDark) 0.25f else 0.14f),
+                            contentColor = glass.textPrimary
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // Category Squircle Badge + Contextual Menu for PARENT secondary actions
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = if (glass.isDark) {
+                        glass.primaryAccentSoftBg.copy(alpha = 0.55f)
+                    } else {
+                        when (task.category) {
+                            TaskCategory.BEDROOM -> GoogleBlueLight
+                            TaskCategory.DISHES -> PastelGreenBackground
+                            TaskCategory.HOMEWORK -> SoftLavenderLight
+                            TaskCategory.CLEANING -> SoftTealLight
+                            TaskCategory.GROCERIES -> WarmCoralLight
+                            TaskCategory.PETS -> PastelYellowBackground
+                            else -> glass.primaryAccentSoftBg
+                        }
+                    },
+                    border = BorderStroke(1.dp, glass.cardBorder),
+                    modifier = Modifier.size(42.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(text = task.category.defaultEmoji, fontSize = 19.sp)
+                    }
+                }
+
+                if (currentMember.isParent) {
+                    Box {
+                        IconButton(
+                            onClick = { showContextMenu = true },
                             modifier = Modifier
-                                .height(34.dp)
-                                .testTag("approve_task_${task.id}")
+                                .size(32.dp)
+                                .testTag("task_menu_${task.id}")
                         ) {
-                            Text(
-                                text = if (isHebrew) "אשר ביצוע ✓" else "Approve ✓",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = if (isHebrew) "אפשרויות משימה" else "Task Options",
+                                tint = glass.textSecondary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        DropdownMenu(
+                            expanded = showContextMenu,
+                            onDismissRequest = { showContextMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(if (isHebrew) "ערוך משימה" else "Edit Task") },
+                                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                                onClick = {
+                                    showContextMenu = false
+                                    onEdit()
+                                }
+                            )
+                            if (!task.isCompleted) {
+                                DropdownMenuItem(
+                                    text = { Text(if (isHebrew) "שלח תזכורת" else "Send Reminder") },
+                                    leadingIcon = { Icon(Icons.Default.NotificationsActive, contentDescription = null) },
+                                    onClick = {
+                                        showContextMenu = false
+                                        onSendNudge()
+                                    }
+                                )
+                            }
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = if (isHebrew) "מחק משימה" else "Delete Task",
+                                        color = glass.dangerText
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.DeleteOutline,
+                                        contentDescription = null,
+                                        tint = glass.dangerText
+                                    )
+                                },
+                                onClick = {
+                                    showContextMenu = false
+                                    onDelete()
+                                }
                             )
                         }
                     }
+                }
+            }
+        }
+
+        // Parent Approval Action Bar when a child has marked the task completed
+        if (currentMember.isParent && isPendingApproval && !isSaving) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = glass.warningBg,
+                border = BorderStroke(1.dp, glass.warningText.copy(alpha = 0.45f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = if (isHebrew)
+                            "סומן כבוצע ע\"י ${assignedMember?.name ?: "הילד/ה"} וממתין לאישורך"
+                        else
+                            "Completed by ${assignedMember?.name ?: "child"} — awaiting approval",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = glass.warningText,
+                            fontWeight = FontWeight.Bold
+                        ),
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    FamilyPrimaryButton(
+                        text = if (isHebrew) "אשר ביצוע ✓" else "Approve ✓",
+                        onClick = onApprove,
+                        containerColor = GoogleGreen,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier
+                            .height(34.dp)
+                            .testTag("approve_task_${task.id}")
+                    )
                 }
             }
         }
@@ -1355,11 +1340,12 @@ private fun RowScope.FilterPillChip(
     val glass = LocalSoftGlassColors.current
     Surface(
         shape = RoundedCornerShape(14.dp),
-        color = if (isSelected) glass.primaryAccent else glass.cardBackground,
+        color = if (isSelected) glass.primaryAccent else glass.screenBackground,
         border = BorderStroke(
             1.dp,
             if (isSelected) glass.primaryAccent else glass.cardBorder
         ),
+        shadowElevation = if (isSelected) 2.dp else 0.dp,
         modifier = Modifier
             .weight(1f)
             .clip(RoundedCornerShape(14.dp))
@@ -1377,7 +1363,7 @@ private fun RowScope.FilterPillChip(
                     } else {
                         glass.textSecondary
                     },
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.ExtraBold
                 )
             )
         }
