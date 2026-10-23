@@ -208,8 +208,29 @@ fun FamilyAlarmScreen(
     }
 
     val context = LocalContext.current
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     val activeRingingAlarm by FamilyAlarmRingingService.activeRingingAlarm.collectAsState()
     val previewState by AlarmAudioController.previewState.collectAsState()
+
+    var permissionRefreshTick by remember { mutableIntStateOf(0) }
+    val hasExactAlarmPermission = remember(permissionRefreshTick, alarms) {
+        FamilyAlarmScheduler.canScheduleExactAlarms(context)
+    }
+
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                permissionRefreshTick++
+                if (FamilyAlarmScheduler.canScheduleExactAlarms(context)) {
+                    FamilyAlarmScheduler.restoreAlarmsOnBoot(context)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     var alarmToEdit by remember { mutableStateOf<FamilyAlarm?>(null) }
     var showAddOrEditDialog by remember { mutableStateOf(false) }
@@ -414,6 +435,70 @@ fun FamilyAlarmScreen(
                             isHebrew = isHebrew,
                             onDismissEarly = { activeSuccessBanner = null }
                         )
+                    }
+                }
+            }
+
+            // 2B. Exact Alarm Permission Prompt Banner (shown only if SCHEDULE_EXACT_ALARM is not granted)
+            if (!hasExactAlarmPermission) {
+                item(key = "exact_alarm_permission_banner") {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = if (glassColors.isDark) glassColors.warningBg else PastelYellowBackground,
+                        border = BorderStroke(1.dp, if (glassColors.isDark) glassColors.warningText.copy(alpha = 0.45f) else PastelYellowBorder),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("alarm_screen_exact_permission_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = if (isHebrew) "נדרשת הרשאת \"שעונים מעוררים ותזכורות\"" else "Alarms & Reminders Permission Required",
+                                    style = MaterialTheme.typography.labelLarge.copy(
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (glassColors.isDark) glassColors.warningText else PastelYellowDark
+                                    )
+                                )
+                                Text(
+                                    text = if (isHebrew) {
+                                        "כדי שהשעון המעורר יצלצל במדויק גם כשהאפליקציה סגורה או המסך נעול, אשרו את ההרשאה בהגדרות אנדרואיד."
+                                    } else {
+                                        "Allow Alarms & Reminders in Android Settings so alarms ring reliably when the app is closed."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = glassColors.textSecondary
+                                    )
+                                )
+                            }
+
+                            Button(
+                                onClick = { FamilyAlarmScheduler.openExactAlarmPermissionSettings(context) },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = GoogleBlue,
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                modifier = Modifier.testTag("alarm_screen_grant_exact_permission_btn")
+                            ) {
+                                Text(
+                                    text = if (isHebrew) "אשר הרשאה" else "Allow",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
                 }
             }

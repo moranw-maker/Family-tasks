@@ -443,7 +443,8 @@ class FamilyAlarmRingingService : Service() {
                     runCatching { startForeground(FOREGROUND_NOTIFICATION_ID, notification) }
                 }
 
-                // If audio wasn't already started by startRingingService within the last 2 seconds, start it now
+                // Now that startForeground() has been called, re-assert audio focus and active playback
+                // (required on Android 15+ where background apps cannot acquire audio focus before startForeground)
                 if (prevRinging == null || prevRinging.alarmId != alarmId ||
                     (System.currentTimeMillis() - prevRinging.startedAtMillis) > 2_500L
                 ) {
@@ -454,7 +455,25 @@ class FamilyAlarmRingingService : Service() {
                         volumePercent = volumePercent,
                         vibrateEnabled = vibrate
                     )
+                } else {
+                    AlarmAudioController.ensureAlarmAudioPlayingAndFocused(
+                        context = this,
+                        soundType = soundType,
+                        customSoundUri = customUri,
+                        volumePercent = volumePercent,
+                        vibrateEnabled = vibrate
+                    )
                 }
+
+                // Also ensure the full-screen / lock-screen ringing activity is launched now that FGS is active
+                launchRingingActivitySafely(
+                    context = this,
+                    alarmId = alarmId,
+                    title = title,
+                    hour = hour,
+                    minute = minute,
+                    snoozeMinutes = snoozeMin
+                )
 
                 timeoutJob?.cancel()
                 timeoutJob = serviceScope.launch {

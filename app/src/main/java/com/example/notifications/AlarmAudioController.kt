@@ -729,6 +729,38 @@ object AlarmAudioController {
         return playbackStarted
     }
 
+    /**
+     * Called from [FamilyAlarmRingingService.onStartCommand] immediately after `startForeground()`
+     * has promoted the process to a Foreground Service (`mediaPlayback`).
+     * On Android 15+ (`targetSdk >= 35`), `AudioManager.requestAudioFocus` is only granted once
+     * the app is either the top app or an active Foreground Service.
+     */
+    fun ensureAlarmAudioPlayingAndFocused(
+        context: Context,
+        soundType: String,
+        customSoundUri: String,
+        volumePercent: Int,
+        vibrateEnabled: Boolean
+    ) {
+        val appCtx = context.applicationContext ?: context
+        requestAlarmAudioFocus(appCtx, isPreview = false)
+        val isAlreadyPlaying = synchronized(lock) {
+            val mpPlaying = runCatching { alarmMediaPlayer?.isPlaying == true }.getOrDefault(false)
+            val rtPlaying = runCatching { alarmRingtone?.isPlaying == true }.getOrDefault(false)
+            val trackPlaying = runCatching { alarmAudioTrack?.playState == AudioTrack.PLAYSTATE_PLAYING }.getOrDefault(false)
+            mpPlaying || rtPlaying || trackPlaying || (alarmJob?.isActive == true)
+        }
+        if (!isAlreadyPlaying) {
+            startAlarmRinging(
+                context = appCtx,
+                soundType = soundType,
+                customSoundUri = customSoundUri,
+                volumePercent = volumePercent,
+                vibrateEnabled = vibrateEnabled
+            )
+        }
+    }
+
     fun stopAlarmRinging(context: Context? = null) {
         synchronized(lock) {
             alarmJob?.cancel()

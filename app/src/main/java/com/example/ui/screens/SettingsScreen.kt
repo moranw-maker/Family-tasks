@@ -71,8 +71,27 @@ fun SettingsScreen(
     val isHebrew = appLanguage == AppLanguage.HEBREW
     val glass = LocalSoftGlassColors.current
     val context = LocalContext.current
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     val diagnosticState by FamilyAlarmScheduler.diagnosticState.collectAsState()
-    var showAlarmDiagnosticsPanel by remember { mutableStateOf(false) }
+    var permissionRefreshTick by remember { mutableIntStateOf(0) }
+    var showAlarmDiagnosticsPanel by remember {
+        mutableStateOf(!FamilyAlarmScheduler.canScheduleExactAlarms(context))
+    }
+
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                permissionRefreshTick++
+                if (FamilyAlarmScheduler.canScheduleExactAlarms(context)) {
+                    FamilyAlarmScheduler.restoreAlarmsOnBoot(context)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     SoftGlassScreenBackground(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -397,16 +416,16 @@ fun SettingsScreen(
 
             // 2B. Alarm Clock Advanced Settings & Diagnostics ("שעונים מעוררים והשכמה")
             item(key = "settings_alarm_diagnostics_card") {
-                val hasExactPermission = remember(diagnosticState, showAlarmDiagnosticsPanel) {
+                val hasExactPermission = remember(diagnosticState, showAlarmDiagnosticsPanel, permissionRefreshTick) {
                     FamilyAlarmScheduler.canScheduleExactAlarms(context)
                 }
-                val canUseFullScreen = remember(diagnosticState, showAlarmDiagnosticsPanel) {
+                val canUseFullScreen = remember(diagnosticState, showAlarmDiagnosticsPanel, permissionRefreshTick) {
                     FamilyAlarmScheduler.canUseFullScreenIntent(context)
                 }
-                val hasNotifications = remember(diagnosticState, showAlarmDiagnosticsPanel) {
+                val hasNotifications = remember(diagnosticState, showAlarmDiagnosticsPanel, permissionRefreshTick) {
                     FamilyAlarmScheduler.hasNotificationPermission(context)
                 }
-                val isBatteryUnrestricted = remember(showAlarmDiagnosticsPanel) {
+                val isBatteryUnrestricted = remember(showAlarmDiagnosticsPanel, permissionRefreshTick) {
                     FamilyAlarmScheduler.isIgnoringBatteryOptimizations(context)
                 }
 
@@ -458,9 +477,16 @@ fun SettingsScreen(
                                     modifier = Modifier.testTag("settings_alarm_diagnostics_title")
                                 )
                                 Text(
-                                    text = if (isHebrew) "הגדרות מתקדמות וכלי אבחון" else "Advanced settings & diagnostic tools",
+                                    text = if (isHebrew) {
+                                        if (hasExactPermission) "הרשאת שעון מעורר מדויק פעילה ✓ • הגדרות וכלי אבחון"
+                                        else "⚠️ נדרש אישור הרשאת שעונים מעוררים ותזכורות לצלצול כשהאפליקציה סגורה"
+                                    } else {
+                                        if (hasExactPermission) "Exact alarm permission active ✓ • Settings & diagnostics"
+                                        else "⚠️ Exact Alarms & Reminders permission required when app is closed"
+                                    },
                                     style = MaterialTheme.typography.bodySmall.copy(
-                                        color = glass.textSecondary
+                                        color = if (hasExactPermission) glass.textSecondary else glass.warningText,
+                                        fontWeight = if (hasExactPermission) FontWeight.Normal else FontWeight.SemiBold
                                     ),
                                     modifier = Modifier.testTag("settings_alarm_diagnostics_subtitle")
                                 )
@@ -508,12 +534,27 @@ fun SettingsScreen(
                                     )
 
                                     AlarmPermissionDiagnosticRow(
-                                        label = if (isHebrew) "הרשאת התראה מדויקת (Exact Alarm)" else "Exact Alarm Permission",
+                                        label = if (isHebrew) "הרשאת התראה מדויקת (Alarms & Reminders)" else "Exact Alarm Permission (Alarms & Reminders)",
                                         isGranted = hasExactPermission,
                                         actionLabel = if (isHebrew) "אשר הרשאה" else "Grant",
                                         testTag = "grant_exact_alarm_permission_button",
                                         onAction = { FamilyAlarmScheduler.openExactAlarmPermissionSettings(context) }
                                     )
+
+                                    if (!hasExactPermission) {
+                                        FamilyPrimaryButton(
+                                            text = if (isHebrew) {
+                                                "פתח הרשאת \"שעונים מעוררים ותזכורות\" באנדרואיד"
+                                            } else {
+                                                "Open Android Alarms & Reminders Permission"
+                                            },
+                                            leadingIcon = Icons.Default.Alarm,
+                                            onClick = { FamilyAlarmScheduler.openExactAlarmPermissionSettings(context) },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("open_exact_alarm_settings_primary_button")
+                                        )
+                                    }
 
                                     AlarmPermissionDiagnosticRow(
                                         label = if (isHebrew) "הצגה במסך מלא מעל נעילה (Full-Screen)" else "Full-Screen Lock Intent",

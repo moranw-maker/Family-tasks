@@ -88,7 +88,24 @@ class FamilyRepository(
         val wasNull = dynamicAppContext == null && context == null
         dynamicAppContext = appCtx
         loadUiPreferences(appCtx)
-        if (wasNull && _familyAlarms.value.isNotEmpty()) {
+
+        val persistedDeleted = com.example.notifications.FamilyAlarmScheduler.getPersistedDeletedAlarmIds(appCtx)
+        explicitlyDeletedAlarmIds.addAll(persistedDeleted)
+
+        val persistedAlarms = com.example.notifications.FamilyAlarmScheduler.loadPersistedAlarms(appCtx)
+            .filterNot { it.id in explicitlyDeletedAlarmIds || it.isDeleted || it.scheduleStatus == FamilyAlarm.STATUS_DELETED }
+        if (persistedAlarms.isNotEmpty()) {
+            val existingById = allFamilyAlarms.associateBy { it.id }.toMutableMap()
+            persistedAlarms.forEach { diskAlarm ->
+                if (diskAlarm.id !in knownRemoteAlarmIds) {
+                    locallyManagedAlarms.putIfAbsent(diskAlarm.id, diskAlarm)
+                }
+                existingById[diskAlarm.id] = diskAlarm
+            }
+            allFamilyAlarms = existingById.values.sortedWith(compareBy({ it.hour }, { it.minute }))
+        }
+
+        if (wasNull || persistedAlarms.isNotEmpty() || _familyAlarms.value.isNotEmpty()) {
             resyncAlarmsForActiveMember()
         }
     }
@@ -3665,10 +3682,20 @@ class FamilyRepository(
                         knownRemoteAlarmIds.addAll(remoteIds)
                     }
 
-                    if (ctx != null) {
+                    if (ctx != null && !snapshot.metadata.isFromCache) {
+                        val current = _currentMember.value
+                        val authUid = authProvider()?.currentUser?.uid.orEmpty()
                         val persistedOnDisk = com.example.notifications.FamilyAlarmScheduler.loadPersistedAlarms(ctx)
                         persistedOnDisk.forEach { diskAlarm ->
-                            if (diskAlarm.id !in remoteIds && diskAlarm.id !in locallyManagedAlarms.keys) {
+                            val isCreatedByThisDeviceMember = diskAlarm.createdByMemberId.isBlank() ||
+                                diskAlarm.createdByMemberId == current.id ||
+                                (authUid.isNotBlank() && diskAlarm.createdByMemberId == authUid) ||
+                                diskAlarm.isPersonal
+                            if (
+                                diskAlarm.id !in remoteIds &&
+                                diskAlarm.id !in locallyManagedAlarms.keys &&
+                                !isCreatedByThisDeviceMember
+                            ) {
                                 detectedDeletedIds.add(diskAlarm.id)
                             }
                         }
@@ -5705,9 +5732,8 @@ class FamilyRepository(
                         "updatedAt" to System.currentTimeMillis()
                     )
                     docRef.set(map, SetOptions.merge()).await()
-                    // Once committed to Firestore, remove from locallyManagedAlarms so Firestore is authoritative
-                    knownRemoteAlarmIds.add(alarm.id)
-                    locallyManagedAlarms.remove(alarm.id)
+                    // Note: locallyManagedAlarms[alarm.id] is retained until alarmsListenerRegistration
+                    // observes alarm.id in remoteIds, preventing any race with cached snapshots.
                 }
             }
         }

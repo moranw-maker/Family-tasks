@@ -14,7 +14,12 @@ class FamilyAlarmBootReceiver : BroadcastReceiver() {
         val action = intent?.action ?: return
         if (
             action == Intent.ACTION_BOOT_COMPLETED ||
+            action == Intent.ACTION_LOCKED_BOOT_COMPLETED ||
             action == "android.intent.action.QUICKBOOT_POWERON" ||
+            action == Intent.ACTION_MY_PACKAGE_REPLACED ||
+            action == Intent.ACTION_TIME_CHANGED ||
+            action == "android.intent.action.TIME_SET" ||
+            action == Intent.ACTION_TIMEZONE_CHANGED ||
             action == AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED
         ) {
             FamilyAlarmScheduler.restoreAlarmsOnBoot(context)

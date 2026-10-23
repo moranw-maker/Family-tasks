@@ -2325,5 +2325,69 @@ class ExampleRobolectricTest {
         onNodeWithTag("settings_text_scale_preview").assertExists()
         onNodeWithTag("text_scale_LARGE").assertExists()
     }
+
+    @Test
+    fun `test normal local alarm background survival intent filter scheme matching and permission restore`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Verify FamilyAlarmReceiver intent-filter matches trigger broadcast with familytasks:// data URI
+        //    (Required by Android 15/16 targetSdk=36 Safer Intents ENFORCE_INTENTS_TO_MATCH_INTENT_FILTERS)
+        val localAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_local_closed_app_test",
+            title = "השכמה לבית ספר",
+            hour = 7,
+            minute = 15,
+            daysOfWeek = com.example.model.SchoolDay.allWeekDays,
+            isEnabled = true
+        )
+        val triggerIntent = com.example.notifications.FamilyAlarmScheduler.buildTriggerBroadcastIntent(
+            context = context,
+            alarm = localAlarm,
+            isSnooze = false
+        )
+        val matchedReceivers = context.packageManager.queryBroadcastReceivers(triggerIntent, 0)
+        assertTrue(
+            "FamilyAlarmReceiver intent-filter MUST match trigger intent with familytasks:// data URI under targetSdk=36 Safer Intents",
+            matchedReceivers.any { it.activityInfo?.name == com.example.notifications.FamilyAlarmReceiver::class.java.name }
+        )
+
+        // 2. Create normal local alarm via FamilyRepository and verify it is scheduled in AlarmManager & persisted on disk
+        val repo1 = FamilyRepository(context = null)
+        repo1.attachApplicationContext(context)
+        assertTrue(repo1.addOrUpdateFamilyAlarm(localAlarm))
+        assertTrue(
+            "Normal local alarm must be scheduled in AlarmManager",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, localAlarm.id)
+        )
+        assertTrue(
+            "Normal local alarm must be persisted synchronously for boot/background restore",
+            com.example.notifications.FamilyAlarmScheduler.loadPersistedAlarms(context).any { it.id == localAlarm.id }
+        )
+
+        // 3. Simulate app process restart: a brand-new FamilyRepository instance starts with starter demo alarms
+        //    and attaches application context. Verify it does NOT wipe or cancel the user's persisted local alarm!
+        val repo2 = FamilyRepository(context = null)
+        repo2.attachApplicationContext(context)
+        assertTrue(
+            "User-created local alarm must survive app restart and starter demo sync in AlarmManager",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, localAlarm.id)
+        )
+        assertTrue(
+            "User-created local alarm must remain visible in repository after app restart",
+            repo2.familyAlarms.value.any { it.id == localAlarm.id }
+        )
+
+        // 4. Simulate Android granting SCHEDULE_EXACT_ALARM or rebooting while app is closed
+        val bootReceiver = com.example.notifications.FamilyAlarmBootReceiver()
+        bootReceiver.onReceive(
+            context,
+            android.content.Intent(android.app.AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED)
+        )
+        assertTrue(
+            "Normal local alarm must be rescheduled when SCHEDULE_EXACT_ALARM permission is granted",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, localAlarm.id)
+        )
+    }
 }
+
 

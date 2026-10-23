@@ -225,14 +225,33 @@ object FamilyAlarmScheduler {
     }
 
     fun openExactAlarmPermissionSettings(context: Context) {
+        val appCtx = context.applicationContext ?: context
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            runCatching {
+            val launchedWithPackage = runCatching {
                 val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
-                    data = Uri.parse("package:${context.packageName}")
+                    data = Uri.parse("package:${appCtx.packageName}")
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-                context.startActivity(intent)
+                appCtx.startActivity(intent)
+                true
+            }.getOrDefault(false)
+            if (launchedWithPackage) return
+
+            val launchedGeneral = runCatching {
+                val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                appCtx.startActivity(intent)
+                true
+            }.getOrDefault(false)
+            if (launchedGeneral) return
+        }
+        runCatching {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.parse("package:${appCtx.packageName}")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            appCtx.startActivity(intent)
         }
     }
 
@@ -683,22 +702,22 @@ object FamilyAlarmScheduler {
             lastError = t.localizedMessage ?: "Error in setExactAndAllowWhileIdle"
         }
 
-        // 3. Fallback when exact alarm permission is denied on Android 12+: tight window + allowWhileIdle
+        // 3. Fallback when exact alarm permission is denied on Android 12+: allowWhileIdle first so Doze wakes up
         return try {
-            alarmManager.setWindow(AlarmManager.RTC_WAKEUP, triggerAtMillis, 1_000L, pendingIntent)
+            alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
             AlarmRegistrationOutcome(
                 scheduledSuccessfully = true,
                 scheduledExact = false,
-                methodUsed = "AlarmManager.setWindow (inexact fallback)",
+                methodUsed = "AlarmManager.setAndAllowWhileIdle",
                 errorMessage = ""
             )
         } catch (_: Throwable) {
             try {
-                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
+                alarmManager.setWindow(AlarmManager.RTC_WAKEUP, triggerAtMillis, 1_000L, pendingIntent)
                 AlarmRegistrationOutcome(
                     scheduledSuccessfully = true,
                     scheduledExact = false,
-                    methodUsed = "AlarmManager.setAndAllowWhileIdle",
+                    methodUsed = "AlarmManager.setWindow (inexact fallback)",
                     errorMessage = ""
                 )
             } catch (err: Throwable) {
@@ -1051,14 +1070,20 @@ object FamilyAlarmScheduler {
         val activeAlarms = alarms.filter { !it.isDeleted && it.scheduleStatus != FamilyAlarm.STATUS_DELETED && it.id !in deletedIds }
         val previousAlarms = loadPersistedAlarms(appCtx)
         val currentIds = activeAlarms.map { it.id }.toSet()
+        val isStarterDemoOnlyList = !authoritativeRemoteSync &&
+            currentIds.isNotEmpty() &&
+            currentIds.all { it == "alarm_wakeup" || it == "alarm_school_bus" }
 
-        // Cancel any removed alarms (never cancel the diagnostic test alarm)
-        previousAlarms.forEach { old ->
-            if (old.id !in currentIds && old.id != DIAGNOSTIC_ALARM_ID) {
-                if (authoritativeRemoteSync) {
-                    markAlarmDeletedAndCancel(appCtx, old.id)
-                } else {
-                    cancelLocalAlarm(appCtx, old.id)
+        // Cancel any removed alarms (never cancel the diagnostic test alarm, and never wipe persisted user alarms
+        // when startup runs before Firestore has loaded the real family alarms)
+        if (!isStarterDemoOnlyList) {
+            previousAlarms.forEach { old ->
+                if (old.id !in currentIds && old.id != DIAGNOSTIC_ALARM_ID) {
+                    if (authoritativeRemoteSync) {
+                        markAlarmDeletedAndCancel(appCtx, old.id)
+                    } else {
+                        cancelLocalAlarm(appCtx, old.id)
+                    }
                 }
             }
         }
@@ -1089,6 +1114,23 @@ object FamilyAlarmScheduler {
                 }
             } else if (alarm.id != DIAGNOSTIC_ALARM_ID) {
                 cancelLocalAlarm(appCtx, alarm.id)
+            }
+        }
+
+        // Preserve and reschedule any user-created persisted alarms during non-authoritative starter-only syncs
+        if (isStarterDemoOnlyList) {
+            previousAlarms.forEach { persistedAlarm ->
+                if (persistedAlarm.id !in currentIds &&
+                    persistedAlarm.id !in deletedIds &&
+                    persistedAlarm.id != DIAGNOSTIC_ALARM_ID &&
+                    persistedAlarm.isEnabled
+                ) {
+                    val res = scheduleLocalAlarm(appCtx, persistedAlarm)
+                    results[persistedAlarm.id] = res
+                    if (res.isScheduled) {
+                        alarmsForThisDevice.add(persistedAlarm.copy(nextTriggerAtMillis = res.nextTriggerAtMillis))
+                    }
+                }
             }
         }
 
@@ -1205,7 +1247,7 @@ object FamilyAlarmScheduler {
                 .edit()
                 .putString(KEY_PERSISTED_ALARMS, arr.toString())
                 .putString(KEY_CURRENT_MEMBER_ID, currentMemberId)
-                .apply()
+                .commit()
         }
     }
 

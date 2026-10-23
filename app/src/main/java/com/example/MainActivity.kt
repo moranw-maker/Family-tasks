@@ -51,9 +51,23 @@ fun FamilyTasksApp(
     viewModel: FamilyViewModel = viewModel()
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     remember(context) {
         viewModel.attachApplicationContext(context)
         true
+    }
+
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                com.example.notifications.FamilyAlarmScheduler.restoreAlarmsOnBoot(context)
+                viewModel.resyncAlarmsForActiveMember()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     // Collect States

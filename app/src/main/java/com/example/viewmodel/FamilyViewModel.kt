@@ -888,6 +888,10 @@ class FamilyViewModel(
         repository.dismissDeletedAlarmNotice(alarmId)
     }
 
+    fun resyncAlarmsForActiveMember() {
+        repository.resyncAlarmsForActiveMember()
+    }
+
     // --- Shared Family Folders & Files Operations (Google Drive FamilyTasks) ---
 
     fun setupOrReconnectFamilyGoogleDrive() {
