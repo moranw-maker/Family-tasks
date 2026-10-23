@@ -1,7 +1,9 @@
 package com.example.notifications
 
+import android.content.Context
 import android.util.Log
 import com.example.data.FamilyRepository
+import com.example.model.UserRole
 import com.example.util.NotificationHelper
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
@@ -19,14 +21,19 @@ import kotlinx.coroutines.launch
  * Handles:
  * 1. Automatic token rotation (`onNewToken`) — persists the new token in the named Firestore
  *    database (`ai-studio-android-familyta-a054dbd1-9c2d-4a83-ad6d-dcfe6fb0d2ca`) under
- *    `/users/{uid}/fcm_tokens/{tokenId}`.
- * 2. Incoming cross-device push notifications (`onMessageReceived`) for:
+ *    `/users/{uid}/fcm_tokens/{tokenId}` and enqueues a persistent alarm reconciliation pass.
+ * 2. Incoming high-priority data-only alarm synchronization events (`ALARM_SYNC_REQUIRED`) when a
+ *    parent creates, updates, enables, disables, or deletes a child's alarm while the child's app
+ *    is closed or in the background. Enqueues persistent work via Android `WorkManager`
+ *    ([AlarmSyncCoroutineWorker]) so synchronization is not tied to the short `FirebaseMessagingService`
+ *    lifecycle and automatically retries with exponential backoff on transient network/Firestore failures.
+ * 3. Incoming cross-device task push notifications (`onMessageReceived`) for:
  *    - A. Parent assigns a task to a child or other family member (`TASK_ASSIGNED`)
  *    - B. Child submits a task for parent approval (`TASK_SUBMITTED_FOR_APPROVAL`)
  *    - C. Parent approves a completed task (`TASK_APPROVED`)
  *    - D. Task is reassigned (`TASK_REASSIGNED`)
- * 3. Recipient verification and strict event-key deduplication so the sender never self-notifies
- *    and duplicate deliveries are ignored.
+ * 4. Recipient verification and strict completion-based deduplication so `ALARM_SYNC_REQUIRED`
+ *    events are only marked completed after reconciliation succeeds.
  */
 class FamilyMessagingService : FirebaseMessagingService() {
 
@@ -45,10 +52,22 @@ class FamilyMessagingService : FirebaseMessagingService() {
                     FirebaseApp.getInstance(),
                     FamilyRepository.NAMED_FIRESTORE_DATABASE_ID
                 )
+                val cachedFamilyId = FcmTokenManager.getCachedFamilyId(applicationContext).orEmpty()
+                val cachedRole = FcmTokenManager.getCachedRole(applicationContext)
+                    ?.let { UserRole.fromFirestoreValue(it) }
+                    ?: UserRole.CHILD
                 FcmTokenManager.registerTokenInFirestore(
                     db = db,
                     uid = currentUser.uid,
-                    token = token
+                    token = token,
+                    familyId = cachedFamilyId,
+                    role = cachedRole
+                )
+                // Enqueue persistent alarm reconciliation on token refresh
+                FamilyAlarmCloudSyncWorker.enqueuePersistentAlarmSync(
+                    context = applicationContext,
+                    hintFamilyId = cachedFamilyId,
+                    reason = "fcm_token_refresh"
                 )
             }.onFailure { e ->
                 Log.w(TAG, "onNewToken Firestore registration deferred until sign-in: ${e.message}")
@@ -58,92 +77,151 @@ class FamilyMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(remoteMessage: RemoteMessage) {
         super.onMessageReceived(remoteMessage)
-
-        val data = remoteMessage.data
-        val notification = remoteMessage.notification
-
-        val eventType = data["eventType"] ?: data["type"] ?: FcmTokenManager.EVENT_TASK_ASSIGNED
-        val familyId = data["familyId"].orEmpty()
-        val taskId = data["taskId"].orEmpty()
-        val targetUid = data["targetUid"].orEmpty()
-        val targetRole = data["targetRole"].orEmpty()
-        val actorUid = data["actorUid"].orEmpty()
-        val eventKey = data["eventKey"]
-            ?.takeIf { it.isNotBlank() }
-            ?: remoteMessage.messageId
-            ?: "$eventType:$taskId:${data["updatedAt"] ?: System.currentTimeMillis()}"
-
-        // Verify current authenticated user is the intended recipient (never notify the actor who triggered the write)
-        val signedInUid = runCatching {
-            if (FirebaseApp.getApps(applicationContext).isNotEmpty()) {
-                FirebaseAuth.getInstance().currentUser?.uid
-            } else null
-        }.getOrNull()
-
-        if (!signedInUid.isNullOrBlank()) {
-            if (actorUid.isNotBlank() && actorUid == signedInUid) {
-                // Sender must not receive their own push notification
-                return
-            }
-            if (targetUid.isNotBlank() && targetUid != signedInUid) {
-                // Message was targeted at a different user account
-                return
-            }
-        }
-
-        // Deduplicate by eventKey so FCM + Firestore snapshot or retry never shows twice
-        if (!FcmTokenManager.markEventDispatchedIfNew(eventKey)) {
-            return
-        }
-
-        val resolvedTitle = data["title"]
-            ?.takeIf { it.isNotBlank() }
-            ?: notification?.title
-            ?: defaultTitleForEvent(eventType)
-
-        val resolvedBody = data["body"]
-            ?.takeIf { it.isNotBlank() }
-            ?: notification?.body
-            ?: ""
-
-        if (resolvedTitle.isBlank() && resolvedBody.isBlank()) return
-
-        // Display genuine system notification via NotificationHelper
-        NotificationHelper.showIncomingFcmNotification(
+        handleRemoteMessagePayload(
             context = applicationContext,
-            title = resolvedTitle,
-            message = resolvedBody,
-            eventKey = eventKey,
-            taskId = taskId
+            data = remoteMessage.data,
+            messageId = remoteMessage.messageId,
+            notificationTitle = remoteMessage.notification?.title,
+            notificationBody = remoteMessage.notification?.body,
+            scope = serviceScope
         )
-
-        // Emit to in-app stream so notification history stays in sync
-        FcmTokenManager.emitIncomingPushEvent(
-            IncomingPushNotificationPayload(
-                eventKey = eventKey,
-                eventType = eventType,
-                familyId = familyId,
-                taskId = taskId,
-                targetUid = targetUid,
-                targetRole = targetRole,
-                actorUid = actorUid,
-                title = resolvedTitle,
-                body = resolvedBody
-            )
-        )
-    }
-
-    private fun defaultTitleForEvent(eventType: String): String {
-        return when (eventType) {
-            FcmTokenManager.EVENT_TASK_ASSIGNED -> "משימה חדשה שובצה עבורך 📋"
-            FcmTokenManager.EVENT_TASK_SUBMITTED_FOR_APPROVAL -> "משימה ממתינה לאישור הורה ⏳"
-            FcmTokenManager.EVENT_TASK_APPROVED -> "המשימה שלך אושרה! 🎉"
-            FcmTokenManager.EVENT_TASK_REASSIGNED -> "משימה הועברה אליך 🔄"
-            else -> "עדכון משימות משפחתיות 🏡"
-        }
     }
 
     companion object {
         private const val TAG = "FamilyMessagingService"
+
+        /**
+         * Processes an incoming FCM data payload for either data-only background alarm synchronization
+         * (`ALARM_SYNC_REQUIRED`) or family task notifications. Extracted for deterministic unit testing.
+         */
+        @Suppress("UNUSED_PARAMETER")
+        fun handleRemoteMessagePayload(
+            context: Context,
+            data: Map<String, String>,
+            messageId: String? = null,
+            notificationTitle: String? = null,
+            notificationBody: String? = null,
+            scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            signedInUidOverride: String? = null,
+            onAlarmReconcileRequested: ((familyId: String, alarmId: String, action: String) -> Unit)? = null
+        ): Boolean {
+            val appCtx = context.applicationContext ?: context
+            val eventType = data["eventType"] ?: data["type"] ?: FcmTokenManager.EVENT_TASK_ASSIGNED
+            val familyId = data["familyId"].orEmpty()
+            val taskId = data["taskId"].orEmpty()
+            val alarmId = data["alarmId"].orEmpty()
+            val alarmAction = data["action"].orEmpty()
+            val targetUid = data["targetUid"].orEmpty()
+            val targetRole = data["targetRole"].orEmpty()
+            val actorUid = data["actorUid"].orEmpty()
+            val entityId = alarmId.ifBlank { taskId }
+            val eventKey = data["eventKey"]
+                ?.takeIf { it.isNotBlank() }
+                ?: messageId
+                ?: "$eventType:$entityId:${data["updatedAt"] ?: System.currentTimeMillis()}"
+
+            // Verify current authenticated user is the intended recipient
+            val signedInUid = signedInUidOverride ?: runCatching {
+                if (FirebaseApp.getApps(appCtx).isNotEmpty()) {
+                    FirebaseAuth.getInstance().currentUser?.uid
+                } else null
+            }.getOrNull() ?: FcmTokenManager.getCachedUid(appCtx)
+
+            if (!signedInUid.isNullOrBlank()) {
+                if (actorUid.isNotBlank() && actorUid == signedInUid) {
+                    // Sender must not process their own push event
+                    return false
+                }
+                if (targetUid.isNotBlank() && targetUid != signedInUid) {
+                    // Message was targeted at a different user account
+                    return false
+                }
+            }
+
+            // Handle data-only background alarm synchronization push via persistent WorkManager
+            if (eventType == FcmTokenManager.EVENT_ALARM_SYNC_REQUIRED) {
+                // Only skip if this exact eventKey has ALREADY completed reconciliation
+                if (FamilyAlarmCloudSyncWorker.isSyncEventCompleted(appCtx, eventKey)) {
+                    Log.i(TAG, "Ignoring already-completed ALARM_SYNC_REQUIRED eventKey=$eventKey")
+                    return false
+                }
+
+                Log.i(
+                    TAG,
+                    "Enqueuing persistent WorkManager alarm sync for ALARM_SYNC_REQUIRED " +
+                        "(familyId=$familyId, alarmId=$alarmId, action=$alarmAction, eventKey=$eventKey)"
+                )
+
+                // Always enqueue persistent WorkManager work so synchronization survives FCM service termination.
+                // Note: Do NOT mark eventKey as completed here before the sync actually finishes!
+                FamilyAlarmCloudSyncWorker.enqueuePersistentAlarmSync(
+                    context = appCtx,
+                    eventKey = eventKey,
+                    hintFamilyId = familyId,
+                    hintAlarmId = alarmId,
+                    hintAction = alarmAction,
+                    reason = "fcm_push:${alarmAction.ifBlank { "SYNC" }}"
+                )
+
+                if (onAlarmReconcileRequested != null) {
+                    onAlarmReconcileRequested(familyId, alarmId, alarmAction)
+                    // In deterministic unit tests supplying a synchronous callback, mark completed after callback succeeds
+                    FamilyAlarmCloudSyncWorker.markSyncEventCompleted(appCtx, eventKey)
+                }
+                return true
+            }
+
+            // Deduplicate task notification events by eventKey so FCM + Firestore snapshot never shows twice
+            if (!FcmTokenManager.markEventDispatchedIfNew(eventKey)) {
+                return false
+            }
+
+            val resolvedTitle = data["title"]
+                ?.takeIf { it.isNotBlank() }
+                ?: notificationTitle
+                ?: defaultTitleForEvent(eventType)
+
+            val resolvedBody = data["body"]
+                ?.takeIf { it.isNotBlank() }
+                ?: notificationBody
+                ?: ""
+
+            if (resolvedTitle.isBlank() && resolvedBody.isBlank()) return false
+
+            // Display genuine system notification via NotificationHelper
+            NotificationHelper.showIncomingFcmNotification(
+                context = appCtx,
+                title = resolvedTitle,
+                message = resolvedBody,
+                eventKey = eventKey,
+                taskId = taskId
+            )
+
+            // Emit to in-app stream so notification history stays in sync
+            FcmTokenManager.emitIncomingPushEvent(
+                IncomingPushNotificationPayload(
+                    eventKey = eventKey,
+                    eventType = eventType,
+                    familyId = familyId,
+                    taskId = taskId,
+                    targetUid = targetUid,
+                    targetRole = targetRole,
+                    actorUid = actorUid,
+                    title = resolvedTitle,
+                    body = resolvedBody
+                )
+            )
+            return true
+        }
+
+        private fun defaultTitleForEvent(eventType: String): String {
+            return when (eventType) {
+                FcmTokenManager.EVENT_TASK_ASSIGNED -> "משימה חדשה שובצה עבורך 📋"
+                FcmTokenManager.EVENT_TASK_SUBMITTED_FOR_APPROVAL -> "משימה ממתינה לאישור הורה ⏳"
+                FcmTokenManager.EVENT_TASK_APPROVED -> "המשימה שלך אושרה! 🎉"
+                FcmTokenManager.EVENT_TASK_REASSIGNED -> "משימה הועברה אליך 🔄"
+                else -> "עדכון משימות משפחתיות 🏡"
+            }
+        }
     }
 }

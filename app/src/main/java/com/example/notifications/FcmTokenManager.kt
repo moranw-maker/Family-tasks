@@ -57,11 +57,14 @@ object FcmTokenManager {
     private const val PREFS_NAME = "family_tasks_fcm_prefs"
     private const val KEY_CACHED_FCM_TOKEN = "cached_fcm_token"
     private const val KEY_LAST_SYNCED_UID = "last_synced_uid"
+    private const val KEY_LAST_SYNCED_FAMILY_ID = "last_synced_family_id"
+    private const val KEY_LAST_SYNCED_ROLE = "last_synced_role"
 
     const val EVENT_TASK_ASSIGNED = "TASK_ASSIGNED"
     const val EVENT_TASK_SUBMITTED_FOR_APPROVAL = "TASK_SUBMITTED_FOR_APPROVAL"
     const val EVENT_TASK_APPROVED = "TASK_APPROVED"
     const val EVENT_TASK_REASSIGNED = "TASK_REASSIGNED"
+    const val EVENT_ALARM_SYNC_REQUIRED = "ALARM_SYNC_REQUIRED"
 
     private val fcmScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -147,15 +150,45 @@ object FcmTokenManager {
         _incomingPushEvents.tryEmit(payload)
     }
 
-    fun cacheTokenLocally(context: Context?, token: String, uid: String? = null) {
+    fun cacheTokenLocally(
+        context: Context?,
+        token: String,
+        uid: String? = null,
+        familyId: String? = null,
+        role: UserRole? = null
+    ) {
         if (context == null || token.isBlank()) return
         runCatching {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().apply {
                 putString(KEY_CACHED_FCM_TOKEN, token.trim())
                 if (!uid.isNullOrBlank()) {
-                    putString(KEY_LAST_SYNCED_UID, uid)
+                    putString(KEY_LAST_SYNCED_UID, uid.trim())
                 }
+                if (!familyId.isNullOrBlank()) {
+                    putString(KEY_LAST_SYNCED_FAMILY_ID, familyId.trim())
+                }
+                if (role != null) {
+                    putString(KEY_LAST_SYNCED_ROLE, role.toFirestoreValue())
+                }
+                apply()
+            }
+        }
+    }
+
+    fun cacheSessionMetadata(
+        context: Context?,
+        uid: String,
+        familyId: String,
+        role: UserRole
+    ) {
+        if (context == null) return
+        runCatching {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().apply {
+                if (uid.isNotBlank()) putString(KEY_LAST_SYNCED_UID, uid.trim())
+                if (familyId.isNotBlank()) putString(KEY_LAST_SYNCED_FAMILY_ID, familyId.trim())
+                putString(KEY_LAST_SYNCED_ROLE, role.toFirestoreValue())
                 apply()
             }
         }
@@ -166,6 +199,30 @@ object FcmTokenManager {
         return runCatching {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.getString(KEY_CACHED_FCM_TOKEN, null)?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+    }
+
+    fun getCachedUid(context: Context?): String? {
+        if (context == null) return null
+        return runCatching {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.getString(KEY_LAST_SYNCED_UID, null)?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+    }
+
+    fun getCachedFamilyId(context: Context?): String? {
+        if (context == null) return null
+        return runCatching {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.getString(KEY_LAST_SYNCED_FAMILY_ID, null)?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+    }
+
+    fun getCachedRole(context: Context?): String? {
+        if (context == null) return null
+        return runCatching {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.getString(KEY_LAST_SYNCED_ROLE, null)?.takeIf { it.isNotBlank() }
         }.getOrNull()
     }
 
@@ -261,7 +318,7 @@ object FcmTokenManager {
                     ?: getCachedToken(context)
                     ?: return@launch
 
-                cacheTokenLocally(context, token, uid)
+                cacheTokenLocally(context, token, uid, familyId, role)
                 registerTokenInFirestore(
                     db = db,
                     uid = uid,
@@ -285,16 +342,15 @@ object FcmTokenManager {
         val cachedToken = getCachedToken(context)
         val resolvedUid = uidOverride?.takeIf { it.isNotBlank() }
             ?: runCatching { FirebaseAuth.getInstance().currentUser?.uid }.getOrNull()
-            ?: runCatching {
-                context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    ?.getString(KEY_LAST_SYNCED_UID, null)
-            }.getOrNull()
+            ?: getCachedUid(context)
 
         runCatching {
             context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.edit()
                 ?.remove(KEY_CACHED_FCM_TOKEN)
                 ?.remove(KEY_LAST_SYNCED_UID)
+                ?.remove(KEY_LAST_SYNCED_FAMILY_ID)
+                ?.remove(KEY_LAST_SYNCED_ROLE)
                 ?.apply()
         }
 

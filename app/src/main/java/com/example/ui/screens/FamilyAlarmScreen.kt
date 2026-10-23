@@ -216,6 +216,9 @@ fun FamilyAlarmScreen(
     val hasExactAlarmPermission = remember(permissionRefreshTick, alarms) {
         FamilyAlarmScheduler.canScheduleExactAlarms(context)
     }
+    val hasFullScreenPermission = remember(permissionRefreshTick, alarms) {
+        FamilyAlarmScheduler.canUseFullScreenIntent(context)
+    }
 
     DisposableEffect(lifecycleOwner, context) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
@@ -494,6 +497,70 @@ fun FamilyAlarmScreen(
                             ) {
                                 Text(
                                     text = if (isHebrew) "אשר הרשאה" else "Allow",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2C. Full-Screen Alarm Presentation Permission Banner (shown if NotificationManager.canUseFullScreenIntent() is false)
+            if (!hasFullScreenPermission) {
+                item(key = "fullscreen_alarm_permission_banner") {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = if (glassColors.isDark) glassColors.warningBg else PastelYellowBackground,
+                        border = BorderStroke(1.dp, if (glassColors.isDark) glassColors.warningText.copy(alpha = 0.45f) else PastelYellowBorder),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("alarm_screen_fullscreen_permission_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = if (isHebrew) "נדרשת הרשאת \"התראות במסך מלא\"" else "Full-Screen Alarm Permission Required",
+                                    style = MaterialTheme.typography.labelLarge.copy(
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (glassColors.isDark) glassColors.warningText else PastelYellowDark
+                                    )
+                                )
+                                Text(
+                                    text = if (isHebrew) {
+                                        "כדי שמסך הזריחה יקפוץ אוטומטית כשהשעון מצלצל (ללא צורך בלחיצה על ההתראה), אשרו התראות במסך מלא."
+                                    } else {
+                                        "Allow Full-Screen Notifications so the sunrise alarm screen opens automatically when ringing."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = glassColors.textSecondary
+                                    )
+                                )
+                            }
+
+                            Button(
+                                onClick = { FamilyAlarmScheduler.openFullScreenIntentSettings(context) },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = GoogleBlue,
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                modifier = Modifier.testTag("alarm_screen_grant_fullscreen_permission_btn")
+                            ) {
+                                Text(
+                                    text = if (isHebrew) "אשר מסך מלא" else "Allow",
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
                                 )

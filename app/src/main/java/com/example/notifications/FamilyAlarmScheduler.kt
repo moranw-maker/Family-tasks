@@ -191,7 +191,7 @@ object FamilyAlarmScheduler {
     fun openFullScreenIntentSettings(context: Context) {
         val appCtx = context.applicationContext ?: context
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            val launched = runCatching {
+            val launchedWithPkg = runCatching {
                 val intent = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
                     data = Uri.parse("package:${appCtx.packageName}")
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -199,7 +199,16 @@ object FamilyAlarmScheduler {
                 appCtx.startActivity(intent)
                 true
             }.getOrDefault(false)
-            if (launched) return
+            if (launchedWithPkg) return
+
+            val launchedGeneral = runCatching {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                appCtx.startActivity(intent)
+                true
+            }.getOrDefault(false)
+            if (launchedGeneral) return
         }
         openNotificationSettings(appCtx)
     }
@@ -929,20 +938,19 @@ object FamilyAlarmScheduler {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return null
         return runCatching {
             val options = android.app.ActivityOptions.makeBasic()
-            // MODE_BACKGROUND_ACTIVITY_START_ALLOWED = 1 on API 34+
-            runCatching {
-                val method = android.app.ActivityOptions::class.java.getMethod(
-                    "setPendingIntentCreatorBackgroundActivityStartMode",
-                    Int::class.javaPrimitiveType
-                )
-                method.invoke(options, 1)
-            }
-            runCatching {
-                val method = android.app.ActivityOptions::class.java.getMethod(
-                    "setPendingIntentBackgroundActivityStartMode",
-                    Int::class.javaPrimitiveType
-                )
-                method.invoke(options, 1)
+            // Creator option ONLY (never set sender mode here, as Android 15/16 rejects sender mode on getActivity):
+            // API 36+: MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS = 3, API 34-35: MODE_BACKGROUND_ACTIVITY_START_ALLOWED = 1
+            val method = android.app.ActivityOptions::class.java.getMethod(
+                "setPendingIntentCreatorBackgroundActivityStartMode",
+                Int::class.javaPrimitiveType
+            )
+            val modeToUse = if (Build.VERSION.SDK_INT >= 36) 3 else 1
+            val applied = runCatching {
+                method.invoke(options, modeToUse)
+                true
+            }.getOrDefault(false)
+            if (!applied && modeToUse != 1) {
+                runCatching { method.invoke(options, 1) }
             }
             options.toBundle()
         }.getOrNull()
@@ -952,12 +960,17 @@ object FamilyAlarmScheduler {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return null
         return runCatching {
             val options = android.app.ActivityOptions.makeBasic()
-            runCatching {
-                val method = android.app.ActivityOptions::class.java.getMethod(
-                    "setPendingIntentBackgroundActivityStartMode",
-                    Int::class.javaPrimitiveType
-                )
-                method.invoke(options, 1)
+            val method = android.app.ActivityOptions::class.java.getMethod(
+                "setPendingIntentBackgroundActivityStartMode",
+                Int::class.javaPrimitiveType
+            )
+            val modeToUse = if (Build.VERSION.SDK_INT >= 36) 3 else 1
+            val applied = runCatching {
+                method.invoke(options, modeToUse)
+                true
+            }.getOrDefault(false)
+            if (!applied && modeToUse != 1) {
+                runCatching { method.invoke(options, 1) }
             }
             options.toBundle()
         }.getOrNull()

@@ -108,6 +108,12 @@ class FamilyRepository(
         if (wasNull || persistedAlarms.isNotEmpty() || _familyAlarms.value.isNotEmpty()) {
             resyncAlarmsForActiveMember()
         }
+        if (wasNull) {
+            com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestoreAsync(
+                context = appCtx,
+                reason = "app_startup"
+            )
+        }
     }
 
     constructor(

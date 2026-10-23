@@ -75,7 +75,10 @@ fun SettingsScreen(
     val diagnosticState by FamilyAlarmScheduler.diagnosticState.collectAsState()
     var permissionRefreshTick by remember { mutableIntStateOf(0) }
     var showAlarmDiagnosticsPanel by remember {
-        mutableStateOf(!FamilyAlarmScheduler.canScheduleExactAlarms(context))
+        mutableStateOf(
+            !FamilyAlarmScheduler.canScheduleExactAlarms(context) ||
+                !FamilyAlarmScheduler.canUseFullScreenIntent(context)
+        )
     }
 
     DisposableEffect(lifecycleOwner, context) {
@@ -476,17 +479,24 @@ fun SettingsScreen(
                                     ),
                                     modifier = Modifier.testTag("settings_alarm_diagnostics_title")
                                 )
+                                val allCriticalPermissionsReady = hasExactPermission && canUseFullScreen
                                 Text(
                                     text = if (isHebrew) {
-                                        if (hasExactPermission) "הרשאת שעון מעורר מדויק פעילה ✓ • הגדרות וכלי אבחון"
-                                        else "⚠️ נדרש אישור הרשאת שעונים מעוררים ותזכורות לצלצול כשהאפליקציה סגורה"
+                                        when {
+                                            !hasExactPermission -> "⚠️ נדרש אישור הרשאת שעונים מעוררים ותזכורות לצלצול כשהאפליקציה סגורה"
+                                            !canUseFullScreen -> "⚠️ נדרש אישור \"התראות במסך מלא\" לפתיחה אוטומטית של מסך הזריחה"
+                                            else -> "הרשאות שעון מדויק ומסך מלא פעילות ✓ • הגדרות וכלי אבחון"
+                                        }
                                     } else {
-                                        if (hasExactPermission) "Exact alarm permission active ✓ • Settings & diagnostics"
-                                        else "⚠️ Exact Alarms & Reminders permission required when app is closed"
+                                        when {
+                                            !hasExactPermission -> "⚠️ Exact Alarms & Reminders permission required when app is closed"
+                                            !canUseFullScreen -> "⚠️ Full-screen notification permission required for automatic sunrise screen"
+                                            else -> "Exact alarm & full-screen permissions active ✓ • Settings & diagnostics"
+                                        }
                                     },
                                     style = MaterialTheme.typography.bodySmall.copy(
-                                        color = if (hasExactPermission) glass.textSecondary else glass.warningText,
-                                        fontWeight = if (hasExactPermission) FontWeight.Normal else FontWeight.SemiBold
+                                        color = if (allCriticalPermissionsReady) glass.textSecondary else glass.warningText,
+                                        fontWeight = if (allCriticalPermissionsReady) FontWeight.Normal else FontWeight.SemiBold
                                     ),
                                     modifier = Modifier.testTag("settings_alarm_diagnostics_subtitle")
                                 )
@@ -563,6 +573,21 @@ fun SettingsScreen(
                                         testTag = "grant_fullscreen_alarm_permission_button",
                                         onAction = { FamilyAlarmScheduler.openFullScreenIntentSettings(context) }
                                     )
+
+                                    if (!canUseFullScreen) {
+                                        FamilyPrimaryButton(
+                                            text = if (isHebrew) {
+                                                "פתח הרשאת \"התראות במסך מלא\" באנדרואיד"
+                                            } else {
+                                                "Open Android Full-Screen Notification Settings"
+                                            },
+                                            leadingIcon = Icons.Default.Fullscreen,
+                                            onClick = { FamilyAlarmScheduler.openFullScreenIntentSettings(context) },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("open_fullscreen_alarm_settings_primary_button")
+                                        )
+                                    }
 
                                     AlarmPermissionDiagnosticRow(
                                         label = if (isHebrew) "התראות מערכת (Notifications)" else "System Notifications",

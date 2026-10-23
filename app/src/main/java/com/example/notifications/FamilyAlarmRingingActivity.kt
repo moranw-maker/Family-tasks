@@ -123,7 +123,10 @@ class FamilyAlarmRingingActivity : ComponentActivity() {
             minute: Int,
             snoozeMinutes: Int
         ): Intent {
+            val safeId = alarmId.ifBlank { "default" }
             return Intent(context, FamilyAlarmRingingActivity::class.java).apply {
+                action = "com.example.action.FULL_SCREEN_ALARM_$safeId"
+                data = android.net.Uri.parse("familytasks://fullscreen_alarm/$safeId")
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                     Intent.FLAG_ACTIVITY_SINGLE_TOP or
                     Intent.FLAG_ACTIVITY_CLEAR_TOP or
@@ -231,21 +234,17 @@ class FamilyAlarmRingingActivity : ComponentActivity() {
      */
     internal fun configureLockScreenPresentation() {
         runCatching {
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
-                    WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
-            )
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                 setShowWhenLocked(true)
                 setTurnScreenOn(true)
-            } else {
-                @Suppress("DEPRECATION")
-                window.addFlags(
-                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                        WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
-                )
             }
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
+            )
         }
     }
 }

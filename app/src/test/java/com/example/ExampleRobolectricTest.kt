@@ -2388,6 +2388,181 @@ class ExampleRobolectricTest {
             com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, localAlarm.id)
         )
     }
+
+    @Test
+    fun `test full screen alarm presentation intent uniqueness and fcm background alarm synchronization`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // PART A: Full-screen alarm presentation verification
+        val launchIntentA = com.example.notifications.FamilyAlarmRingingActivity.createLaunchIntent(
+            context = context,
+            alarmId = "alarm_child_1",
+            title = "בוקר טוב!",
+            hour = 7,
+            minute = 0,
+            snoozeMinutes = 5
+        )
+        val launchIntentB = com.example.notifications.FamilyAlarmRingingActivity.createLaunchIntent(
+            context = context,
+            alarmId = "alarm_child_2",
+            title = "בית ספר",
+            hour = 7,
+            minute = 30,
+            snoozeMinutes = 10
+        )
+        assertNotEquals(
+            "Each alarm full-screen activity launch intent must have a distinct action so PendingIntents never collide",
+            launchIntentA.action,
+            launchIntentB.action
+        )
+        assertNotEquals(
+            "Each alarm full-screen activity launch intent must have a distinct data URI",
+            launchIntentA.data,
+            launchIntentB.data
+        )
+        assertEquals("familytasks", launchIntentA.data?.scheme)
+
+        val notification = com.example.notifications.FamilyAlarmRingingService.buildStaticAlarmNotification(
+            context = context,
+            alarmId = "alarm_child_1",
+            title = "בוקר טוב!",
+            timeFormatted = "07:00",
+            hour = 7,
+            minute = 0,
+            soundType = com.example.notifications.AlarmAudioController.SOUND_SYSTEM_ALARM,
+            customUri = "",
+            vibrateEnabled = true,
+            snoozeMinutes = 5,
+            volumePercent = 85
+        )
+        assertNotNull("Full-screen alarm notification MUST include a non-null fullScreenIntent", notification.fullScreenIntent)
+        assertEquals(android.app.Notification.CATEGORY_ALARM, notification.category)
+        assertEquals(android.app.Notification.VISIBILITY_PUBLIC, notification.visibility)
+
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val channel = nm.getNotificationChannel(com.example.notifications.FamilyAlarmRingingService.ALARM_CHANNEL_ID)
+        assertNotNull("High-importance full-screen alarm notification channel must be created", channel)
+        assertEquals(
+            "Alarm notification channel must have IMPORTANCE_HIGH for full-screen presentation",
+            android.app.NotificationManager.IMPORTANCE_HIGH,
+            channel?.importance
+        )
+        assertNull(
+            "Alarm notification channel sound must be null so AlarmAudioController controls alarm ringtone without conflict",
+            channel?.sound
+        )
+
+        // PART B: FCM data-only background alarm synchronization verification
+        com.example.notifications.FcmTokenManager.clearAllDispatchedEventsForTesting()
+        com.example.notifications.FamilyAlarmCloudSyncWorker.clearCompletedSyncEventsForTesting(context)
+        com.example.notifications.FcmTokenManager.cacheTokenLocally(
+            context = context,
+            token = "test_fcm_child_token_12345",
+            uid = "uid_child_roey",
+            familyId = "fam_test_99",
+            role = com.example.model.UserRole.CHILD
+        )
+        assertEquals("uid_child_roey", com.example.notifications.FcmTokenManager.getCachedUid(context))
+        assertEquals("fam_test_99", com.example.notifications.FcmTokenManager.getCachedFamilyId(context))
+        assertEquals("CHILD", com.example.notifications.FcmTokenManager.getCachedRole(context))
+
+        // Verify that enqueuing via WorkManager does NOT mark eventKey as completed before the worker finishes
+        val pendingWorkerEventKey = "alarm_create:alarm_699:uid_child_roey:1700000000"
+        val pendingPayload = mapOf(
+            "eventKey" to pendingWorkerEventKey,
+            "eventType" to com.example.notifications.FcmTokenManager.EVENT_ALARM_SYNC_REQUIRED,
+            "action" to "CREATE",
+            "familyId" to "fam_test_99",
+            "alarmId" to "alarm_699",
+            "targetUid" to "uid_child_roey",
+            "actorUid" to "uid_parent_dad",
+            "updatedAt" to "1700000000"
+        )
+        val enqueuedPending = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+            context = context,
+            data = pendingPayload,
+            signedInUidOverride = "uid_child_roey"
+        )
+        assertTrue("ALARM_SYNC_REQUIRED must enqueue persistent WorkManager work", enqueuedPending)
+        assertFalse(
+            "ALARM_SYNC_REQUIRED eventKey must NOT be marked completed before reconciliation finishes",
+            com.example.notifications.FamilyAlarmCloudSyncWorker.isSyncEventCompleted(context, pendingWorkerEventKey)
+        )
+        com.example.notifications.FamilyAlarmCloudSyncWorker.markSyncEventCompleted(context, pendingWorkerEventKey)
+        assertTrue(
+            "ALARM_SYNC_REQUIRED eventKey must be marked completed after reconciliation succeeds",
+            com.example.notifications.FamilyAlarmCloudSyncWorker.isSyncEventCompleted(context, pendingWorkerEventKey)
+        )
+
+        var reconciledFamilyId = ""
+        var reconciledAlarmId = ""
+        var reconciledAction = ""
+        var reconcileCallCount = 0
+
+        val fcmDataPayload = mapOf(
+            "eventKey" to "alarm_create:alarm_700:uid_child_roey:1700000001",
+            "eventType" to com.example.notifications.FcmTokenManager.EVENT_ALARM_SYNC_REQUIRED,
+            "action" to "CREATE",
+            "familyId" to "fam_test_99",
+            "alarmId" to "alarm_700",
+            "targetUid" to "uid_child_roey",
+            "actorUid" to "uid_parent_dad",
+            "updatedAt" to "1700000001"
+        )
+
+        val processedFirst = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+            context = context,
+            data = fcmDataPayload,
+            signedInUidOverride = "uid_child_roey",
+            onAlarmReconcileRequested = { famId, alId, act ->
+                reconciledFamilyId = famId
+                reconciledAlarmId = alId
+                reconciledAction = act
+                reconcileCallCount++
+            }
+        )
+        assertTrue("Valid ALARM_SYNC_REQUIRED data message for target child must be processed", processedFirst)
+        assertEquals(1, reconcileCallCount)
+        assertEquals("fam_test_99", reconciledFamilyId)
+        assertEquals("alarm_700", reconciledAlarmId)
+        assertEquals("CREATE", reconciledAction)
+
+        // Duplicate delivery with the same eventKey must be ignored idempotently after completion
+        val processedDuplicate = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+            context = context,
+            data = fcmDataPayload,
+            signedInUidOverride = "uid_child_roey",
+            onAlarmReconcileRequested = { _, _, _ ->
+                reconcileCallCount++
+            }
+        )
+        assertFalse("Duplicate ALARM_SYNC_REQUIRED message with same completed eventKey must be ignored", processedDuplicate)
+        assertEquals(1, reconcileCallCount)
+
+        // Message targeted at a different user or sent by self must be ignored
+        val selfPayload = fcmDataPayload.toMutableMap().apply {
+            put("eventKey", "alarm_create:alarm_701:uid_parent_dad:1700000002")
+            put("targetUid", "uid_parent_dad")
+            put("actorUid", "uid_parent_dad")
+        }
+        val processedSelf = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+            context = context,
+            data = selfPayload,
+            signedInUidOverride = "uid_parent_dad",
+            onAlarmReconcileRequested = { _, _, _ ->
+                reconcileCallCount++
+            }
+        )
+        assertFalse("Actor must not process self-sent ALARM_SYNC_REQUIRED push", processedSelf)
+        assertEquals(1, reconcileCallCount)
+
+        // Logout clears cached FCM token and session metadata
+        com.example.notifications.FcmTokenManager.unregisterCurrentDeviceTokenAsync(context = context)
+        assertNull(com.example.notifications.FcmTokenManager.getCachedToken(context))
+        assertNull(com.example.notifications.FcmTokenManager.getCachedUid(context))
+        assertNull(com.example.notifications.FcmTokenManager.getCachedFamilyId(context))
+    }
 }
+
 
 

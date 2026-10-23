@@ -49,7 +49,7 @@ class FamilyAlarmRingingService : Service() {
         const val ACTION_STOP_RINGING = "com.example.action.STOP_ALARM_RINGING_SERVICE"
         const val ACTION_SNOOZE_RINGING = "com.example.action.SNOOZE_ALARM_RINGING_SERVICE"
 
-        private const val ALARM_CHANNEL_ID = "family_alarm_ringing_fullscreen_v4"
+        const val ALARM_CHANNEL_ID = "family_alarm_ringing_fullscreen_v5"
         private const val FOREGROUND_NOTIFICATION_ID = 7901
         private const val SAFETY_TIMEOUT_MILLIS = 5 * 60_000L // 5 minutes safety timeout
 
@@ -83,10 +83,11 @@ class FamilyAlarmRingingService : Service() {
                 volumePercent = volumePercent
             )
 
-            // Wake up screen immediately if screen is off
-            wakeUpScreenForAlarm(appCtx)
-
-            // Ensure high-priority alarm notification channel exists
+            // Ensure high-priority alarm notification channel exists BEFORE posting foreground notification.
+            // IMPORTANT: Do NOT call wakeUpScreenForAlarm() before startForeground()!
+            // If ACQUIRE_CAUSES_WAKEUP turns PowerManager.isInteractive() to true before startForeground()
+            // posts the fullScreenIntent notification, Android SystemUI treats the device as already interactive
+            // and demotes the fullScreenIntent to a heads-up banner instead of launching FamilyAlarmRingingActivity.
             ensureStaticAlarmNotificationChannel(appCtx)
 
             // Start audio playback immediately so there is zero latency even before service binding completes
@@ -144,15 +145,29 @@ class FamilyAlarmRingingService : Service() {
                 }
             }
 
-            // Launch full-screen / lock-screen ringing activity via BAL-enabled PendingIntent and startActivity
-            launchRingingActivitySafely(
-                context = appCtx,
-                alarmId = alarmId,
-                title = title,
-                hour = hour,
-                minute = minute,
-                snoozeMinutes = snoozeMinutes
-            )
+            // Only launch the activity directly here if FamilyTasks itself is currently visible in the foreground.
+            // When the app is in the background or screen is locked, startForeground()'s fullScreenIntent
+            // launches FamilyAlarmRingingActivity via SystemUI without triggering a BAL block.
+            if (isAppProcessInForeground(appCtx)) {
+                launchRingingActivitySafely(
+                    context = appCtx,
+                    alarmId = alarmId,
+                    title = title,
+                    hour = hour,
+                    minute = minute,
+                    snoozeMinutes = snoozeMinutes
+                )
+            }
+        }
+
+        internal fun isAppProcessInForeground(context: Context): Boolean {
+            return runCatching {
+                val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+                    ?: return false
+                val myPid = android.os.Process.myPid()
+                val proc = am.runningAppProcesses?.firstOrNull { it.pid == myPid } ?: return false
+                proc.importance == android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+            }.getOrDefault(false)
         }
 
         internal fun launchRingingActivitySafely(
@@ -174,29 +189,29 @@ class FamilyAlarmRingingService : Service() {
             )
             val balSenderBundle = FamilyAlarmScheduler.buildBalSenderActivityOptionsBundle()
 
-            // 1. Direct startActivity with BAL options bundle
-            val launchedDirect = runCatching {
-                if (balSenderBundle != null) {
-                    appCtx.startActivity(activityIntent, balSenderBundle)
+            // 1. Fire BAL-enabled Activity PendingIntent first (carries creator + sender BAL privileges)
+            val sentViaPendingIntent = runCatching {
+                val pi = FamilyAlarmScheduler.buildActivityPendingIntentWithBal(
+                    context = appCtx,
+                    requestCode = (alarmId.hashCode() * 31 + 2) and 0x7FFFFFFF,
+                    intent = activityIntent,
+                    flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                if (balSenderBundle != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    pi.send(appCtx, 0, null, null, null, null, balSenderBundle)
                 } else {
-                    appCtx.startActivity(activityIntent)
+                    pi.send()
                 }
                 true
             }.getOrDefault(false)
 
-            // 2. Also fire BAL-enabled Activity PendingIntent (exempt when triggered from AlarmClock / FGS)
-            if (!launchedDirect) {
+            // 2. Fallback to direct startActivity if PendingIntent.send failed
+            if (!sentViaPendingIntent) {
                 runCatching {
-                    val pi = FamilyAlarmScheduler.buildActivityPendingIntentWithBal(
-                        context = appCtx,
-                        requestCode = (alarmId.hashCode() * 31 + 2) and 0x7FFFFFFF,
-                        intent = activityIntent,
-                        flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                    )
-                    if (balSenderBundle != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        pi.send(appCtx, 0, null, null, null, null, balSenderBundle)
+                    if (balSenderBundle != null) {
+                        appCtx.startActivity(activityIntent, balSenderBundle)
                     } else {
-                        pi.send()
+                        appCtx.startActivity(activityIntent)
                     }
                 }
             }
@@ -257,10 +272,6 @@ class FamilyAlarmRingingService : Service() {
         private fun ensureStaticAlarmNotificationChannel(context: Context) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-                val alarmAudioAttrs = android.media.AudioAttributes.Builder()
-                    .setUsage(android.media.AudioAttributes.USAGE_ALARM)
-                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
                 val channel = NotificationChannel(
                     ALARM_CHANNEL_ID,
                     "שעון מעורר משפחתי (Family Alarms)",
@@ -272,9 +283,9 @@ class FamilyAlarmRingingService : Service() {
                     enableLights(true)
                     lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                     setBypassDnd(true)
-                    // Use Uri.EMPTY with USAGE_ALARM attributes so OEMs rank the channel as a noisy
-                    // high-priority alarm capable of heads-up & full-screen display while AlarmAudioController plays the audio
-                    setSound(android.net.Uri.EMPTY, alarmAudioAttrs)
+                    // Silent channel sound (null) while keeping IMPORTANCE_HIGH + vibration so AlarmAudioController
+                    // plays the user's selected ringtone cleanly without double-playing or Uri.EMPTY errors.
+                    setSound(null, null)
                 }
                 nm.createNotificationChannel(channel)
             }
@@ -293,6 +304,7 @@ class FamilyAlarmRingingService : Service() {
             snoozeMinutes: Int,
             volumePercent: Int
         ): Notification {
+            ensureStaticAlarmNotificationChannel(context)
             val fullScreenActivityIntent = FamilyAlarmRingingActivity.createLaunchIntent(
                 context = context,
                 alarmId = alarmId,
@@ -348,6 +360,8 @@ class FamilyAlarmRingingService : Service() {
                 .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
                 .setOngoing(true)
                 .setAutoCancel(false)
+                .setWhen(System.currentTimeMillis())
+                .setShowWhen(true)
                 .setContentIntent(fullScreenPendingIntent)
                 .setFullScreenIntent(fullScreenPendingIntent, true)
                 .addAction(
@@ -413,6 +427,7 @@ class FamilyAlarmRingingService : Service() {
                     volumePercent = volumePercent
                 )
 
+                // 1. Acquire CPU PARTIAL_WAKE_LOCK first (does not alter PowerManager.isInteractive())
                 acquireBoundedWakeLock()
                 ensureStaticAlarmNotificationChannel(this)
                 val notification = buildStaticAlarmNotification(
@@ -429,6 +444,8 @@ class FamilyAlarmRingingService : Service() {
                     volumePercent = volumePercent
                 )
 
+                // 2. Immediately promote to Foreground Service with fullScreenIntent BEFORE waking the screen
+                //    so Android SystemUI sees isInteractive == false (or Keyguard active) and launches fullScreenIntent!
                 runCatching {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         startForeground(
@@ -443,8 +460,7 @@ class FamilyAlarmRingingService : Service() {
                     runCatching { startForeground(FOREGROUND_NOTIFICATION_ID, notification) }
                 }
 
-                // Now that startForeground() has been called, re-assert audio focus and active playback
-                // (required on Android 15+ where background apps cannot acquire audio focus before startForeground)
+                // 3. Now that startForeground() has been called, re-assert audio focus and active playback
                 if (prevRinging == null || prevRinging.alarmId != alarmId ||
                     (System.currentTimeMillis() - prevRinging.startedAtMillis) > 2_500L
                 ) {
@@ -465,15 +481,22 @@ class FamilyAlarmRingingService : Service() {
                     )
                 }
 
-                // Also ensure the full-screen / lock-screen ringing activity is launched now that FGS is active
-                launchRingingActivitySafely(
-                    context = this,
-                    alarmId = alarmId,
-                    title = title,
-                    hour = hour,
-                    minute = minute,
-                    snoozeMinutes = snoozeMin
-                )
+                // 4. Wake the screen AFTER startForeground() has posted the fullScreenIntent notification,
+                //    and launch the activity directly if the app process is in the foreground.
+                if (isAppProcessInForeground(this)) {
+                    launchRingingActivitySafely(
+                        context = this,
+                        alarmId = alarmId,
+                        title = title,
+                        hour = hour,
+                        minute = minute,
+                        snoozeMinutes = snoozeMin
+                    )
+                }
+                serviceScope.launch {
+                    delay(180L)
+                    wakeUpScreenForAlarm(this@FamilyAlarmRingingService)
+                }
 
                 timeoutJob?.cancel()
                 timeoutJob = serviceScope.launch {

@@ -62,6 +62,10 @@ fun FamilyTasksApp(
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                 com.example.notifications.FamilyAlarmScheduler.restoreAlarmsOnBoot(context)
                 viewModel.resyncAlarmsForActiveMember()
+                com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestoreAsync(
+                    context = context,
+                    reason = "foreground_resume"
+                )
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
