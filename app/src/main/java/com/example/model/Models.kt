@@ -19,12 +19,18 @@ enum class AppLanguage(val code: String, val displayName: String, val isRtl: Boo
     ENGLISH("en", "English (LTR)", false)
 }
 
-enum class AppThemeMode(val labelHe: String, val labelEn: String) {
-    SYSTEM("לפי הגדרות המכשיר", "System"),
-    LIGHT("בהיר", "Light"),
-    DARK("כהה", "Dark");
+enum class AppThemeMode(
+    val labelHe: String,
+    val labelEn: String,
+    val editionSubtitleHe: String,
+    val editionSubtitleEn: String
+) {
+    SYSTEM("לפי הגדרות המכשיר", "System", "אוטומטי", "Auto"),
+    LIGHT("בהיר", "Light", "Velvet Light", "Velvet Light"),
+    DARK("כהה", "Dark", "Velvet Dark", "Velvet Dark");
 
     fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
+    fun getEditionSubtitle(isHebrew: Boolean): String = if (isHebrew) editionSubtitleHe else editionSubtitleEn
 }
 
 enum class AppTextScale(

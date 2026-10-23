@@ -73,15 +73,15 @@ fun FamilyGlassCard(
         accentColor != null -> Brush.linearGradient(
             colors = if (glass.isDark) {
                 listOf(
-                    accentColor.copy(alpha = 0.24f),
-                    glass.cardBackground.copy(alpha = 0.96f),
-                    accentColor.copy(alpha = 0.12f)
+                    accentColor.copy(alpha = 0.22f),
+                    glass.cardBackground,
+                    glass.velvetVioletSoftBg.copy(alpha = 0.35f)
                 )
             } else {
                 listOf(
-                    Color.White,
-                    accentColor.copy(alpha = 0.10f),
-                    accentColor.copy(alpha = 0.18f)
+                    Color(0xFFFFFFFF),
+                    accentColor.copy(alpha = 0.08f),
+                    accentColor.copy(alpha = 0.14f)
                 )
             },
             start = Offset(0f, 0f),
@@ -90,15 +90,15 @@ fun FamilyGlassCard(
         isTintedBlue -> Brush.linearGradient(
             colors = if (glass.isDark) {
                 listOf(
-                    Color(0xFF1E3A8A).copy(alpha = 0.55f),
+                    Color(0xFF1A2847),
                     glass.cardTintedBlueBackground,
-                    Color(0xFF1E293B)
+                    Color(0xFF1D1B38)
                 )
             } else {
                 listOf(
-                    Color(0xFFF8FBFF),
-                    Color(0xFFEAF3FF),
-                    Color(0xFFDBEAFE).copy(alpha = 0.65f)
+                    Color(0xFFFFFFFF),
+                    Color(0xFFF2F6FE),
+                    Color(0xFFE6EEFC)
                 )
             },
             start = Offset(0f, 0f),
@@ -107,13 +107,13 @@ fun FamilyGlassCard(
         else -> Brush.verticalGradient(
             colors = if (glass.isDark) {
                 listOf(
-                    Color(0xFF243247),
+                    Color(0xFF1B263B),
                     glass.cardBackground
                 )
             } else {
                 listOf(
                     Color(0xFFFFFFFF),
-                    Color(0xFFF6FAFF)
+                    Color(0xFFF7F9FE)
                 )
             }
         )
@@ -123,38 +123,38 @@ fun FamilyGlassCard(
         isSelected -> Brush.linearGradient(
             colors = listOf(
                 glass.primaryAccent,
-                glass.cardSelectedBorder
+                glass.velvetVioletAccent
             )
         )
         accentColor != null -> Brush.linearGradient(
             colors = listOf(
-                accentColor.copy(alpha = if (glass.isDark) 0.65f else 0.50f),
-                accentColor.copy(alpha = if (glass.isDark) 0.30f else 0.22f)
+                accentColor.copy(alpha = if (glass.isDark) 0.65f else 0.48f),
+                accentColor.copy(alpha = if (glass.isDark) 0.28f else 0.20f)
             )
         )
         isTintedBlue -> Brush.linearGradient(
             colors = if (glass.isDark) {
                 listOf(
-                    glass.primaryAccent.copy(alpha = 0.55f),
-                    glass.cardBorder
+                    glass.primaryAccent.copy(alpha = 0.50f),
+                    glass.velvetVioletAccent.copy(alpha = 0.35f)
                 )
             } else {
                 listOf(
-                    Color(0xFF93C5FD),
-                    Color(0xFFBFDBFE)
+                    Color(0xFF93B4F8),
+                    Color(0xFFCBD8F6)
                 )
             }
         )
         else -> Brush.linearGradient(
             colors = if (glass.isDark) {
                 listOf(
-                    Color(0xFF475569).copy(alpha = 0.75f),
+                    Color(0xFF3B4D6B).copy(alpha = 0.75f),
                     glass.cardBorder
                 )
             } else {
                 listOf(
-                    Color(0xFFCBD5E1).copy(alpha = 0.85f),
-                    Color(0xFFE2E8F0)
+                    Color(0xFFCBD6EA).copy(alpha = 0.90f),
+                    Color(0xFFE2E8F4)
                 )
             }
         )
@@ -763,13 +763,13 @@ fun FamilyBottomNavigation(
     val navBrush = Brush.verticalGradient(
         colors = if (glass.isDark) {
             listOf(
-                Color(0xFF1E293B).copy(alpha = 0.98f),
-                Color(0xFF0F172A)
+                Color(0xFF172136),
+                Color(0xFF0A101F)
             )
         } else {
             listOf(
                 Color(0xFFFFFFFF),
-                Color(0xFFF1F7FF)
+                Color(0xFFF4F7FD)
             )
         }
     )
@@ -777,15 +777,23 @@ fun FamilyBottomNavigation(
     Surface(
         shape = navShape,
         color = Color.Transparent,
-        shadowElevation = 14.dp,
-        tonalElevation = 6.dp,
+        shadowElevation = 12.dp,
+        tonalElevation = 4.dp,
         border = BorderStroke(
-            1.2.dp,
-            Brush.verticalGradient(
-                colors = listOf(
-                    glass.primaryAccent.copy(alpha = if (glass.isDark) 0.45f else 0.30f),
-                    glass.cardBorder
-                )
+            1.1.dp,
+            Brush.horizontalGradient(
+                colors = if (glass.isDark) {
+                    listOf(
+                        glass.primaryAccent.copy(alpha = 0.42f),
+                        glass.velvetVioletAccent.copy(alpha = 0.35f),
+                        glass.cardBorder
+                    )
+                } else {
+                    listOf(
+                        glass.primaryAccent.copy(alpha = 0.28f),
+                        glass.cardBorder
+                    )
+                }
             )
         ),
         modifier = modifier
@@ -834,7 +842,7 @@ fun FamilyBottomNavigation(
                                 if (isSelected) {
                                     Modifier.border(
                                         1.dp,
-                                        glass.primaryAccent.copy(alpha = 0.35f),
+                                        glass.primaryAccent.copy(alpha = 0.38f),
                                         RoundedCornerShape(18.dp)
                                     )
                                 } else {
@@ -868,8 +876,8 @@ fun FamilyBottomNavigation(
 }
 
 /**
- * Signature Soft Glass Screen Background with multi-stop vertical gradient and subtle
- * ambient radial light orbs in the top corners so frosted cards stand out clearly.
+ * Velvet Edition Screen Background with soft pearl/silver depth in Velvet Light
+ * and deep blue-black/graphite with subtle sapphire & violet sheen in Velvet Dark.
  */
 @Composable
 fun SoftGlassScreenBackground(
@@ -880,39 +888,40 @@ fun SoftGlassScreenBackground(
     val baseGradient = Brush.verticalGradient(
         colors = if (glass.isDark) {
             listOf(
-                Color(0xFF0F172A),
+                Color(0xFF0E1528),
                 Color(0xFF0B1120),
-                Color(0xFF111827)
+                Color(0xFF070B16)
             )
         } else {
             listOf(
-                Color(0xFFE6F0FD),
-                Color(0xFFF2F7FE),
-                Color(0xFFF8FAFC)
+                Color(0xFFEDF2FB),
+                Color(0xFFF5F7FC),
+                Color(0xFFF9FAFE)
             )
         }
     )
-    val topOrbGradient = Brush.radialGradient(
+    val topVelvetSheen = Brush.radialGradient(
         colors = if (glass.isDark) {
             listOf(
-                glass.primaryAccent.copy(alpha = 0.16f),
+                glass.velvetVioletAccent.copy(alpha = 0.10f),
+                glass.primaryAccent.copy(alpha = 0.08f),
                 Color.Transparent
             )
         } else {
             listOf(
-                Color(0xFF93C5FD).copy(alpha = 0.32f),
+                Color(0xFFBFDBFE).copy(alpha = 0.25f),
                 Color.Transparent
             )
         },
-        center = Offset(180f, 120f),
-        radius = 580f
+        center = Offset(200f, 100f),
+        radius = 620f
     )
 
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(baseGradient)
-            .background(topOrbGradient),
+            .background(topVelvetSheen),
         content = content
     )
 }

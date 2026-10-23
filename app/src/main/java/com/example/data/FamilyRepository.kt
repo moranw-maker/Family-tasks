@@ -392,7 +392,7 @@ class FamilyRepository(
     private val _appLanguage = MutableStateFlow(AppLanguage.HEBREW)
     val appLanguage: StateFlow<AppLanguage> = _appLanguage.asStateFlow()
 
-    private val _themeMode = MutableStateFlow(AppThemeMode.SYSTEM)
+    private val _themeMode = MutableStateFlow(AppThemeMode.LIGHT)
     val themeMode: StateFlow<AppThemeMode> = _themeMode.asStateFlow()
 
     private val _appTextScale = MutableStateFlow(AppTextScale.NORMAL)
@@ -7498,7 +7498,7 @@ class FamilyRepository(
             ctx.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putString(key, value)
-                .apply()
+                .commit()
         }
     }
 

@@ -94,6 +94,9 @@ data class SoftGlassColors(
     val cardSelectedBorder: Color,
     val primaryAccent: Color,
     val primaryAccentSoftBg: Color,
+    val velvetVioletAccent: Color = if (isDark) Color(0xFFA78BFA) else Color(0xFF6D28D9),
+    val velvetVioletSoftBg: Color = if (isDark) Color(0xFF261E47) else Color(0xFFF3E8FF),
+    val velvetShadowTint: Color = if (isDark) Color(0xFF020617) else Color(0xFF1E3A8A),
     val textPrimary: Color,
     val textSecondary: Color,
     val textMuted: Color,
@@ -109,29 +112,37 @@ data class SoftGlassColors(
     val screenBackgroundTop: Color get() = screenBackground
     val screenBackgroundMid: Color get() = screenGradientTop
     val screenBackgroundBottom: Color get() = screenGradientBottom
-    val cardElevated: Color get() = if (isDark) cardBackground else cardElevatedBackground
+    val cardElevated: Color get() = cardElevatedBackground
     val cardBorderStrong: Color get() = cardSelectedBorder
     val primaryAccentSoft: Color get() = primaryAccentSoftBg
-    val secondaryContainer: Color get() = if (isDark) Color(0xFF273549) else Color(0xFFF1F5F9)
+    val secondaryContainer: Color get() = if (isDark) Color(0xFF232F46) else Color(0xFFEEF3FA)
     val successContainer: Color get() = successBg
     val warningContainer: Color get() = warningBg
     val dangerContainer: Color get() = dangerBg
 }
 
+/**
+ * Velvet Light Palette:
+ * Pearl tones (#F6F8FC / #EDF2FB), silvery-white surfaces (#FFFFFF / #F8FAFE),
+ * Sapphire Blue (#2563EB / #1D4ED8), and soft velvet borders & shadows.
+ */
 val LightSoftGlassColors = SoftGlassColors(
     isDark = false,
-    screenBackground = Color(0xFFF3F7FD),
-    screenGradientTop = Color(0xFFEAF2FC),
-    screenGradientBottom = Color(0xFFF8FAFC),
+    screenBackground = Color(0xFFF5F7FC),
+    screenGradientTop = Color(0xFFEDF2FB),
+    screenGradientBottom = Color(0xFFF9FAFE),
     cardBackground = Color(0xFFFFFFFF),
-    cardElevatedBackground = Color(0xFFFBFDFF),
-    cardTintedBlueBackground = Color(0xFFEFF6FF),
-    cardBorder = Color(0xFFE2E8F0),
-    cardSelectedBorder = Color(0xFF93C5FD),
+    cardElevatedBackground = Color(0xFFF8FAFE),
+    cardTintedBlueBackground = Color(0xFFF0F5FE),
+    cardBorder = Color(0xFFD6E0F0),
+    cardSelectedBorder = Color(0xFF7DA8F8),
     primaryAccent = Color(0xFF2563EB),
-    primaryAccentSoftBg = Color(0xFFDBEAFE),
+    primaryAccentSoftBg = Color(0xFFDFEAFE),
+    velvetVioletAccent = Color(0xFF6D28D9),
+    velvetVioletSoftBg = Color(0xFFF2EBFF),
+    velvetShadowTint = Color(0xFF1E3A8A),
     textPrimary = Color(0xFF0F172A),
-    textSecondary = Color(0xFF475569),
+    textSecondary = Color(0xFF334155),
     textMuted = Color(0xFF64748B),
     successText = Color(0xFF15803D),
     successBg = Color(0xFFECFDF5),
@@ -140,21 +151,29 @@ val LightSoftGlassColors = SoftGlassColors(
     warningBg = Color(0xFFFEF3C7),
     dangerText = Color(0xFFDC2626),
     dangerBg = Color(0xFFFEF2F2),
-    divider = Color(0xFFE2E8F0)
+    divider = Color(0xFFE2E8F2)
 )
 
+/**
+ * Velvet Dark Palette:
+ * Deep blue-black (#0B1120 / #070B16), graphite surfaces (#151F32 / #1E293B),
+ * Sapphire Blue (#60A5FA), and subtle violet touches (#A78BFA / #7C3AED).
+ */
 val DarkSoftGlassColors = SoftGlassColors(
     isDark = true,
     screenBackground = Color(0xFF0B1120),
-    screenGradientTop = Color(0xFF0F172A),
-    screenGradientBottom = Color(0xFF0B1120),
-    cardBackground = Color(0xFF1E293B),
+    screenGradientTop = Color(0xFF11192E),
+    screenGradientBottom = Color(0xFF070B16),
+    cardBackground = Color(0xFF151F32),
     cardElevatedBackground = Color(0xFF1E293B),
-    cardTintedBlueBackground = Color(0xFF172554),
-    cardBorder = Color(0xFF334155),
-    cardSelectedBorder = Color(0xFF60A5FA),
+    cardTintedBlueBackground = Color(0xFF18243E),
+    cardBorder = Color(0xFF2D3C56),
+    cardSelectedBorder = Color(0xFF818CF8),
     primaryAccent = Color(0xFF60A5FA),
-    primaryAccentSoftBg = Color(0xFF1E3A8A),
+    primaryAccentSoftBg = Color(0xFF1E3563),
+    velvetVioletAccent = Color(0xFFA78BFA),
+    velvetVioletSoftBg = Color(0xFF261E47),
+    velvetShadowTint = Color(0xFF020617),
     textPrimary = Color(0xFFF8FAFC),
     textSecondary = Color(0xFFCBD5E1),
     textMuted = Color(0xFF94A3B8),
@@ -165,7 +184,8 @@ val DarkSoftGlassColors = SoftGlassColors(
     warningBg = Color(0xFF451A03),
     dangerText = Color(0xFFF87171),
     dangerBg = Color(0xFF450A0A),
-    divider = Color(0xFF334155)
+    divider = Color(0xFF293750)
 )
 
 val LocalSoftGlassColors = staticCompositionLocalOf { LightSoftGlassColors }
+

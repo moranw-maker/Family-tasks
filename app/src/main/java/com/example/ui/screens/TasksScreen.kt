@@ -195,28 +195,7 @@ fun TasksScreen(
     }
 
     Scaffold(
-        containerColor = Color.Transparent,
-        floatingActionButton = {
-            if (currentMember.isParent) {
-                FloatingActionButton(
-                    onClick = onAddNewTask,
-                    shape = RoundedCornerShape(22.dp),
-                    containerColor = glass.primaryAccent,
-                    contentColor = if (glass.isDark) Color(0xFF0B1120) else Color.White,
-                    elevation = FloatingActionButtonDefaults.elevation(
-                        defaultElevation = 6.dp,
-                        pressedElevation = 10.dp
-                    ),
-                    modifier = Modifier.testTag("add_task_fab")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = if (isHebrew) "הוסף משימה" else "Add Task",
-                        modifier = Modifier.size(26.dp)
-                    )
-                }
-            }
-        }
+        containerColor = Color.Transparent
     ) { innerPadding ->
         SoftGlassScreenBackground(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
@@ -324,7 +303,7 @@ fun TasksScreen(
                     }
                 }
 
-                // 2. Quick Action Shortcuts Row ("משימה חדשה", "לוח שנה", "מערכת שעות", "שעון מעורר")
+                // 2. Quick Screen Navigation Shortcuts Row ("לוח שנה", "מערכת שעות", "שעון מעורר")
                 item {
                     Row(
                         modifier = Modifier
@@ -332,15 +311,6 @@ fun TasksScreen(
                             .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        if (currentMember.isParent) {
-                            DashboardQuickShortcutChip(
-                                emoji = "✨",
-                                label = if (isHebrew) "משימה חדשה" else "New Task",
-                                isPrimary = true,
-                                onClick = onAddNewTask,
-                                modifier = Modifier.testTag("quick_action_new_task")
-                            )
-                        }
                         DashboardQuickShortcutChip(
                             emoji = "📅",
                             label = if (isHebrew) "לוח שנה" else "Calendar",
@@ -586,9 +556,10 @@ fun TasksScreen(
                         if (currentMember.isParent) {
                             Spacer(modifier = Modifier.width(8.dp))
                             FamilyPrimaryButton(
-                                text = if (isHebrew) "+ הוסף משימה" else "+ Add Task",
+                                text = if (isHebrew) "הוסף משימה" else "Add Task",
+                                leadingIcon = Icons.Default.Add,
                                 onClick = onAddNewTask,
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp),
                                 modifier = Modifier.testTag("add_task_primary_button")
                             )
                         }

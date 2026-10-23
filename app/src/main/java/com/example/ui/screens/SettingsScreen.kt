@@ -22,6 +22,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.*
@@ -136,10 +137,10 @@ fun SettingsScreen(
                 )
             }
 
-            // 1A. Theme Mode Selection ("ערכת נושא": "בהיר", "כהה", "לפי הגדרות המכשיר")
+            // 1A. Theme Mode Selection ("ערכת נושא • Velvet Edition": "בהיר" (Velvet Light), "כהה" (Velvet Dark), "לפי הגדרות המכשיר")
             item {
                 SettingsCardContainer(
-                    title = if (isHebrew) "ערכת נושא" else "Theme Mode",
+                    title = if (isHebrew) "ערכת נושא • Velvet Edition" else "Theme Mode • Velvet Edition",
                     icon = Icons.Default.Palette,
                     iconTint = glass.primaryAccent
                 ) {
@@ -164,9 +165,10 @@ fun SettingsScreen(
                                     .clickable { onThemeModeChange(mode) }
                                     .testTag("theme_mode_${mode.name}")
                             ) {
-                                Box(
+                                Column(
                                     modifier = Modifier.padding(vertical = 10.dp, horizontal = 6.dp),
-                                    contentAlignment = Alignment.Center
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
                                 ) {
                                     Text(
                                         text = mode.getDisplayName(isHebrew),
@@ -178,7 +180,25 @@ fun SettingsScreen(
                                                 glass.textPrimary
                                             }
                                         ),
-                                        textAlign = TextAlign.Center
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = mode.getEditionSubtitle(isHebrew),
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontSize = 9.5.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (isSelected) {
+                                                if (glass.isDark) Color(0xFF1E293B) else Color.White.copy(alpha = 0.88f)
+                                            } else {
+                                                glass.textMuted
+                                            }
+                                        ),
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }

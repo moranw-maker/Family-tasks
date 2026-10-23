@@ -2112,7 +2112,15 @@ class ExampleRobolectricTest {
             com.example.ui.theme.DarkSoftGlassColors.primaryAccent
         )
 
-        // 5. Verify SharedPreferences persistence of themeMode and appTextScale across repository instances
+        // 5. Verify fresh-install default is Velvet Light (AppThemeMode.LIGHT) and SharedPreferences persistence
+        context.getSharedPreferences("family_tasks_ui_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+        val freshRepo = FamilyRepository(context = context)
+        assertEquals(
+            "Default themeMode on fresh install MUST be Velvet Light (AppThemeMode.LIGHT)",
+            com.example.model.AppThemeMode.LIGHT,
+            freshRepo.themeMode.value
+        )
+
         val repo1 = FamilyRepository(context = context)
         repo1.setThemeMode(com.example.model.AppThemeMode.DARK)
         repo1.setAppTextScale(com.example.model.AppTextScale.EXTRA_LARGE)
@@ -2132,10 +2140,10 @@ class ExampleRobolectricTest {
             repo2.appTextScale.value
         )
 
-        // Reset back to defaults for cleanliness
-        repo2.setThemeMode(com.example.model.AppThemeMode.SYSTEM)
+        // Reset back to Velvet Light default for cleanliness
+        repo2.setThemeMode(com.example.model.AppThemeMode.LIGHT)
         repo2.setAppTextScale(com.example.model.AppTextScale.NORMAL)
-        assertEquals(com.example.model.AppThemeMode.SYSTEM, repo2.themeMode.value)
+        assertEquals(com.example.model.AppThemeMode.LIGHT, repo2.themeMode.value)
         assertEquals(com.example.model.AppTextScale.NORMAL, repo2.appTextScale.value)
 
         // 6. Verify Israeli School Timetable strictly uses Sunday through Friday (no Saturday)
@@ -2290,25 +2298,27 @@ class ExampleRobolectricTest {
         onNodeWithTag("nav_alarms").assertExists()
         onNodeWithTag("nav_files").assertExists()
 
-        // 2. Verify Home / TasksScreen Soft Glass hero banner, Bento stat cards, and primary button
+        // 2. Verify Home / TasksScreen Velvet Edition hero banner, Bento stat cards, and single primary button (no duplicate FAB)
         onNodeWithTag("tasks_screen").assertExists()
         onNodeWithTag("our_family_banner_card").assertExists()
         onNodeWithTag("stat_card_points").assertExists()
         onNodeWithTag("stat_card_completed").assertExists()
+        onNodeWithTag("add_task_fab").assertDoesNotExist()
         onNodeWithTag("tasks_screen").performScrollToNode(hasTestTag("add_task_primary_button"))
         onNodeWithTag("add_task_primary_button").assertExists()
 
-        // 3. Navigate to CalendarScreen and verify Soft Glass month grid and header
+        // 3. Navigate to CalendarScreen and verify Velvet Edition month grid and header
         activeScreenState.value = com.example.model.AppScreen.CALENDAR
         waitForIdle()
         onNodeWithTag("calendar_screen").assertExists()
         onNodeWithTag("calendar_month_grid").assertExists()
         onNodeWithTag("calendar_selected_date_header").assertExists()
 
-        // 4. Navigate to TimetableScreen and verify Soft Glass timetable view and day selector
+        // 4. Navigate to TimetableScreen and verify Velvet Edition timetable view, single Add Period button, and day selector
         activeScreenState.value = com.example.model.AppScreen.TIMETABLE
         waitForIdle()
         onNodeWithTag("timetable_screen").assertExists()
+        onNodeWithTag("add_period_fab").assertExists()
         onNodeWithTag("day_tab_SUNDAY").assertExists()
         onNodeWithTag("day_tab_FRIDAY").assertExists()
         onNodeWithTag("day_tab_SATURDAY").assertDoesNotExist()

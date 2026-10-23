@@ -92,17 +92,7 @@ fun TimetableScreen(
         .sortedBy { it.periodIndex }
 
     Scaffold(
-        containerColor = Color.Transparent,
-        floatingActionButton = {
-            if (currentMember.isParent) {
-                FamilyPrimaryButton(
-                    text = if (isHebrew) "הוסף שיעור" else "Add Period",
-                    leadingIcon = Icons.Default.Add,
-                    onClick = onAddPeriod,
-                    modifier = Modifier.testTag("add_period_fab")
-                )
-            }
-        }
+        containerColor = Color.Transparent
     ) { innerPadding ->
         SoftGlassScreenBackground(
             modifier = Modifier
@@ -162,10 +152,13 @@ fun TimetableScreen(
                             }
                         }
 
-                        if (currentMember.isAdmin) {
-                            FamilyStatusChip(
-                                emoji = "✏️",
-                                label = if (isHebrew) "עריכת הורה" else "Parent Edit"
+                        if (currentMember.isParent) {
+                            FamilyPrimaryButton(
+                                text = if (isHebrew) "הוסף שיעור" else "Add Period",
+                                leadingIcon = Icons.Default.Add,
+                                onClick = onAddPeriod,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp),
+                                modifier = Modifier.testTag("add_period_fab")
                             )
                         }
                     }
@@ -310,14 +303,10 @@ fun TimetableScreen(
                                 else
                                     "No periods on ${selectedDay.getDisplayName(isHebrew)}",
                                 subtitle = if (currentMember.isParent) {
-                                    if (isHebrew) "לחצו על + למטה להוספת שיעור" else "Tap + below to add a period"
+                                    if (isHebrew) "לחצו על 'הוסף שיעור' למעלה להוספת שיעור למערכת" else "Tap 'Add Period' above to add a class"
                                 } else {
                                     if (isHebrew) "יום חופשי משיעורים במערכת" else "No classes scheduled for this day"
-                                },
-                                actionLabel = if (currentMember.isParent) {
-                                    if (isHebrew) "+ הוסף שיעור" else "+ Add Period"
-                                } else null,
-                                onActionClick = if (currentMember.isParent) onAddPeriod else null
+                                }
                             )
                         }
                     } else {
