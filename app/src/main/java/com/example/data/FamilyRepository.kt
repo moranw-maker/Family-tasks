@@ -235,6 +235,22 @@ class FamilyRepository(
     private var foldersListenerRegistration: ListenerRegistration? = null
     private var filesListenerRegistration: ListenerRegistration? = null
     private var alarmsListenerRegistration: ListenerRegistration? = null
+    private var pointsHistoryListenerRegistration: ListenerRegistration? = null
+
+    private val pointsMutex = Mutex()
+    private val processedPointsOperationIds: MutableSet<String> =
+        ConcurrentHashMap.newKeySet()
+    private val syncedServerMemberBalancesForFamilies: MutableSet<String> =
+        ConcurrentHashMap.newKeySet()
+
+    private val _pointsHistory = MutableStateFlow<List<PointsHistoryEntry>>(emptyList())
+    val pointsHistory: StateFlow<List<PointsHistoryEntry>> = _pointsHistory.asStateFlow()
+
+    private val _isProcessingPointsOperation = MutableStateFlow(false)
+    val isProcessingPointsOperation: StateFlow<Boolean> = _isProcessingPointsOperation.asStateFlow()
+
+    private val _pointsOperationError = MutableStateFlow<String?>(null)
+    val pointsOperationError: StateFlow<String?> = _pointsOperationError.asStateFlow()
 
     private val locallyManagedAlarms = ConcurrentHashMap<String, FamilyAlarm>()
     private val explicitlyDeletedAlarmIds: MutableSet<String> =
@@ -827,6 +843,7 @@ class FamilyRepository(
 
     init {
         restorePersistedFileNavigationState(_activeFamilyId.value)
+        restorePersistedPointsState(_activeFamilyId.value, allowOverwritingMemberBalances = true)
         seedLocalRoomIfNeeded()
         observeAuthAndAttachFirestore()
     }
@@ -1537,6 +1554,12 @@ class FamilyRepository(
                         listOf(restoredMember) + localOtherMembers
                     }
                     _members.value = loadedMembers
+                    if (db != null && authProvider()?.currentUser != null && loadedMembers.isNotEmpty()) {
+                        syncedServerMemberBalancesForFamilies.add(existingFamilyId)
+                        loadedMembers.forEach { member ->
+                            persistMemberPointsBalanceLocally(existingFamilyId, member.id, member.earnedPoints)
+                        }
+                    }
 
                     val confirmedPendingInvites = if (db != null && authProvider()?.currentUser != null && validatedRole == UserRole.PARENT) {
                         val now = System.currentTimeMillis()
@@ -3377,6 +3400,10 @@ class FamilyRepository(
 
                     if (remoteMembers.isNotEmpty()) {
                         _members.value = remoteMembers
+                        syncedServerMemberBalancesForFamilies.add(familyId)
+                        remoteMembers.forEach { member ->
+                            persistMemberPointsBalanceLocally(familyId, member.id, member.earnedPoints)
+                        }
                         val signedInUid = authProvider()?.currentUser?.uid
                         val updatedSelf = remoteMembers.find {
                             it.id == signedInUid || it.id == _currentMember.value.id
@@ -3775,6 +3802,24 @@ class FamilyRepository(
                     refreshVisibleFamilyAlarms()
                 }
         }
+
+        // 9. Real-time Family Points History Listener (/families/{familyId}/points_history)
+        restorePersistedPointsState(
+            familyId = familyId,
+            allowOverwritingMemberBalances = !syncedServerMemberBalancesForFamilies.contains(familyId)
+        )
+        runCatching {
+            pointsHistoryListenerRegistration?.remove()
+            pointsHistoryListenerRegistration = familyRef.collection("points_history")
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null || snapshot == null) return@addSnapshotListener
+                    val remoteEntries = snapshot.documents.mapNotNull { doc ->
+                        val data = doc.data ?: return@mapNotNull null
+                        parsePointsHistoryDocument(doc.id, data, familyId)
+                    }
+                    mergeRemotePointsHistory(familyId, remoteEntries)
+                }
+        }
     }
 
     fun detachFirestoreListeners() {
@@ -3786,6 +3831,7 @@ class FamilyRepository(
         foldersListenerRegistration?.remove()
         filesListenerRegistration?.remove()
         alarmsListenerRegistration?.remove()
+        pointsHistoryListenerRegistration?.remove()
         tasksListenerRegistration = null
         membersListenerRegistration = null
         rewardsListenerRegistration = null
@@ -3794,8 +3840,7 @@ class FamilyRepository(
         foldersListenerRegistration = null
         filesListenerRegistration = null
         alarmsListenerRegistration = null
-        foldersListenerRegistration = null
-        filesListenerRegistration = null
+        pointsHistoryListenerRegistration = null
     }
 
     private suspend fun flushOfflineSyncQueue(familyId: String) {
@@ -4483,11 +4528,17 @@ class FamilyRepository(
             }
         }
 
+        val newFamilyIdentity = if (canonicalNewRole == UserRole.PARENT) {
+            if (targetMember.familyIdentity.isParentIdentity) targetMember.familyIdentity else FamilyIdentity.FATHER
+        } else {
+            if (!targetMember.familyIdentity.isParentIdentity) targetMember.familyIdentity else FamilyIdentity.CHILD
+        }
+
         _members.value = _members.value.map {
-            if (it.id == memberId) it.copy(role = canonicalNewRole) else it
+            if (it.id == memberId) it.copy(role = canonicalNewRole, familyIdentity = newFamilyIdentity) else it
         }
         if (_currentMember.value.id == memberId) {
-            _currentMember.value = _currentMember.value.copy(role = canonicalNewRole)
+            _currentMember.value = _currentMember.value.copy(role = canonicalNewRole, familyIdentity = newFamilyIdentity)
         }
 
         val db = firestoreProvider()
@@ -4498,7 +4549,14 @@ class FamilyRepository(
                     val familyRef = db.collection("families").document(familyId)
                     val memberRef = familyRef.collection("members").document(memberId)
                     val batch = db.batch()
-                    batch.update(memberRef, "role", canonicalNewRole.toFirestoreValue())
+                    batch.update(
+                        memberRef,
+                        mapOf(
+                            "role" to canonicalNewRole.toFirestoreValue(),
+                            "familyIdentity" to newFamilyIdentity.toFirestoreValue(),
+                            "updatedAt" to System.currentTimeMillis()
+                        )
+                    )
                     if (canonicalNewRole == UserRole.PARENT) {
                         batch.update(familyRef, "adminUids", FieldValue.arrayUnion(memberId))
                     } else {
@@ -4615,6 +4673,23 @@ class FamilyRepository(
         }
     }
 
+    private suspend fun resolveTaskFromStateOrFirestore(taskId: String): FamilyTask? {
+        _tasks.value.find { it.id == taskId }?.let { return it }
+        val db = firestoreProvider() ?: return null
+        val familyId = _activeFamilyId.value.ifBlank { return null }
+        val snap = runCatching {
+            db.collection("families").document(familyId)
+                .collection("tasks").document(taskId)
+                .get().await()
+        }.getOrNull() ?: return null
+        val data = snap.data ?: return null
+        val parsed = parseTaskDocument(snap.id, data, familyId) ?: return null
+        if (_tasks.value.none { it.id == parsed.id }) {
+            _tasks.value = listOf(parsed) + _tasks.value
+        }
+        return parsed
+    }
+
     /**
      * V1.6 Requirement 1, 4, 6, 7, 8:
      * - PARENT can toggle any task (and marks `approvedByParent = newStatus`).
@@ -4628,7 +4703,7 @@ class FamilyRepository(
     suspend fun toggleTaskCompletionAsync(taskId: String): Result<FamilyTask> {
         val current = _currentMember.value
         val uid = currentUid()
-        val targetTask = _tasks.value.find { it.id == taskId }
+        val targetTask = resolveTaskFromStateOrFirestore(taskId)
             ?: return Result.failure(IllegalArgumentException("המשימה לא נמצאה"))
         val resolvedFamilyId = targetTask.familyId.ifBlank { _activeFamilyId.value }
         val taskPath = "families/$resolvedFamilyId/tasks/$taskId"
@@ -4650,19 +4725,25 @@ class FamilyRepository(
             }
         }
 
-        val previousTask = targetTask
-        val previousMembers = _members.value
-        val previousCurrentMember = _currentMember.value
-
         val newStatus = !targetTask.isCompleted
+
+        // When a PARENT marks an uncompleted task as completed, execute the atomic single-transaction
+        // approval + points credit + points_history write so duplicate points can never occur.
+        if (current.isParent && newStatus) {
+            return commitParentTaskApprovalTransactionAsync(
+                taskId = taskId,
+                writeStage = FirestoreErrorHandler.TaskStage.PARENT_COMPLETE_TASK_WRITE,
+                isParentApprovalEvent = false
+            )
+        }
+
+        val previousTask = targetTask
         val nowMillis = System.currentTimeMillis()
         val actorId = uid.ifBlank { current.id }
-        val newApprovedByParent = if (current.isParent) newStatus else false
-
         val updatedTask = targetTask.copy(
             familyId = resolvedFamilyId,
             isCompleted = newStatus,
-            approvedByParent = newApprovedByParent,
+            approvedByParent = false,
             completedAtMillis = if (newStatus) nowMillis else null,
             completedByMemberId = if (newStatus) actorId else null,
             updatedAtMillis = nowMillis
@@ -4670,27 +4751,7 @@ class FamilyRepository(
 
         _taskOperationError.value = null
         _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVING)
-
-        // Optimistically update local task & points state while write is in flight
         _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
-
-        var updatedAssigneePoints: Int? = null
-        if (current.isParent) {
-            val delta = if (newStatus) updatedTask.points else -updatedTask.points
-            _members.value = _members.value.map { member ->
-                if (member.id == updatedTask.assignedToMemberId) {
-                    val newPts = (member.earnedPoints + delta).coerceAtLeast(0)
-                    updatedAssigneePoints = newPts
-                    val updatedMember = member.copy(earnedPoints = newPts)
-                    if (_currentMember.value.id == member.id) {
-                        _currentMember.value = updatedMember
-                    }
-                    updatedMember
-                } else {
-                    member
-                }
-            }
-        }
 
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
@@ -4705,10 +4766,7 @@ class FamilyRepository(
                 "Simulated offline network failure during task completion",
                 FirebaseFirestoreException.Code.UNAVAILABLE
             )
-            // Revert optimistic UI state on failure
             _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
-            _members.value = previousMembers
-            _currentMember.value = previousCurrentMember
             _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
             val classified = FirestoreErrorHandler.classifyTaskFailure(
                 error = offlineErr,
@@ -4742,31 +4800,18 @@ class FamilyRepository(
                     )
                     docRef.update(childUpdateMap).await()
                 } else {
-                    // PARENT update: updates completion & approval status and persists assignee earnedPoints
-                    val parentUpdateMap = mapOf<String, Any?>(
-                        "isCompleted" to updatedTask.isCompleted,
-                        "approvedByParent" to updatedTask.approvedByParent,
-                        "completedAtMillis" to updatedTask.completedAtMillis,
-                        "completedByMemberId" to (updatedTask.completedByMemberId ?: authUser.uid),
+                    // PARENT uncompleting a task: updates task completion state without altering earnedPoints or clearing rewardedOperationId
+                    val parentUncompleteMap = mapOf<String, Any?>(
+                        "isCompleted" to false,
+                        "approvedByParent" to false,
+                        "completedAtMillis" to null,
+                        "completedByMemberId" to null,
                         "updatedAt" to nowMillis
                     )
                     try {
-                        docRef.update(parentUpdateMap).await()
+                        docRef.update(parentUncompleteMap).await()
                     } catch (_: Exception) {
                         docRef.set(buildFullTaskFirestoreMap(updatedTask, resolvedFamilyId, nowMillis), SetOptions.merge()).await()
-                    }
-
-                    if (updatedAssigneePoints != null && updatedTask.assignedToMemberId.isNotBlank()) {
-                        runCatching {
-                            db.collection("families").document(resolvedFamilyId)
-                                .collection("members").document(updatedTask.assignedToMemberId)
-                                .update(
-                                    mapOf(
-                                        "earnedPoints" to updatedAssigneePoints,
-                                        "updatedAt" to nowMillis
-                                    )
-                                ).await()
-                        }
                     }
                 }
 
@@ -4777,10 +4822,7 @@ class FamilyRepository(
                     note = "Confirmed task completion commit in Firestore"
                 )
             } catch (e: Exception) {
-                // Restore previous state so UI never silently diverges from Firestore
                 _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
-                _members.value = previousMembers
-                _currentMember.value = previousCurrentMember
                 _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
 
                 val classified = FirestoreErrorHandler.classifyTaskFailure(
@@ -4795,7 +4837,6 @@ class FamilyRepository(
             }
         }
 
-        // Write succeeded (or pure local unit-test mode): update sync state, Room cache, and emit notification
         val finalSyncState = when {
             !updatedTask.isCompleted -> TaskCompletionSyncState.IDLE
             updatedTask.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
@@ -4803,10 +4844,6 @@ class FamilyRepository(
         }
         _taskSyncStates.value = _taskSyncStates.value + (taskId to finalSyncState)
         _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
-
-        if (updatedTask.isCompleted && updatedTask.approvedByParent && !previousTask.isCompleted) {
-            spawnNextRecurringOccurrenceIfNeeded(updatedTask)
-        }
 
         repoScope.launch {
             runCatching {
@@ -4873,7 +4910,6 @@ class FamilyRepository(
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
         if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
-            // Synchronous in-memory execution for local unit tests
             return kotlinx.coroutines.runBlocking {
                 toggleTaskCompletionAsync(taskId).isSuccess
             }
@@ -4886,145 +4922,22 @@ class FamilyRepository(
             return false
         }
 
-        // Apply immediate optimistic state and launch cloud commit on repoScope
-        val previousTask = targetTask
-        val previousMembers = _members.value
-        val previousCurrentMember = _currentMember.value
-        val newStatus = !targetTask.isCompleted
-        val nowMillis = System.currentTimeMillis()
-        val actorId = uid.ifBlank { current.id }
-        val newApprovedByParent = if (current.isParent) newStatus else false
-
-        val updatedTask = targetTask.copy(
-            familyId = resolvedFamilyId,
-            isCompleted = newStatus,
-            approvedByParent = newApprovedByParent,
-            completedAtMillis = if (newStatus) nowMillis else null,
-            completedByMemberId = if (newStatus) actorId else null,
-            updatedAtMillis = nowMillis
-        )
-
-        _taskOperationError.value = null
-        _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVING)
-        _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
-
-        var updatedAssigneePoints: Int? = null
-        if (current.isParent) {
-            val delta = if (newStatus) updatedTask.points else -updatedTask.points
-            _members.value = _members.value.map { member ->
-                if (member.id == updatedTask.assignedToMemberId) {
-                    val newPts = (member.earnedPoints + delta).coerceAtLeast(0)
-                    updatedAssigneePoints = newPts
-                    val updatedMember = member.copy(earnedPoints = newPts)
-                    if (_currentMember.value.id == member.id) {
-                        _currentMember.value = updatedMember
-                    }
-                    updatedMember
-                } else {
-                    member
-                }
-            }
-        }
-
-        val isParentCaller = current.isParent
-        val writeStage = if (isParentCaller) {
-            FirestoreErrorHandler.TaskStage.PARENT_COMPLETE_TASK_WRITE
-        } else {
-            FirestoreErrorHandler.TaskStage.CHILD_COMPLETE_TASK_WRITE
-        }
-
         repoScope.launch {
-            try {
-                if (db != null && authUser != null) {
-                    FirestoreErrorHandler.logTaskMilestone(
-                        stage = writeStage,
-                        path = taskPath,
-                        databaseId = configuredDatabaseId,
-                        note = "Persisting task completion (isCompleted=$newStatus, isParent=$isParentCaller)"
-                    )
-                    val docRef = db.collection("families").document(resolvedFamilyId)
-                        .collection("tasks").document(updatedTask.id)
-
-                    if (!isParentCaller) {
-                        val childUpdateMap = mapOf<String, Any?>(
-                            "isCompleted" to updatedTask.isCompleted,
-                            "completedAtMillis" to updatedTask.completedAtMillis,
-                            "completedByMemberId" to if (updatedTask.isCompleted) (updatedTask.completedByMemberId ?: authUser.uid) else null,
-                            "updatedAt" to nowMillis
-                        )
-                        docRef.update(childUpdateMap).await()
-                    } else {
-                        val parentUpdateMap = mapOf<String, Any?>(
-                            "isCompleted" to updatedTask.isCompleted,
-                            "approvedByParent" to updatedTask.approvedByParent,
-                            "completedAtMillis" to updatedTask.completedAtMillis,
-                            "completedByMemberId" to if (updatedTask.isCompleted) (updatedTask.completedByMemberId ?: authUser.uid) else null,
-                            "updatedAt" to nowMillis
-                        )
-                        try {
-                            docRef.update(parentUpdateMap).await()
-                        } catch (_: Exception) {
-                            docRef.set(buildFullTaskFirestoreMap(updatedTask, resolvedFamilyId, nowMillis), SetOptions.merge()).await()
-                        }
-
-                        if (updatedAssigneePoints != null && updatedTask.assignedToMemberId.isNotBlank()) {
-                            runCatching {
-                                db.collection("families").document(resolvedFamilyId)
-                                    .collection("members").document(updatedTask.assignedToMemberId)
-                                    .update(
-                                        mapOf(
-                                            "earnedPoints" to updatedAssigneePoints,
-                                            "updatedAt" to nowMillis
-                                        )
-                                    ).await()
-                            }
-                        }
-                    }
-                }
-
-                val finalSyncState = when {
-                    !updatedTask.isCompleted -> TaskCompletionSyncState.IDLE
-                    updatedTask.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
-                    else -> TaskCompletionSyncState.PENDING_APPROVAL
-                }
-                _taskSyncStates.value = _taskSyncStates.value + (taskId to finalSyncState)
-                _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
-                if (updatedTask.isCompleted && updatedTask.approvedByParent && !previousTask.isCompleted) {
-                    spawnNextRecurringOccurrenceIfNeeded(updatedTask)
-                }
-                runCatching {
-                    taskDao?.upsertTask(updatedTask.toCoreTask(resolvedFamilyId))
-                }
-                emitTaskCompletionNotificationIfNeeded(updatedTask, isParentApprovalEvent = false)
-            } catch (e: Exception) {
-                // Revert optimistic state on Firestore write failure
-                _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
-                _members.value = previousMembers
-                _currentMember.value = previousCurrentMember
-                _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
-
-                val classified = FirestoreErrorHandler.classifyTaskFailure(
-                    error = e,
-                    stage = writeStage,
-                    path = taskPath,
-                    databaseId = configuredDatabaseId
-                )
-                lastClassifiedTaskFailure = classified
-                _taskOperationError.value = classified.messageHe
-            }
+            toggleTaskCompletionAsync(taskId)
         }
         return true
     }
 
     /**
-     * V1.6 Requirement 6 & 9:
+     * V1.6 Requirement 6 & 9 + Points Audit Fix:
      * Allows an authenticated PARENT to approve a child's completed task (`approvedByParent = true`),
-     * persisting the approval to `/families/{familyId}/tasks/{taskId}` and awarding points to the
-     * child's member document in Firestore.
+     * executing task approval, member points credit, and points_history creation inside a single
+     * atomic Firestore transaction (`db.runTransaction`) with deterministic operation ID `pts_task_{taskId}`.
+     * Prevents duplicate point credits even under concurrent approval by two parents.
      */
     suspend fun approveTaskCompletionAsync(taskId: String): Result<FamilyTask> {
         val current = _currentMember.value
-        val targetTask = _tasks.value.find { it.id == taskId }
+        val targetTask = resolveTaskFromStateOrFirestore(taskId)
             ?: return Result.failure(IllegalArgumentException("המשימה לא נמצאה"))
         val resolvedFamilyId = targetTask.familyId.ifBlank { _activeFamilyId.value }
         val taskPath = "families/$resolvedFamilyId/tasks/$taskId"
@@ -5042,40 +4955,77 @@ class FamilyRepository(
             return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified))
         }
 
+        return commitParentTaskApprovalTransactionAsync(
+            taskId = taskId,
+            writeStage = FirestoreErrorHandler.TaskStage.PARENT_APPROVE_TASK_WRITE,
+            isParentApprovalEvent = true
+        )
+    }
+
+    private data class AtomicTaskApprovalTxOutcome(
+        val approvedTask: FamilyTask,
+        val wasAlreadyApprovedOrRewarded: Boolean,
+        val historyEntry: PointsHistoryEntry?,
+        val updatedBalance: Int?
+    )
+
+    private suspend fun commitParentTaskApprovalTransactionAsync(
+        taskId: String,
+        writeStage: FirestoreErrorHandler.TaskStage,
+        isParentApprovalEvent: Boolean
+    ): Result<FamilyTask> = pointsMutex.withLock {
+        val current = _currentMember.value
+        val targetTask = resolveTaskFromStateOrFirestore(taskId)
+            ?: return@withLock Result.failure(IllegalArgumentException("המשימה לא נמצאה"))
+        val resolvedFamilyId = targetTask.familyId.ifBlank { _activeFamilyId.value.ifBlank { "fam_israeli_8492" } }
+        val taskPath = "families/$resolvedFamilyId/tasks/$taskId"
+
+        if (!current.isParent) {
+            val classified = FirestoreErrorHandler.classifyTaskFailure(
+                error = SecurityException("Only a PARENT can approve task completion"),
+                stage = FirestoreErrorHandler.TaskStage.VERIFY_TASK_AUTHORIZATION,
+                path = taskPath,
+                databaseId = configuredDatabaseId,
+                overrideCategory = FirestoreErrorHandler.TaskFailureCategory.UNAUTHORIZED_ROLE
+            )
+            lastClassifiedTaskFailure = classified
+            _taskOperationError.value = classified.messageHe
+            return@withLock Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified))
+        }
+
         val previousTask = targetTask
         val previousMembers = _members.value
         val previousCurrentMember = _currentMember.value
         val nowMillis = System.currentTimeMillis()
-        val wasAlreadyApproved = targetTask.isCompleted && targetTask.approvedByParent
+        val uid = currentUid()
+        val actorId = uid.ifBlank { current.id }
+        val taskOpId = "pts_task_$taskId"
+
+        val wasAlreadyApprovedLocally = (targetTask.isCompleted && targetTask.approvedByParent) ||
+            processedPointsOperationIds.contains(taskOpId) ||
+            _pointsHistory.value.any {
+                it.operationId == taskOpId ||
+                    it.id == taskOpId ||
+                    (it.actionType == PointsActionType.TASK_EARNED && it.taskId == taskId)
+            }
+
+        val completedBy = if (isParentApprovalEvent) {
+            targetTask.completedByMemberId ?: targetTask.assignedToMemberId.ifBlank { actorId }
+        } else {
+            actorId
+        }
 
         val approvedTask = targetTask.copy(
             familyId = resolvedFamilyId,
             isCompleted = true,
             approvedByParent = true,
             completedAtMillis = targetTask.completedAtMillis ?: nowMillis,
-            completedByMemberId = targetTask.completedByMemberId ?: targetTask.assignedToMemberId,
+            completedByMemberId = completedBy,
             updatedAtMillis = nowMillis
         )
 
         _taskOperationError.value = null
         _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVING)
-        _tasks.value = _tasks.value.map { if (it.id == taskId) approvedTask else it }
-
-        var updatedAssigneePoints: Int? = null
-        _members.value = _members.value.map { member ->
-            if (member.id == approvedTask.assignedToMemberId) {
-                val pointsToAward = if (!wasAlreadyApproved) approvedTask.points else 0
-                val newPts = (member.earnedPoints + pointsToAward).coerceAtLeast(0)
-                updatedAssigneePoints = newPts
-                val updatedMember = member.copy(earnedPoints = newPts)
-                if (_currentMember.value.id == member.id) {
-                    _currentMember.value = updatedMember
-                }
-                updatedMember
-            } else {
-                member
-            }
-        }
 
         if (simulateOfflineNetworkFailure) {
             val offlineErr = FirebaseFirestoreException(
@@ -5088,57 +5038,181 @@ class FamilyRepository(
             _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
             val classified = FirestoreErrorHandler.classifyTaskFailure(
                 error = offlineErr,
-                stage = FirestoreErrorHandler.TaskStage.PARENT_APPROVE_TASK_WRITE,
+                stage = writeStage,
                 path = taskPath,
                 databaseId = configuredDatabaseId
             )
             lastClassifiedTaskFailure = classified
             _taskOperationError.value = classified.messageHe
-            return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified, offlineErr))
+            return@withLock Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified, offlineErr))
         }
 
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db != null && authUser != null) {
+        val outcome: AtomicTaskApprovalTxOutcome = if (db != null && authUser != null) {
             try {
                 FirestoreErrorHandler.logTaskMilestone(
-                    stage = FirestoreErrorHandler.TaskStage.PARENT_APPROVE_TASK_WRITE,
+                    stage = writeStage,
                     path = taskPath,
                     databaseId = configuredDatabaseId,
-                    note = "Parent approving task completion in named database"
+                    note = "Executing atomic Firestore transaction for task approval & points credit (opId=$taskOpId)"
                 )
-                val docRef = db.collection("families").document(resolvedFamilyId)
-                    .collection("tasks").document(approvedTask.id)
-                docRef.update(
-                    mapOf(
-                        "isCompleted" to true,
-                        "approvedByParent" to true,
-                        "completedAtMillis" to approvedTask.completedAtMillis,
-                        "completedByMemberId" to approvedTask.completedByMemberId,
-                        "updatedAt" to nowMillis
-                    )
-                ).await()
+                val familyRef = db.collection("families").document(resolvedFamilyId)
+                val taskDocRef = familyRef.collection("tasks").document(approvedTask.id)
+                val historyDocRef = familyRef.collection("points_history").document(taskOpId)
 
-                if (approvedTask.assignedToMemberId.isNotBlank()) {
-                    val memberRef = db.collection("families").document(resolvedFamilyId)
-                        .collection("members").document(approvedTask.assignedToMemberId)
-                    runCatching {
-                        val memberSnap = memberRef.get().await()
-                        if (memberSnap.exists()) {
-                            val currentCloudPts = (memberSnap.getLong("earnedPoints") ?: 0L).toInt()
-                            val newCloudPts = (currentCloudPts + approvedTask.points).coerceAtLeast(updatedAssigneePoints ?: 0)
-                            memberRef.update(
+                db.runTransaction { tx ->
+                    // 1. All reads first
+                    val taskSnap = tx.get(taskDocRef)
+                    val existingHistSnap = tx.get(historyDocRef)
+
+                    val assigneeId = (taskSnap.getString("assignedToMemberId")
+                        ?: taskSnap.getString("assignedUid")
+                        ?: taskSnap.getString("assignedMemberId")
+                        ?: approvedTask.assignedToMemberId).trim()
+                    val taskPoints = (taskSnap.getLong("points")
+                        ?: taskSnap.getLong("pointsValue")
+                        ?: approvedTask.points.toLong()).toInt().coerceAtLeast(0)
+                    val taskTitle = taskSnap.getString("title")?.takeIf { it.isNotBlank() } ?: approvedTask.title
+
+                    val memberRef = if (assigneeId.isNotBlank()) {
+                        familyRef.collection("members").document(assigneeId)
+                    } else {
+                        null
+                    }
+                    val memberSnap = if (memberRef != null) tx.get(memberRef) else null
+
+                    val cloudIsCompleted = taskSnap.getBoolean("isCompleted") ?: false
+                    val cloudApprovedByParent = taskSnap.getBoolean("approvedByParent") ?: false
+                    val cloudRewardedOpId = taskSnap.getString("rewardedOperationId").orEmpty()
+                    val alreadyRewarded = existingHistSnap.exists() ||
+                        (cloudIsCompleted && cloudApprovedByParent) ||
+                        cloudRewardedOpId.isNotBlank() ||
+                        wasAlreadyApprovedLocally
+
+                    // 2. Write task approval state
+                    if (taskSnap.exists()) {
+                        val taskUpdateMap = mutableMapOf<String, Any?>(
+                            "isCompleted" to true,
+                            "approvedByParent" to true,
+                            "completedAtMillis" to approvedTask.completedAtMillis,
+                            "completedByMemberId" to (approvedTask.completedByMemberId ?: authUser.uid),
+                            "updatedAt" to nowMillis
+                        )
+                        if (taskPoints > 0 && assigneeId.isNotBlank() && cloudRewardedOpId.isBlank()) {
+                            taskUpdateMap["rewardedOperationId"] = taskOpId
+                        }
+                        tx.update(taskDocRef, taskUpdateMap)
+                    } else {
+                        val fullMap = buildFullTaskFirestoreMap(approvedTask, resolvedFamilyId, nowMillis).toMutableMap()
+                        if (taskPoints > 0 && assigneeId.isNotBlank()) {
+                            fullMap["rewardedOperationId"] = taskOpId
+                        }
+                        tx.set(taskDocRef, fullMap, SetOptions.merge())
+                    }
+
+                    // 3. Atomically credit member points & create points_history entry ONLY if not already rewarded
+                    if (!alreadyRewarded && taskPoints > 0 && assigneeId.isNotBlank() && memberRef != null) {
+                        val localAssignee = _members.value.find { it.id == assigneeId }
+                        val previousBalance = if (memberSnap != null && memberSnap.exists()) {
+                            (memberSnap.getLong("earnedPoints") ?: (localAssignee?.earnedPoints ?: 0).toLong()).toInt().coerceAtLeast(0)
+                        } else {
+                            (localAssignee?.earnedPoints ?: 0).coerceAtLeast(0)
+                        }
+                        val newBalance = previousBalance + taskPoints
+                        val resolvedMemberName = memberSnap?.getString("name")?.takeIf { it.isNotBlank() }
+                            ?: localAssignee?.name.orEmpty()
+
+                        if (memberSnap != null && memberSnap.exists()) {
+                            tx.update(
+                                memberRef,
                                 mapOf(
-                                    "earnedPoints" to newCloudPts,
+                                    "earnedPoints" to newBalance,
+                                    "lastPointsOperationId" to taskOpId,
                                     "updatedAt" to nowMillis
                                 )
-                            ).await()
-                            _members.value = _members.value.map { m ->
-                                if (m.id == approvedTask.assignedToMemberId) m.copy(earnedPoints = newCloudPts) else m
-                            }
+                            )
+                        } else if (localAssignee != null) {
+                            tx.set(
+                                memberRef,
+                                mapOf(
+                                    "id" to localAssignee.id,
+                                    "uid" to localAssignee.id,
+                                    "familyId" to resolvedFamilyId,
+                                    "name" to localAssignee.name,
+                                    "nameEn" to localAssignee.nameEn,
+                                    "role" to localAssignee.role.toFirestoreValue(),
+                                    "familyIdentity" to localAssignee.familyIdentity.toFirestoreValue(),
+                                    "avatarEmoji" to localAssignee.avatarEmoji,
+                                    "colorHex" to localAssignee.colorHex,
+                                    "earnedPoints" to newBalance,
+                                    "spentPoints" to localAssignee.spentPoints,
+                                    "lastPointsOperationId" to taskOpId,
+                                    "invitationAccepted" to true,
+                                    "invitationPending" to false,
+                                    "updatedAt" to nowMillis
+                                ),
+                                SetOptions.merge()
+                            )
                         }
+
+                        val reason = "השלמת משימה: $taskTitle"
+                        val performedByName = current.name.ifBlank { "הורה" }
+                        val historyMap = mapOf<String, Any?>(
+                            "id" to taskOpId,
+                            "operationId" to taskOpId,
+                            "familyId" to resolvedFamilyId,
+                            "memberId" to assigneeId,
+                            "memberName" to resolvedMemberName,
+                            "actionType" to PointsActionType.TASK_EARNED.firestoreValue,
+                            "pointsDelta" to taskPoints,
+                            "previousBalance" to previousBalance,
+                            "newBalance" to newBalance,
+                            "reason" to reason,
+                            "performedByUid" to authUser.uid,
+                            "performedByName" to performedByName,
+                            "timestampMillis" to nowMillis,
+                            "taskId" to approvedTask.id,
+                            "serverTimestamp" to FieldValue.serverTimestamp()
+                        )
+                        tx.set(historyDocRef, historyMap)
+
+                        val createdEntry = PointsHistoryEntry(
+                            id = taskOpId,
+                            operationId = taskOpId,
+                            familyId = resolvedFamilyId,
+                            memberId = assigneeId,
+                            memberName = resolvedMemberName,
+                            actionType = PointsActionType.TASK_EARNED,
+                            pointsDelta = taskPoints,
+                            previousBalance = previousBalance,
+                            newBalance = newBalance,
+                            reason = reason,
+                            performedByUid = authUser.uid,
+                            performedByName = performedByName,
+                            timestampMillis = nowMillis,
+                            taskId = approvedTask.id
+                        )
+                        AtomicTaskApprovalTxOutcome(
+                            approvedTask = approvedTask.copy(assignedToMemberId = assigneeId, points = taskPoints),
+                            wasAlreadyApprovedOrRewarded = false,
+                            historyEntry = createdEntry,
+                            updatedBalance = newBalance
+                        )
+                    } else {
+                        val existingCloudPts = if (memberSnap != null && memberSnap.exists()) {
+                            (memberSnap.getLong("earnedPoints") ?: 0L).toInt().coerceAtLeast(0)
+                        } else {
+                            null
+                        }
+                        AtomicTaskApprovalTxOutcome(
+                            approvedTask = approvedTask,
+                            wasAlreadyApprovedOrRewarded = true,
+                            historyEntry = null,
+                            updatedBalance = existingCloudPts
+                        )
                     }
-                }
+                }.await()
             } catch (e: Exception) {
                 _tasks.value = _tasks.value.map { if (it.id == taskId) previousTask else it }
                 _members.value = previousMembers
@@ -5146,23 +5220,91 @@ class FamilyRepository(
                 _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.FAILED)
                 val classified = FirestoreErrorHandler.classifyTaskFailure(
                     error = e,
-                    stage = FirestoreErrorHandler.TaskStage.PARENT_APPROVE_TASK_WRITE,
+                    stage = writeStage,
                     path = taskPath,
                     databaseId = configuredDatabaseId
                 )
                 lastClassifiedTaskFailure = classified
                 _taskOperationError.value = classified.messageHe
-                return Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified, e))
+                return@withLock Result.failure(FirestoreErrorHandler.TaskFirestoreException(classified, e))
+            }
+        } else {
+            // Local / offline / Robolectric execution path (serialized inside pointsMutex)
+            if (!wasAlreadyApprovedLocally && approvedTask.points > 0 && approvedTask.assignedToMemberId.isNotBlank()) {
+                val localAssignee = _members.value.find { it.id == approvedTask.assignedToMemberId }
+                val previousBalance = (localAssignee?.earnedPoints ?: 0).coerceAtLeast(0)
+                val newBalance = previousBalance + approvedTask.points
+                val reason = "השלמת משימה: ${approvedTask.title}"
+                val performedByName = current.name.ifBlank { "הורה" }
+                val entry = PointsHistoryEntry(
+                    id = taskOpId,
+                    operationId = taskOpId,
+                    familyId = resolvedFamilyId,
+                    memberId = approvedTask.assignedToMemberId,
+                    memberName = localAssignee?.name.orEmpty(),
+                    actionType = PointsActionType.TASK_EARNED,
+                    pointsDelta = approvedTask.points,
+                    previousBalance = previousBalance,
+                    newBalance = newBalance,
+                    reason = reason,
+                    performedByUid = actorId,
+                    performedByName = performedByName,
+                    timestampMillis = nowMillis,
+                    taskId = approvedTask.id
+                )
+                AtomicTaskApprovalTxOutcome(
+                    approvedTask = approvedTask,
+                    wasAlreadyApprovedOrRewarded = false,
+                    historyEntry = entry,
+                    updatedBalance = newBalance
+                )
+            } else {
+                AtomicTaskApprovalTxOutcome(
+                    approvedTask = approvedTask,
+                    wasAlreadyApprovedOrRewarded = true,
+                    historyEntry = null,
+                    updatedBalance = null
+                )
             }
         }
 
+        // Apply committed state atomically in memory & local persistence
+        val finalApprovedTask = outcome.approvedTask
         _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVED_APPROVED)
-        _tasks.value = _tasks.value.map { if (it.id == taskId) approvedTask else it }
-        if (!wasAlreadyApproved) {
-            spawnNextRecurringOccurrenceIfNeeded(approvedTask)
+        _tasks.value = _tasks.value.map { if (it.id == taskId) finalApprovedTask else it }
+
+        if (outcome.updatedBalance != null && finalApprovedTask.assignedToMemberId.isNotBlank()) {
+            val newBal = outcome.updatedBalance
+            _members.value = _members.value.map { m ->
+                if (m.id == finalApprovedTask.assignedToMemberId) {
+                    val updated = m.copy(earnedPoints = newBal)
+                    if (_currentMember.value.id == m.id) {
+                        _currentMember.value = updated
+                    }
+                    updated
+                } else {
+                    m
+                }
+            }
+            persistMemberPointsBalanceLocally(resolvedFamilyId, finalApprovedTask.assignedToMemberId, newBal)
         }
-        emitTaskCompletionNotificationIfNeeded(approvedTask, isParentApprovalEvent = true)
-        return Result.success(approvedTask)
+
+        if (outcome.historyEntry != null) {
+            appendPointsHistoryEntryLocally(resolvedFamilyId, outcome.historyEntry)
+        }
+
+        if (!outcome.wasAlreadyApprovedOrRewarded) {
+            spawnNextRecurringOccurrenceIfNeeded(finalApprovedTask)
+        }
+
+        repoScope.launch {
+            runCatching {
+                taskDao?.upsertTask(finalApprovedTask.toCoreTask(resolvedFamilyId))
+            }
+        }
+
+        emitTaskCompletionNotificationIfNeeded(finalApprovedTask, isParentApprovalEvent = isParentApprovalEvent)
+        return@withLock Result.success(finalApprovedTask)
     }
 
     fun approveTaskCompletion(taskId: String): Boolean {
@@ -7472,6 +7614,7 @@ class FamilyRepository(
 
     init {
         context?.let { loadUiPreferences(it.applicationContext ?: it) }
+        restorePersistedPointsState(_activeFamilyId.value)
     }
 
     private fun loadUiPreferences(ctx: Context) {
@@ -7490,6 +7633,7 @@ class FamilyRepository(
                 runCatching { FirstDayOfWeek.valueOf(raw) }.getOrNull()?.let { _firstDayOfWeek.value = it }
             }
         }
+        restorePersistedPointsState(_activeFamilyId.value)
     }
 
     private fun saveUiPreference(key: String, value: String) {
@@ -8155,6 +8299,635 @@ class FamilyRepository(
             Result.success(tokens)
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    // =========================================================================
+    // Family Points Management System (Parent-Only Atomic Ledger & History)
+    // =========================================================================
+
+    fun clearPointsOperationError() {
+        _pointsOperationError.value = null
+    }
+
+    fun getPointsHistoryForMember(
+        memberId: String? = null,
+        actionFilter: PointsActionType? = null
+    ): List<PointsHistoryEntry> {
+        return _pointsHistory.value
+            .asSequence()
+            .filter { memberId.isNullOrBlank() || it.memberId == memberId }
+            .filter { actionFilter == null || it.actionType == actionFilter }
+            .sortedByDescending { it.timestampMillis }
+            .toList()
+    }
+
+    /**
+     * Atomically adds points to [memberId]'s balance and creates an immutable [PointsHistoryEntry]
+     * in `/families/{familyId}/points_history/{operationId}`.
+     * Restricted strictly to PARENT role.
+     */
+    suspend fun addMemberPointsAsync(
+        memberId: String,
+        amount: Int,
+        reason: String,
+        operationId: String = "pts_add_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+    ): Result<PointsHistoryEntry> {
+        return adjustMemberPointsAsync(
+            memberId = memberId,
+            actionType = PointsActionType.ADD,
+            amount = amount,
+            reason = reason.trim().ifBlank { "בונוס נקודות מהורה" },
+            operationId = operationId,
+            allowNegativeBalance = false
+        )
+    }
+
+    /**
+     * Atomically deducts points from [memberId]'s balance and creates an immutable [PointsHistoryEntry]
+     * in `/families/{familyId}/points_history/{operationId}`.
+     * Prevents negative balance by default (`allowNegativeBalance = false`).
+     * Restricted strictly to PARENT role.
+     */
+    suspend fun deductMemberPointsAsync(
+        memberId: String,
+        amount: Int,
+        reason: String,
+        allowNegativeBalance: Boolean = false,
+        operationId: String = "pts_ded_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+    ): Result<PointsHistoryEntry> {
+        return adjustMemberPointsAsync(
+            memberId = memberId,
+            actionType = PointsActionType.DEDUCT,
+            amount = amount,
+            reason = reason.trim().ifBlank { "הפחתת נקודות" },
+            operationId = operationId,
+            allowNegativeBalance = allowNegativeBalance
+        )
+    }
+
+    /**
+     * Atomically resets ONLY [memberId]'s points balance to 0 and creates an immutable [PointsHistoryEntry]
+     * in `/families/{familyId}/points_history/{operationId}` recording the previous balance and acting parent.
+     * Never deletes task history or points history, and never modifies other family members.
+     * Restricted strictly to PARENT role.
+     */
+    suspend fun resetMemberPointsAsync(
+        memberId: String,
+        reason: String = "איפוס יתרת נקודות ע\"י הורה",
+        operationId: String = "pts_rst_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+    ): Result<PointsHistoryEntry> {
+        return adjustMemberPointsAsync(
+            memberId = memberId,
+            actionType = PointsActionType.RESET,
+            amount = 0,
+            reason = reason.trim().ifBlank { "איפוס יתרת נקודות ע\"י הורה" },
+            operationId = operationId,
+            allowNegativeBalance = false
+        )
+    }
+
+    fun addMemberPoints(
+        memberId: String,
+        amount: Int,
+        reason: String,
+        operationId: String = "pts_add_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+    ): Boolean {
+        if (!_currentMember.value.isParent) {
+            _pointsOperationError.value = "רק הורה רשאי להוסיף נקודות לבני המשפחה 🔒"
+            return false
+        }
+        if (amount <= 0) {
+            _pointsOperationError.value = "יש להזין מספר נקודות חיובי וגדול מ-0"
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                addMemberPointsAsync(memberId, amount, reason, operationId).isSuccess
+            }
+        }
+        repoScope.launch {
+            addMemberPointsAsync(memberId, amount, reason, operationId)
+        }
+        return true
+    }
+
+    fun deductMemberPoints(
+        memberId: String,
+        amount: Int,
+        reason: String,
+        allowNegativeBalance: Boolean = false,
+        operationId: String = "pts_ded_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+    ): Boolean {
+        if (!_currentMember.value.isParent) {
+            _pointsOperationError.value = "רק הורה רשאי להפחית נקודות לבני המשפחה 🔒"
+            return false
+        }
+        if (amount <= 0) {
+            _pointsOperationError.value = "יש להזין מספר נקודות חיובי להפחתה"
+            return false
+        }
+        val target = _members.value.find { it.id == memberId }
+        if (target != null && !allowNegativeBalance && target.earnedPoints - amount < 0) {
+            _pointsOperationError.value = "לא ניתן להפחית $amount נקודות — היתרה הנוכחית של ${target.name} היא ${target.earnedPoints} נקודות בלבד"
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                deductMemberPointsAsync(memberId, amount, reason, allowNegativeBalance, operationId).isSuccess
+            }
+        }
+        repoScope.launch {
+            deductMemberPointsAsync(memberId, amount, reason, allowNegativeBalance, operationId)
+        }
+        return true
+    }
+
+    fun resetMemberPoints(
+        memberId: String,
+        reason: String = "איפוס יתרת נקודות ע\"י הורה",
+        operationId: String = "pts_rst_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+    ): Boolean {
+        if (!_currentMember.value.isParent) {
+            _pointsOperationError.value = "רק הורה רשאי לאפס נקודות לבני המשפחה 🔒"
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                resetMemberPointsAsync(memberId, reason, operationId).isSuccess
+            }
+        }
+        repoScope.launch {
+            resetMemberPointsAsync(memberId, reason, operationId)
+        }
+        return true
+    }
+
+    /**
+     * Core serialized, idempotent, and atomic points ledger operation.
+     * Uses [pointsMutex] to serialize concurrent calls and Firestore `runTransaction` when connected
+     * so that updating `/families/{familyId}/members/{memberId}.earnedPoints` and creating
+     * `/families/{familyId}/points_history/{operationId}` succeed or fail together.
+     */
+    suspend fun adjustMemberPointsAsync(
+        memberId: String,
+        actionType: PointsActionType,
+        amount: Int,
+        reason: String,
+        operationId: String = "pts_${UUID.randomUUID().toString().replace("-", "").take(12)}",
+        allowNegativeBalance: Boolean = false,
+        taskId: String? = null
+    ): Result<PointsHistoryEntry> = pointsMutex.withLock {
+        val cleanOpId = operationId.trim().ifBlank {
+            "pts_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+        }
+
+        // Idempotency guard: if this exact operationId already succeeded, return existing entry
+        val existingEntry = _pointsHistory.value.find { it.operationId == cleanOpId || it.id == cleanOpId }
+        if (existingEntry != null || !processedPointsOperationIds.add(cleanOpId)) {
+            if (existingEntry != null) {
+                return@withLock Result.success(existingEntry)
+            }
+        }
+
+        val caller = _currentMember.value
+        if (!caller.isParent) {
+            processedPointsOperationIds.remove(cleanOpId)
+            val errMsg = "רק הורה רשאי לבצע שינויי נקודות במשפחה 🔒"
+            _pointsOperationError.value = errMsg
+            return@withLock Result.failure(SecurityException(errMsg))
+        }
+
+        val cleanReason = reason.trim()
+        if (cleanReason.isBlank()) {
+            processedPointsOperationIds.remove(cleanOpId)
+            val errMsg = "נא להזין סיבה לשינוי הנקודות"
+            _pointsOperationError.value = errMsg
+            return@withLock Result.failure(IllegalArgumentException(errMsg))
+        }
+
+        if ((actionType == PointsActionType.ADD || actionType == PointsActionType.DEDUCT || actionType == PointsActionType.TASK_EARNED) && amount <= 0) {
+            processedPointsOperationIds.remove(cleanOpId)
+            val errMsg = "מספר הנקודות חייב להיות שלם וחיובי (גדול מ-0)"
+            _pointsOperationError.value = errMsg
+            return@withLock Result.failure(IllegalArgumentException(errMsg))
+        }
+
+        val familyId = _activeFamilyId.value.ifBlank { "fam_israeli_8492" }
+        val localTarget = _members.value.find { it.id == memberId }
+        if (localTarget == null) {
+            processedPointsOperationIds.remove(cleanOpId)
+            val errMsg = "חבר המשפחה המבוקש לא נמצא"
+            _pointsOperationError.value = errMsg
+            return@withLock Result.failure(IllegalArgumentException(errMsg))
+        }
+
+        val localPrevBalance = localTarget.earnedPoints.coerceAtLeast(0)
+        if (actionType == PointsActionType.DEDUCT && !allowNegativeBalance && localPrevBalance - amount < 0) {
+            processedPointsOperationIds.remove(cleanOpId)
+            val errMsg = "לא ניתן להפחית $amount נקודות — היתרה הנוכחית של ${localTarget.name} היא $localPrevBalance נקודות בלבד"
+            _pointsOperationError.value = errMsg
+            return@withLock Result.failure(IllegalArgumentException(errMsg))
+        }
+
+        _isProcessingPointsOperation.value = true
+        _pointsOperationError.value = null
+
+        val nowMillis = System.currentTimeMillis()
+        val authUser = authProvider()?.currentUser
+        val actorUid = authUser?.uid?.takeIf { it.isNotBlank() } ?: caller.id
+        val actorName = caller.name.ifBlank { "הורה" }
+
+        try {
+            if (simulateOfflineNetworkFailure) {
+                throw FirebaseFirestoreException(
+                    "Simulated offline network failure during points transaction",
+                    FirebaseFirestoreException.Code.UNAVAILABLE
+                )
+            }
+
+            val db = firestoreProvider()
+            val committedEntry: PointsHistoryEntry = if (db != null && authUser != null) {
+                val familyRef = db.collection("families").document(familyId)
+                val callerMemberRef = familyRef.collection("members").document(actorUid)
+                val targetMemberRef = familyRef.collection("members").document(memberId)
+                val historyDocRef = familyRef.collection("points_history").document(cleanOpId)
+
+                db.runTransaction { tx ->
+                    val existingHistSnap = tx.get(historyDocRef)
+                    val callerSnap = tx.get(callerMemberRef)
+                    val targetSnap = tx.get(targetMemberRef)
+
+                    if (existingHistSnap.exists()) {
+                        val existingData = existingHistSnap.data.orEmpty()
+                        return@runTransaction parsePointsHistoryDocument(cleanOpId, existingData, familyId)
+                            ?: PointsHistoryEntry(
+                                id = cleanOpId,
+                                operationId = cleanOpId,
+                                familyId = familyId,
+                                memberId = memberId,
+                                memberName = localTarget.name,
+                                actionType = actionType,
+                                pointsDelta = 0,
+                                previousBalance = localPrevBalance,
+                                newBalance = localPrevBalance,
+                                reason = cleanReason,
+                                performedByUid = actorUid,
+                                performedByName = actorName,
+                                timestampMillis = nowMillis,
+                                taskId = taskId
+                            )
+                    }
+
+                    // Server-side role verification inside transaction
+                    val callerRoleStr = callerSnap.getString("role").orEmpty()
+                    if (callerSnap.exists() && !UserRole.fromFirestoreValue(callerRoleStr).isParent) {
+                        throw SecurityException("Caller is not authorized as PARENT in family $familyId")
+                    }
+
+                    val previousBalance = if (targetSnap.exists()) {
+                        (targetSnap.getLong("earnedPoints") ?: localPrevBalance.toLong()).toInt().coerceAtLeast(0)
+                    } else {
+                        localPrevBalance
+                    }
+                    val resolvedMemberName = targetSnap.getString("name")?.takeIf { it.isNotBlank() } ?: localTarget.name
+
+                    val pointsDelta: Int
+                    val newBalance: Int
+                    when (actionType) {
+                        PointsActionType.ADD, PointsActionType.TASK_EARNED -> {
+                            pointsDelta = amount
+                            newBalance = previousBalance + amount
+                        }
+                        PointsActionType.DEDUCT -> {
+                            if (!allowNegativeBalance && previousBalance - amount < 0) {
+                                throw IllegalArgumentException("לא ניתן להפחית $amount נקודות — היתרה בענן היא $previousBalance נקודות בלבד")
+                            }
+                            pointsDelta = -amount
+                            newBalance = if (allowNegativeBalance) previousBalance - amount else (previousBalance - amount).coerceAtLeast(0)
+                        }
+                        PointsActionType.RESET -> {
+                            pointsDelta = -previousBalance
+                            newBalance = 0
+                        }
+                    }
+
+                    if (targetSnap.exists()) {
+                        tx.update(
+                            targetMemberRef,
+                            mapOf(
+                                "earnedPoints" to newBalance,
+                                "lastPointsOperationId" to cleanOpId,
+                                "updatedAt" to nowMillis
+                            )
+                        )
+                    } else {
+                        tx.set(
+                            targetMemberRef,
+                            mapOf(
+                                "id" to localTarget.id,
+                                "uid" to localTarget.id,
+                                "familyId" to familyId,
+                                "name" to localTarget.name,
+                                "nameEn" to localTarget.nameEn,
+                                "role" to localTarget.role.toFirestoreValue(),
+                                "familyIdentity" to localTarget.familyIdentity.toFirestoreValue(),
+                                "avatarEmoji" to localTarget.avatarEmoji,
+                                "colorHex" to localTarget.colorHex,
+                                "earnedPoints" to newBalance,
+                                "spentPoints" to localTarget.spentPoints,
+                                "lastPointsOperationId" to cleanOpId,
+                                "invitationAccepted" to true,
+                                "invitationPending" to false,
+                                "updatedAt" to nowMillis
+                            ),
+                            SetOptions.merge()
+                        )
+                    }
+
+                    val historyMap = mutableMapOf<String, Any?>(
+                        "id" to cleanOpId,
+                        "operationId" to cleanOpId,
+                        "familyId" to familyId,
+                        "memberId" to memberId,
+                        "memberName" to resolvedMemberName,
+                        "actionType" to actionType.firestoreValue,
+                        "pointsDelta" to pointsDelta,
+                        "previousBalance" to previousBalance,
+                        "newBalance" to newBalance,
+                        "reason" to cleanReason,
+                        "performedByUid" to actorUid,
+                        "performedByName" to actorName,
+                        "timestampMillis" to nowMillis,
+                        "serverTimestamp" to FieldValue.serverTimestamp()
+                    )
+                    if (!taskId.isNullOrBlank()) {
+                        historyMap["taskId"] = taskId
+                    }
+                    tx.set(historyDocRef, historyMap)
+
+                    PointsHistoryEntry(
+                        id = cleanOpId,
+                        operationId = cleanOpId,
+                        familyId = familyId,
+                        memberId = memberId,
+                        memberName = resolvedMemberName,
+                        actionType = actionType,
+                        pointsDelta = pointsDelta,
+                        previousBalance = previousBalance,
+                        newBalance = newBalance,
+                        reason = cleanReason,
+                        performedByUid = actorUid,
+                        performedByName = actorName,
+                        timestampMillis = nowMillis,
+                        taskId = taskId
+                    )
+                }.await()
+            } else {
+                // Local / offline / Robolectric execution path (atomic under pointsMutex)
+                val currentMemberNow = _members.value.find { it.id == memberId } ?: localTarget
+                val previousBalance = currentMemberNow.earnedPoints.coerceAtLeast(0)
+                val pointsDelta: Int
+                val newBalance: Int
+                when (actionType) {
+                    PointsActionType.ADD, PointsActionType.TASK_EARNED -> {
+                        pointsDelta = amount
+                        newBalance = previousBalance + amount
+                    }
+                    PointsActionType.DEDUCT -> {
+                        if (!allowNegativeBalance && previousBalance - amount < 0) {
+                            throw IllegalArgumentException("לא ניתן להפחית $amount נקודות — היתרה הנוכחית היא $previousBalance נקודות בלבד")
+                        }
+                        pointsDelta = -amount
+                        newBalance = if (allowNegativeBalance) previousBalance - amount else (previousBalance - amount).coerceAtLeast(0)
+                    }
+                    PointsActionType.RESET -> {
+                        pointsDelta = -previousBalance
+                        newBalance = 0
+                    }
+                }
+                PointsHistoryEntry(
+                    id = cleanOpId,
+                    operationId = cleanOpId,
+                    familyId = familyId,
+                    memberId = memberId,
+                    memberName = currentMemberNow.name,
+                    actionType = actionType,
+                    pointsDelta = pointsDelta,
+                    previousBalance = previousBalance,
+                    newBalance = newBalance,
+                    reason = cleanReason,
+                    performedByUid = actorUid,
+                    performedByName = actorName,
+                    timestampMillis = nowMillis,
+                    taskId = taskId
+                )
+            }
+
+            // Apply committed balance & history entry to in-memory state and local SharedPreferences
+            _members.value = _members.value.map { m ->
+                if (m.id == memberId) {
+                    val updated = m.copy(earnedPoints = committedEntry.newBalance)
+                    if (_currentMember.value.id == m.id) {
+                        _currentMember.value = updated
+                    }
+                    updated
+                } else {
+                    m
+                }
+            }
+            persistMemberPointsBalanceLocally(familyId, memberId, committedEntry.newBalance)
+            appendPointsHistoryEntryLocally(familyId, committedEntry)
+
+            _isProcessingPointsOperation.value = false
+            return@withLock Result.success(committedEntry)
+        } catch (e: Exception) {
+            processedPointsOperationIds.remove(cleanOpId)
+            _isProcessingPointsOperation.value = false
+            val friendlyMsg = e.localizedMessage?.takeIf { it.isNotBlank() }
+                ?: "שגיאה בעדכון הנקודות. הפעולה בוטלה כדי לשמור על תקינות הנתונים."
+            _pointsOperationError.value = friendlyMsg
+            return@withLock Result.failure(e)
+        }
+    }
+
+    private fun parsePointsHistoryDocument(
+        docId: String,
+        data: Map<String, Any?>,
+        fallbackFamilyId: String
+    ): PointsHistoryEntry? {
+        val memberId = (data["memberId"] as? String)?.trim().orEmpty()
+        if (memberId.isBlank()) return null
+        val actionRaw = (data["actionType"] as? String) ?: "ADD"
+        val actionType = PointsActionType.fromFirestoreValue(actionRaw)
+        val delta = (data["pointsDelta"] as? Number)?.toInt() ?: 0
+        val prevBal = (data["previousBalance"] as? Number)?.toInt() ?: 0
+        val newBal = (data["newBalance"] as? Number)?.toInt() ?: 0
+        val reason = (data["reason"] as? String)?.takeIf { it.isNotBlank() } ?: actionType.labelHe
+        val performedByUid = (data["performedByUid"] as? String).orEmpty()
+        val performedByName = (data["performedByName"] as? String)?.takeIf { it.isNotBlank() } ?: "הורה"
+        val memberName = (data["memberName"] as? String)?.takeIf { it.isNotBlank() }
+            ?: _members.value.find { it.id == memberId }?.name.orEmpty()
+        val tsMillis = (data["timestampMillis"] as? Number)?.toLong()
+            ?: (data["serverTimestamp"] as? com.google.firebase.Timestamp)?.toDate()?.time
+            ?: System.currentTimeMillis()
+        val opId = (data["operationId"] as? String)?.takeIf { it.isNotBlank() } ?: docId
+        val taskId = (data["taskId"] as? String)?.takeIf { it.isNotBlank() }
+        return PointsHistoryEntry(
+            id = docId,
+            operationId = opId,
+            familyId = (data["familyId"] as? String)?.takeIf { it.isNotBlank() } ?: fallbackFamilyId,
+            memberId = memberId,
+            memberName = memberName,
+            actionType = actionType,
+            pointsDelta = delta,
+            previousBalance = prevBal,
+            newBalance = newBal,
+            reason = reason,
+            performedByUid = performedByUid,
+            performedByName = performedByName,
+            timestampMillis = tsMillis,
+            taskId = taskId
+        )
+    }
+
+    private fun mergeRemotePointsHistory(familyId: String, remoteEntries: List<PointsHistoryEntry>) {
+        val localEntries = _pointsHistory.value.filter { it.familyId.isBlank() || it.familyId == familyId }
+        val mergedById = LinkedHashMap<String, PointsHistoryEntry>()
+        (remoteEntries + localEntries).forEach { entry ->
+            val key = entry.operationId.ifBlank { entry.id }
+            if (!mergedById.containsKey(key)) {
+                mergedById[key] = entry
+            }
+            processedPointsOperationIds.add(key)
+        }
+        val sorted = mergedById.values.sortedByDescending { it.timestampMillis }
+        _pointsHistory.value = sorted
+        savePointsHistoryToPrefs(familyId, sorted)
+    }
+
+    private fun appendPointsHistoryEntryLocally(familyId: String, entry: PointsHistoryEntry) {
+        val key = entry.operationId.ifBlank { entry.id }
+        processedPointsOperationIds.add(key)
+        val updated = (listOf(entry) + _pointsHistory.value.filterNot {
+            it.id == entry.id || it.operationId == key
+        }).sortedByDescending { it.timestampMillis }
+        _pointsHistory.value = updated
+        savePointsHistoryToPrefs(familyId, updated)
+    }
+
+    private fun persistMemberPointsBalanceLocally(familyId: String, memberId: String, newBalance: Int) {
+        val ctx = appContext ?: return
+        runCatching {
+            val prefs = ctx.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
+            val key = "pts_bal_${familyId}_$memberId"
+            prefs.edit().putInt(key, newBalance).commit()
+        }
+    }
+
+    private fun savePointsHistoryToPrefs(familyId: String, entries: List<PointsHistoryEntry>) {
+        val ctx = appContext ?: return
+        runCatching {
+            val arr = org.json.JSONArray()
+            entries.take(300).forEach { e ->
+                val obj = org.json.JSONObject().apply {
+                    put("id", e.id)
+                    put("operationId", e.operationId)
+                    put("familyId", e.familyId.ifBlank { familyId })
+                    put("memberId", e.memberId)
+                    put("memberName", e.memberName)
+                    put("actionType", e.actionType.firestoreValue)
+                    put("pointsDelta", e.pointsDelta)
+                    put("previousBalance", e.previousBalance)
+                    put("newBalance", e.newBalance)
+                    put("reason", e.reason)
+                    put("performedByUid", e.performedByUid)
+                    put("performedByName", e.performedByName)
+                    put("timestampMillis", e.timestampMillis)
+                    if (!e.taskId.isNullOrBlank()) {
+                        put("taskId", e.taskId)
+                    }
+                }
+                arr.put(obj)
+            }
+            ctx.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString("pts_hist_$familyId", arr.toString())
+                .commit()
+        }
+    }
+
+    private fun restorePersistedPointsState(
+        familyId: String,
+        allowOverwritingMemberBalances: Boolean = true
+    ) {
+        val ctx = appContext ?: return
+        runCatching {
+            val prefs = ctx.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
+            // 1. Restore member point balances for this family ONLY if live server balances have not already synced
+            if (allowOverwritingMemberBalances && !syncedServerMemberBalancesForFamilies.contains(familyId)) {
+                var currentUpdated: FamilyMember? = null
+                val restoredMembers = _members.value.map { member ->
+                    val balKey = "pts_bal_${familyId}_${member.id}"
+                    if (prefs.contains(balKey)) {
+                        val savedBal = prefs.getInt(balKey, member.earnedPoints).coerceAtLeast(0)
+                        val updated = member.copy(earnedPoints = savedBal)
+                        if (_currentMember.value.id == member.id) {
+                            currentUpdated = updated
+                        }
+                        updated
+                    } else {
+                        member
+                    }
+                }
+                _members.value = restoredMembers
+                if (currentUpdated != null) {
+                    _currentMember.value = currentUpdated!!
+                }
+            }
+
+            // 2. Restore points history for this family
+            val rawHist = prefs.getString("pts_hist_$familyId", null)
+            if (!rawHist.isNullOrBlank()) {
+                val arr = org.json.JSONArray(rawHist)
+                val restoredList = mutableListOf<PointsHistoryEntry>()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val entry = PointsHistoryEntry(
+                        id = obj.optString("id"),
+                        operationId = obj.optString("operationId", obj.optString("id")),
+                        familyId = obj.optString("familyId", familyId),
+                        memberId = obj.optString("memberId"),
+                        memberName = obj.optString("memberName"),
+                        actionType = PointsActionType.fromFirestoreValue(obj.optString("actionType", "ADD")),
+                        pointsDelta = obj.optInt("pointsDelta", 0),
+                        previousBalance = obj.optInt("previousBalance", 0),
+                        newBalance = obj.optInt("newBalance", 0),
+                        reason = obj.optString("reason"),
+                        performedByUid = obj.optString("performedByUid"),
+                        performedByName = obj.optString("performedByName", "הורה"),
+                        timestampMillis = obj.optLong("timestampMillis", 0L),
+                        taskId = obj.optString("taskId").takeIf { it.isNotBlank() }
+                    )
+                    if (entry.memberId.isNotBlank()) {
+                        restoredList.add(entry)
+                        processedPointsOperationIds.add(entry.operationId.ifBlank { entry.id })
+                    }
+                }
+                if (restoredList.isNotEmpty()) {
+                    val existingById = _pointsHistory.value.associateBy { it.operationId.ifBlank { it.id } }.toMutableMap()
+                    restoredList.forEach { r ->
+                        existingById.putIfAbsent(r.operationId.ifBlank { r.id }, r)
+                    }
+                    _pointsHistory.value = existingById.values.sortedByDescending { it.timestampMillis }
+                }
+            }
         }
     }
 }

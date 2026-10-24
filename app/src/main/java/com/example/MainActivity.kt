@@ -57,9 +57,15 @@ fun FamilyTasksApp(
         true
     }
 
+    var fullScreenPermissionRefreshTick by remember { mutableIntStateOf(0) }
+    val hasFullScreenAlarmPermission = remember(context, fullScreenPermissionRefreshTick) {
+        com.example.notifications.FamilyAlarmScheduler.canUseFullScreenIntent(context)
+    }
+
     DisposableEffect(lifecycleOwner, context) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                fullScreenPermissionRefreshTick++
                 com.example.notifications.FamilyAlarmScheduler.restoreAlarmsOnBoot(context)
                 viewModel.resyncAlarmsForActiveMember()
                 com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestoreAsync(
@@ -98,6 +104,9 @@ fun FamilyTasksApp(
     val invitationCreationError by viewModel.invitationCreationError.collectAsStateWithLifecycle()
     val taskSyncStates by viewModel.taskSyncStates.collectAsStateWithLifecycle()
     val taskOperationError by viewModel.taskOperationError.collectAsStateWithLifecycle()
+    val pointsHistory by viewModel.pointsHistory.collectAsStateWithLifecycle()
+    val isProcessingPointsOperation by viewModel.isProcessingPointsOperation.collectAsStateWithLifecycle()
+    val pointsOperationError by viewModel.pointsOperationError.collectAsStateWithLifecycle()
 
     // Google Auth & Cloud Family Group states
     val isGoogleSignedIn by viewModel.isGoogleSignedIn.collectAsStateWithLifecycle()
@@ -266,7 +275,11 @@ fun FamilyTasksApp(
                     // BackHandler for secondary screens
                     if (currentScreen != AppScreen.HOME) {
                         BackHandler {
-                            viewModel.navigateTo(AppScreen.HOME)
+                            if (currentScreen == AppScreen.POINTS_MANAGEMENT) {
+                                viewModel.navigateTo(AppScreen.SETTINGS)
+                            } else {
+                                viewModel.navigateTo(AppScreen.HOME)
+                            }
                         }
                     }
 
@@ -305,8 +318,70 @@ fun FamilyTasksApp(
                                     .fillMaxSize()
                                     .padding(innerPadding)
                             ) {
-                                when (currentScreen) {
-                                    AppScreen.HOME -> {
+                                Column(modifier = Modifier.fillMaxSize()) {
+                                    // Automatic Full-Screen Alarm Permission Check on App Entry & Resume
+                                    if (!hasFullScreenAlarmPermission && currentScreen != AppScreen.ALARMS) {
+                                        val glass = LocalSoftGlassColors.current
+                                        Surface(
+                                            shape = RoundedCornerShape(18.dp),
+                                            color = glass.warningBg,
+                                            border = androidx.compose.foundation.BorderStroke(
+                                                1.dp,
+                                                glass.warningText.copy(alpha = 0.45f)
+                                            ),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                                                .testTag("app_entry_fullscreen_permission_banner")
+                                        ) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Text(
+                                                    text = if (isHebrew) {
+                                                        "נדרשת הרשאת התראה במסך מלא כדי שהשעון המעורר יוכל להופיע מעל מסך הנעילה."
+                                                    } else {
+                                                        "Full-screen notification permission is required so the alarm can appear over the lock screen."
+                                                    },
+                                                    style = MaterialTheme.typography.bodySmall.copy(
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = glass.warningText
+                                                    ),
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .padding(end = 10.dp)
+                                                        .testTag("app_entry_fullscreen_permission_text")
+                                                )
+
+                                                Button(
+                                                    onClick = {
+                                                        com.example.notifications.FamilyAlarmScheduler.openFullScreenIntentSettings(context)
+                                                    },
+                                                    shape = RoundedCornerShape(12.dp),
+                                                    colors = ButtonDefaults.buttonColors(
+                                                        containerColor = glass.primaryAccent,
+                                                        contentColor = if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                                    ),
+                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                                    modifier = Modifier.testTag("app_entry_grant_fullscreen_permission_btn")
+                                                ) {
+                                                    Text(
+                                                        text = if (isHebrew) "אפשר מסך מלא" else "Allow Full-Screen",
+                                                        fontSize = 12.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Box(modifier = Modifier.weight(1f)) {
+                                        when (currentScreen) {
+                                            AppScreen.HOME -> {
                                         TasksScreen(
                                             tasks = tasks,
                                             members = members,
@@ -534,8 +609,35 @@ fun FamilyTasksApp(
                                             onUpdateFamilyIdentity = { newIdentity ->
                                                 viewModel.updateCurrentUserProfile(newIdentity = newIdentity)
                                             },
-                                            onShowToast = { viewModel.showToastMessage(it) }
+                                            onShowToast = { viewModel.showToastMessage(it) },
+                                            onOpenPointsManagement = {
+                                                viewModel.navigateTo(AppScreen.POINTS_MANAGEMENT)
+                                            }
                                         )
+                                    }
+
+                                    AppScreen.POINTS_MANAGEMENT -> {
+                                        FamilyPointsManagementScreen(
+                                            members = members,
+                                            currentMember = currentMember,
+                                            pointsHistory = pointsHistory,
+                                            isProcessingPointsOperation = isProcessingPointsOperation,
+                                            pointsOperationError = pointsOperationError,
+                                            isHebrew = isHebrew,
+                                            onAddPoints = { memberId, amount, reason, opId ->
+                                                viewModel.addMemberPoints(memberId, amount, reason, opId)
+                                            },
+                                            onDeductPoints = { memberId, amount, reason, opId ->
+                                                viewModel.deductMemberPoints(memberId, amount, reason, false, opId)
+                                            },
+                                            onResetPoints = { memberId, reason, opId ->
+                                                viewModel.resetMemberPoints(memberId, reason, opId)
+                                            },
+                                            onClearError = { viewModel.clearPointsOperationError() },
+                                            onNavigateBack = { viewModel.navigateTo(AppScreen.SETTINGS) }
+                                        )
+                                    }
+                                        }
                                     }
                                 }
                             }

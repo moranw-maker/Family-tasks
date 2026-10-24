@@ -1503,20 +1503,53 @@ test("Regression V1.6: CHILD can complete assigned task (pending approval), cann
     roiDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_roi").delete()
   );
 
-  // 5. Parent approves Roi's completed task and awards points -> SUCCEEDS
-  await assertSucceeds(
-    parentDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_roi").update({
-      isCompleted: true,
-      approvedByParent: true,
-      updatedAt: 1700000010000,
-    })
-  );
-  await assertSucceeds(
+  // 5. Parent cannot change earnedPoints without an atomic points_history entry -> MUST FAIL
+  await assertFails(
     parentDb.collection("families").doc("fam_v16_tasks").collection("members").doc(BOB_UID).update({
       earnedPoints: 20,
       updatedAt: 1700000010000,
     })
   );
+
+  // 6. Parent atomically approves Roi's completed task, credits points, and writes points_history/pts_task_task_roi -> SUCCEEDS
+  const approveBatch = parentDb.batch();
+  approveBatch.update(
+    parentDb.collection("families").doc("fam_v16_tasks").collection("tasks").doc("task_roi"),
+    {
+      isCompleted: true,
+      approvedByParent: true,
+      rewardedOperationId: "pts_task_task_roi",
+      updatedAt: 1700000010000,
+    }
+  );
+  approveBatch.update(
+    parentDb.collection("families").doc("fam_v16_tasks").collection("members").doc(BOB_UID),
+    {
+      earnedPoints: 20,
+      lastPointsOperationId: "pts_task_task_roi",
+      updatedAt: 1700000010000,
+    }
+  );
+  approveBatch.set(
+    parentDb.collection("families").doc("fam_v16_tasks").collection("points_history").doc("pts_task_task_roi"),
+    {
+      id: "pts_task_task_roi",
+      operationId: "pts_task_task_roi",
+      familyId: "fam_v16_tasks",
+      memberId: BOB_UID,
+      memberName: "רועי",
+      actionType: "TASK_EARNED",
+      pointsDelta: 20,
+      previousBalance: 0,
+      newBalance: 20,
+      reason: "השלמת משימה: סידור החדר של רועי",
+      performedByUid: ALICE_UID,
+      performedByName: "אבא",
+      timestampMillis: 1700000010000,
+      taskId: "task_roi",
+    }
+  );
+  await assertSucceeds(approveBatch.commit());
 });
 
 test("V1.0.0 FCM Push Security: Authenticated user can register/refresh/delete own multi-device FCM tokens, cannot access another user's tokens, and notification_dispatches is server-only", async () => {
@@ -1758,3 +1791,334 @@ test("Family Alarm Clock Ownership & Editing Permissions: Parent-for-Child, Chil
   );
   await assertFails(childViewOfParentOwn.delete());
 });
+
+test("Security Audit Fix: Atomic Points Ledger, Duplicate TASK_EARNED Prevention, Child Points Protection, and Sensitive Field Immutability", async () => {
+  const parent1Db = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const parent2Db = testEnv.authenticatedContext("mom_parent_2").firestore();
+  const childDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const famId = "fam_points_audit";
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const adminDb = context.firestore();
+    await adminDb.collection("families").doc(famId).set({
+      id: famId,
+      familyId: famId,
+      familyName: "משפחת כץ",
+      createdById: ALICE_UID,
+      createdBy: ALICE_UID,
+      ownerUid: ALICE_UID,
+      adminUids: [ALICE_UID, "mom_parent_2"],
+      memberIds: [ALICE_UID, "mom_parent_2", BOB_UID],
+      memberUids: [ALICE_UID, "mom_parent_2", BOB_UID],
+    });
+    await adminDb.collection("families").doc(famId).collection("members").doc(ALICE_UID).set({
+      id: ALICE_UID,
+      uid: ALICE_UID,
+      familyId: famId,
+      name: "אבא כץ",
+      email: "dad@example.com",
+      googleEmail: "dad@example.com",
+      role: "PARENT",
+      familyIdentity: "FATHER",
+      earnedPoints: 0,
+      spentPoints: 0,
+    });
+    await adminDb.collection("families").doc(famId).collection("members").doc("mom_parent_2").set({
+      id: "mom_parent_2",
+      uid: "mom_parent_2",
+      familyId: famId,
+      name: "אמא כץ",
+      email: "mom@example.com",
+      googleEmail: "mom@example.com",
+      role: "PARENT",
+      familyIdentity: "MOTHER",
+      earnedPoints: 0,
+      spentPoints: 0,
+    });
+    await adminDb.collection("families").doc(famId).collection("members").doc(BOB_UID).set({
+      id: BOB_UID,
+      uid: BOB_UID,
+      familyId: famId,
+      name: "נועם כץ",
+      email: "noam@example.com",
+      googleEmail: "noam@example.com",
+      role: "CHILD",
+      familyIdentity: "SON",
+      earnedPoints: 50,
+      spentPoints: 0,
+    });
+    await adminDb.collection("families").doc(famId).collection("tasks").doc("task_audit_1").set({
+      id: "task_audit_1",
+      familyId: famId,
+      title: "ניקיון חדר",
+      assignedToMemberId: BOB_UID,
+      assignedUid: BOB_UID,
+      points: 30,
+      isCompleted: true,
+      approvedByParent: false,
+    });
+  });
+
+  // 1. Child CANNOT modify earnedPoints on their own member doc or create points_history -> MUST FAIL
+  await assertFails(
+    childDb.collection("families").doc(famId).collection("members").doc(BOB_UID).update({
+      earnedPoints: 500,
+    })
+  );
+  const childFakeBatch = childDb.batch();
+  childFakeBatch.update(
+    childDb.collection("families").doc(famId).collection("members").doc(BOB_UID),
+    {
+      earnedPoints: 100,
+      lastPointsOperationId: "pts_add_child_hack",
+      updatedAt: 1700001000000,
+    }
+  );
+  childFakeBatch.set(
+    childDb.collection("families").doc(famId).collection("points_history").doc("pts_add_child_hack"),
+    {
+      id: "pts_add_child_hack",
+      operationId: "pts_add_child_hack",
+      familyId: famId,
+      memberId: BOB_UID,
+      memberName: "נועם כץ",
+      actionType: "ADD",
+      pointsDelta: 50,
+      previousBalance: 50,
+      newBalance: 100,
+      reason: "Hack",
+      performedByUid: BOB_UID,
+      performedByName: "נועם כץ",
+      timestampMillis: 1700001000000,
+    }
+  );
+  await assertFails(childFakeBatch.commit());
+
+  // 2. Parent CANNOT update earnedPoints without creating a matching points_history entry in the same transaction -> MUST FAIL
+  await assertFails(
+    parent1Db.collection("families").doc(famId).collection("members").doc(BOB_UID).update({
+      earnedPoints: 80,
+      lastPointsOperationId: "pts_missing_history",
+      updatedAt: 1700001000000,
+    })
+  );
+
+  // 3. Parent CANNOT create a fake TASK_EARNED entry for a non-existent task, wrong points value, or without approving the task -> MUST FAIL
+  const fakeTaskEarnedBatch1 = parent1Db.batch();
+  fakeTaskEarnedBatch1.update(
+    parent1Db.collection("families").doc(famId).collection("members").doc(BOB_UID),
+    {
+      earnedPoints: 150,
+      lastPointsOperationId: "pts_task_task_audit_1",
+      updatedAt: 1700001001000,
+    }
+  );
+  fakeTaskEarnedBatch1.set(
+    parent1Db.collection("families").doc(famId).collection("points_history").doc("pts_task_task_audit_1"),
+    {
+      id: "pts_task_task_audit_1",
+      operationId: "pts_task_task_audit_1",
+      familyId: famId,
+      memberId: BOB_UID,
+      memberName: "נועם כץ",
+      actionType: "TASK_EARNED",
+      pointsDelta: 100, // Mismatched points (task is worth 30, not 100!)
+      previousBalance: 50,
+      newBalance: 150,
+      reason: "Fake task points",
+      performedByUid: ALICE_UID,
+      performedByName: "אבא כץ",
+      timestampMillis: 1700001001000,
+      taskId: "task_audit_1",
+    }
+  );
+  await assertFails(fakeTaskEarnedBatch1.commit());
+
+  // 4. Legitimate single-transaction task approval + points credit + points_history/pts_task_task_audit_1 -> SUCCEEDS
+  const validApproveBatch = parent1Db.batch();
+  validApproveBatch.update(
+    parent1Db.collection("families").doc(famId).collection("tasks").doc("task_audit_1"),
+    {
+      isCompleted: true,
+      approvedByParent: true,
+      rewardedOperationId: "pts_task_task_audit_1",
+      updatedAt: 1700001002000,
+    }
+  );
+  validApproveBatch.update(
+    parent1Db.collection("families").doc(famId).collection("members").doc(BOB_UID),
+    {
+      earnedPoints: 80,
+      lastPointsOperationId: "pts_task_task_audit_1",
+      updatedAt: 1700001002000,
+    }
+  );
+  validApproveBatch.set(
+    parent1Db.collection("families").doc(famId).collection("points_history").doc("pts_task_task_audit_1"),
+    {
+      id: "pts_task_task_audit_1",
+      operationId: "pts_task_task_audit_1",
+      familyId: famId,
+      memberId: BOB_UID,
+      memberName: "נועם כץ",
+      actionType: "TASK_EARNED",
+      pointsDelta: 30,
+      previousBalance: 50,
+      newBalance: 80,
+      reason: "השלמת משימה: ניקיון חדר",
+      performedByUid: ALICE_UID,
+      performedByName: "אבא כץ",
+      timestampMillis: 1700001002000,
+      taskId: "task_audit_1",
+    }
+  );
+  await assertSucceeds(validApproveBatch.commit());
+
+  // 5. Second parent (or same parent) attempting to approve/credit the same task a second time -> MUST FAIL
+  const duplicateApproveBatch = parent2Db.batch();
+  duplicateApproveBatch.update(
+    parent2Db.collection("families").doc(famId).collection("tasks").doc("task_audit_1"),
+    {
+      isCompleted: true,
+      approvedByParent: true,
+      rewardedOperationId: "pts_task_task_audit_1",
+      updatedAt: 1700001003000,
+    }
+  );
+  duplicateApproveBatch.update(
+    parent2Db.collection("families").doc(famId).collection("members").doc(BOB_UID),
+    {
+      earnedPoints: 110,
+      lastPointsOperationId: "pts_task_task_audit_1",
+      updatedAt: 1700001003000,
+    }
+  );
+  duplicateApproveBatch.set(
+    parent2Db.collection("families").doc(famId).collection("points_history").doc("pts_task_task_audit_1"),
+    {
+      id: "pts_task_task_audit_1",
+      operationId: "pts_task_task_audit_1",
+      familyId: famId,
+      memberId: BOB_UID,
+      memberName: "נועם כץ",
+      actionType: "TASK_EARNED",
+      pointsDelta: 30,
+      previousBalance: 80,
+      newBalance: 110,
+      reason: "השלמת משימה כפולה",
+      performedByUid: "mom_parent_2",
+      performedByName: "אמא כץ",
+      timestampMillis: 1700001003000,
+      taskId: "task_audit_1",
+    }
+  );
+  await assertFails(duplicateApproveBatch.commit());
+
+  // 6. Atomic ADD (+20 -> 100), DEDUCT (-40 -> 60), and RESET (-60 -> 0) succeed and preserve history
+  const addBatch = parent1Db.batch();
+  addBatch.update(parent1Db.collection("families").doc(famId).collection("members").doc(BOB_UID), {
+    earnedPoints: 100,
+    lastPointsOperationId: "pts_add_valid_1",
+    updatedAt: 1700001004000,
+  });
+  addBatch.set(parent1Db.collection("families").doc(famId).collection("points_history").doc("pts_add_valid_1"), {
+    id: "pts_add_valid_1",
+    operationId: "pts_add_valid_1",
+    familyId: famId,
+    memberId: BOB_UID,
+    memberName: "נועם כץ",
+    actionType: "ADD",
+    pointsDelta: 20,
+    previousBalance: 80,
+    newBalance: 100,
+    reason: "עזרה בבית",
+    performedByUid: ALICE_UID,
+    performedByName: "אבא כץ",
+    timestampMillis: 1700001004000,
+  });
+  await assertSucceeds(addBatch.commit());
+
+  const deductBatch = parent1Db.batch();
+  deductBatch.update(parent1Db.collection("families").doc(famId).collection("members").doc(BOB_UID), {
+    earnedPoints: 60,
+    lastPointsOperationId: "pts_ded_valid_1",
+    updatedAt: 1700001005000,
+  });
+  deductBatch.set(parent1Db.collection("families").doc(famId).collection("points_history").doc("pts_ded_valid_1"), {
+    id: "pts_ded_valid_1",
+    operationId: "pts_ded_valid_1",
+    familyId: famId,
+    memberId: BOB_UID,
+    memberName: "נועם כץ",
+    actionType: "DEDUCT",
+    pointsDelta: -40,
+    previousBalance: 100,
+    newBalance: 60,
+    reason: "אי הכנת שיעורים",
+    performedByUid: ALICE_UID,
+    performedByName: "אבא כץ",
+    timestampMillis: 1700001005000,
+  });
+  await assertSucceeds(deductBatch.commit());
+
+  const resetBatch = parent1Db.batch();
+  resetBatch.update(parent1Db.collection("families").doc(famId).collection("members").doc(BOB_UID), {
+    earnedPoints: 0,
+    lastPointsOperationId: "pts_rst_valid_1",
+    updatedAt: 1700001006000,
+  });
+  resetBatch.set(parent1Db.collection("families").doc(famId).collection("points_history").doc("pts_rst_valid_1"), {
+    id: "pts_rst_valid_1",
+    operationId: "pts_rst_valid_1",
+    familyId: famId,
+    memberId: BOB_UID,
+    memberName: "נועם כץ",
+    actionType: "RESET",
+    pointsDelta: -60,
+    previousBalance: 60,
+    newBalance: 0,
+    reason: "איפוס חודשי",
+    performedByUid: ALICE_UID,
+    performedByName: "אבא כץ",
+    timestampMillis: 1700001006000,
+  });
+  await assertSucceeds(resetBatch.commit());
+
+  // 7. Sensitive fields (uid, id, familyId, email, googleEmail, familyIdentity, standalone role) CANNOT be tampered with
+  const bobMemberRef = parent1Db.collection("families").doc(famId).collection("members").doc(BOB_UID);
+  await assertFails(bobMemberRef.update({ uid: "spoofed_uid" }));
+  await assertFails(bobMemberRef.update({ id: "spoofed_id" }));
+  await assertFails(bobMemberRef.update({ familyId: "other_family" }));
+  await assertFails(bobMemberRef.update({ email: "hijacked@example.com" }));
+  await assertFails(bobMemberRef.update({ googleEmail: "hijacked@example.com" }));
+  await assertFails(bobMemberRef.update({ familyIdentity: "DAUGHTER" }));
+  await assertFails(bobMemberRef.update({ role: "PARENT", familyIdentity: "FATHER" })); // fails without atomic adminUids sync
+
+  // 8. Authorized parent role change synchronized with /families/{famId}.adminUids SUCCEEDS, while demoting owner FAILS
+  const promoteBatch = parent1Db.batch();
+  promoteBatch.update(bobMemberRef, {
+    role: "PARENT",
+    familyIdentity: "FATHER",
+    updatedAt: 1700001007000,
+  });
+  promoteBatch.update(parent1Db.collection("families").doc(famId), {
+    adminUids: [ALICE_UID, "mom_parent_2", BOB_UID],
+  });
+  await assertSucceeds(promoteBatch.commit());
+
+  // Second parent CANNOT demote the primary family creator/owner (ALICE_UID)
+  const illegalDemoteOwnerBatch = parent2Db.batch();
+  illegalDemoteOwnerBatch.update(
+    parent2Db.collection("families").doc(famId).collection("members").doc(ALICE_UID),
+    {
+      role: "CHILD",
+      familyIdentity: "CHILD",
+      updatedAt: 1700001008000,
+    }
+  );
+  illegalDemoteOwnerBatch.update(parent2Db.collection("families").doc(famId), {
+    adminUids: ["mom_parent_2", BOB_UID],
+  });
+  await assertFails(illegalDemoteOwnerBatch.commit());
+});
+

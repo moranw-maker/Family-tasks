@@ -67,7 +67,8 @@ fun SettingsScreen(
     onUpdateFamilyIdentity: (FamilyIdentity) -> Unit = {},
     onShowToast: (String) -> Unit = {},
     appTextScale: AppTextScale = AppTextScale.NORMAL,
-    onTextScaleChange: (AppTextScale) -> Unit = {}
+    onTextScaleChange: (AppTextScale) -> Unit = {},
+    onOpenPointsManagement: () -> Unit = {}
 ) {
     val isHebrew = appLanguage == AppLanguage.HEBREW
     val glass = LocalSoftGlassColors.current
@@ -589,17 +590,29 @@ fun SettingsScreen(
                                     AlarmPermissionDiagnosticRow(
                                         label = if (isHebrew) "הצגה במסך מלא מעל נעילה (Full-Screen)" else "Full-Screen Lock Intent",
                                         isGranted = canUseFullScreen,
-                                        actionLabel = if (isHebrew) "אשר מסך מלא" else "Allow",
+                                        actionLabel = if (isHebrew) "אפשר מסך מלא" else "Allow",
                                         testTag = "grant_fullscreen_alarm_permission_button",
                                         onAction = { FamilyAlarmScheduler.openFullScreenIntentSettings(context) }
                                     )
 
                                     if (!canUseFullScreen) {
+                                        Text(
+                                            text = if (isHebrew) {
+                                                "נדרשת הרשאת התראה במסך מלא כדי שהשעון המעורר יוכל להופיע מעל מסך הנעילה."
+                                            } else {
+                                                "Full-screen notification permission is required so the alarm can appear over the lock screen."
+                                            },
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = glass.warningText,
+                                                fontWeight = FontWeight.SemiBold
+                                            ),
+                                            modifier = Modifier.testTag("settings_fullscreen_alarm_warning_text")
+                                        )
                                         FamilyPrimaryButton(
                                             text = if (isHebrew) {
-                                                "פתח הרשאת \"התראות במסך מלא\" באנדרואיד"
+                                                "אפשר מסך מלא"
                                             } else {
-                                                "Open Android Full-Screen Notification Settings"
+                                                "Allow Full-Screen"
                                             },
                                             leadingIcon = Icons.Default.Fullscreen,
                                             onClick = { FamilyAlarmScheduler.openFullScreenIntentSettings(context) },
@@ -816,6 +829,44 @@ fun SettingsScreen(
                                     )
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // 3A-2. Parent-Only Family Points Management Section ("ניהול נקודות משפחתי ⭐")
+            if (currentMember.isParent) {
+                item(key = "settings_family_points_management_item") {
+                    SettingsCardContainer(
+                        title = if (isHebrew) "ניהול נקודות משפחתי ⭐" else "Family Points Management ⭐",
+                        icon = Icons.Default.Stars,
+                        iconTint = Color(0xFFF59E0B)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("settings_points_management_card"),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(
+                                text = if (isHebrew) {
+                                    "נהלו את חשבונות הנקודות של בני המשפחה בזמן אמת: הוספת נקודות בונוס, הפחתה מבוקרת, איפוס יתרה וצפייה בהיסטוריית השינויים המלאה."
+                                } else {
+                                    "Manage family member points in real time: add bonus points, deduct points, reset balance, and view the full change history."
+                                },
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = glass.textSecondary
+                                )
+                            )
+
+                            FamilyPrimaryButton(
+                                text = if (isHebrew) "ניהול נקודות משפחתי ⭐" else "Family Points Management ⭐",
+                                leadingIcon = Icons.Default.Stars,
+                                onClick = onOpenPointsManagement,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("settings_open_points_management_btn")
+                            )
                         }
                     }
                 }

@@ -2572,7 +2572,426 @@ class ExampleRobolectricTest {
         assertNull(com.example.notifications.FcmTokenManager.getCachedUid(context))
         assertNull(com.example.notifications.FcmTokenManager.getCachedFamilyId(context))
     }
+
+    @Test
+    fun `test family points management add deduct reset history child protection persistence task approval and concurrency`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.getSharedPreferences("family_tasks_ui_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+
+        val repository = FamilyRepository(context = context)
+        val parentDad = repository.members.value.first { it.isParent }
+        val kidNoam = repository.members.value.first { it.id == "m_kid1" }
+        val kidMaya = repository.members.value.first { it.id == "m_kid2" }
+
+        repository.switchCurrentMember(parentDad)
+        val initialNoamPoints = kidNoam.earnedPoints
+        val initialMayaPoints = kidMaya.earnedPoints
+
+        // Scenario 1: Parent adds points to a user and balance updates immediately
+        val addRes = repository.addMemberPointsAsync(
+            memberId = kidNoam.id,
+            amount = 35,
+            reason = "עזרה בבית",
+            operationId = "op_test_add_1"
+        )
+        assertTrue("Parent addMemberPointsAsync must succeed", addRes.isSuccess)
+        val afterAddNoam = repository.members.value.first { it.id == kidNoam.id }.earnedPoints
+        assertEquals(initialNoamPoints + 35, afterAddNoam)
+
+        // Scenario 2: Parent deducts points from a user and balance updates (and blocks negative balance)
+        val deductRes = repository.deductMemberPointsAsync(
+            memberId = kidNoam.id,
+            amount = 15,
+            reason = "הפחתה מבוקרת",
+            operationId = "op_test_deduct_1"
+        )
+        assertTrue("Parent deductMemberPointsAsync must succeed", deductRes.isSuccess)
+        val afterDeductNoam = repository.members.value.first { it.id == kidNoam.id }.earnedPoints
+        assertEquals(initialNoamPoints + 20, afterDeductNoam)
+
+        // Negative balance attempt must be rejected and preserve current balance
+        val negativeAttempt = repository.deductMemberPointsAsync(
+            memberId = kidNoam.id,
+            amount = afterDeductNoam + 500,
+            reason = "ניסיון יתרה שלילית",
+            operationId = "op_test_deduct_negative"
+        )
+        assertTrue("Deduction exceeding current balance must fail by default", negativeAttempt.isFailure)
+        assertEquals(
+            "Balance must remain unchanged after rejected negative deduction",
+            afterDeductNoam,
+            repository.members.value.first { it.id == kidNoam.id }.earnedPoints
+        )
+
+        // Scenario 3: Parent resets a user's points and ONLY that user's balance becomes 0
+        val resetRes = repository.resetMemberPointsAsync(
+            memberId = kidNoam.id,
+            reason = "איפוס נקודות תקופתי",
+            operationId = "op_test_reset_1"
+        )
+        assertTrue("Parent resetMemberPointsAsync must succeed", resetRes.isSuccess)
+        assertEquals(0, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+        assertEquals(
+            "Other family members' points must NOT be affected by resetting one member",
+            initialMayaPoints,
+            repository.members.value.first { it.id == kidMaya.id }.earnedPoints
+        )
+        assertTrue("Task list must NOT be deleted when resetting member points", repository.tasks.value.isNotEmpty())
+
+        // Scenario 4: Points history updates on every action with full metadata and filtering
+        val noamHistory = repository.getPointsHistoryForMember(memberId = kidNoam.id)
+        assertEquals("History must contain 3 entries (ADD, DEDUCT, RESET)", 3, noamHistory.size)
+        assertTrue(noamHistory.any { it.actionType == com.example.model.PointsActionType.ADD && it.pointsDelta == 35 && it.reason == "עזרה בבית" })
+        assertTrue(noamHistory.any { it.actionType == com.example.model.PointsActionType.DEDUCT && it.pointsDelta == -15 && it.previousBalance == initialNoamPoints + 35 && it.newBalance == initialNoamPoints + 20 })
+        assertTrue(noamHistory.any { it.actionType == com.example.model.PointsActionType.RESET && it.previousBalance == initialNoamPoints + 20 && it.newBalance == 0 && it.performedByName == parentDad.name })
+        assertEquals(
+            1,
+            repository.getPointsHistoryForMember(
+                memberId = kidNoam.id,
+                actionFilter = com.example.model.PointsActionType.RESET
+            ).size
+        )
+
+        // Scenario 5: Child cannot access points management or modify points
+        repository.switchCurrentMember(kidNoam)
+        assertFalse("Child member must not have parent privileges", repository.currentMember.value.isParent)
+        assertFalse("Child addMemberPoints must be blocked", repository.addMemberPoints(kidNoam.id, 100, "Hack"))
+        assertFalse("Child deductMemberPoints must be blocked", repository.deductMemberPoints(kidMaya.id, 50, "Hack"))
+        assertFalse("Child resetMemberPoints must be blocked", repository.resetMemberPoints(kidMaya.id, "Hack"))
+        assertEquals(0, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+
+        // Scenario 7: Completing a task and parent approval continues to award points on top of current balance
+        repository.switchCurrentMember(parentDad)
+        repository.addMemberPoints(kidNoam.id, 50, "בונוס התחלתי", "op_test_bonus_50")
+        assertEquals(50, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+
+        val customTask = com.example.model.FamilyTask(
+            id = "task_pts_compat_test",
+            title = "סידור חדר שינה",
+            assignedToMemberId = kidNoam.id,
+            dateEpochDay = LocalDate.now().toEpochDay(),
+            points = 25,
+            isCompleted = false,
+            approvedByParent = false
+        )
+        assertTrue(repository.addTask(customTask))
+
+        // Child marks task completed -> pending approval (points still 50)
+        repository.switchCurrentMember(kidNoam)
+        assertTrue(repository.toggleTaskCompletion(customTask.id))
+        assertEquals(50, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+
+        // Parent approves task -> points become 50 + 25 = 75 and TASK_EARNED entry is logged
+        repository.switchCurrentMember(parentDad)
+        assertTrue(repository.approveTaskCompletion(customTask.id))
+        assertEquals(75, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+        assertTrue(
+            "Task approval must record a TASK_EARNED entry in pointsHistory",
+            repository.pointsHistory.value.any {
+                it.memberId == kidNoam.id &&
+                    it.actionType == com.example.model.PointsActionType.TASK_EARNED &&
+                    it.pointsDelta == 25 &&
+                    it.newBalance == 75
+            }
+        )
+
+        // Scenario 8: Two concurrent point changes do NOT overwrite each other (serialized via pointsMutex),
+        // and duplicate operationId is idempotent
+        var res1: Result<com.example.model.PointsHistoryEntry>? = null
+        var res2: Result<com.example.model.PointsHistoryEntry>? = null
+        val t1 = Thread {
+            res1 = kotlinx.coroutines.runBlocking {
+                repository.addMemberPointsAsync(kidNoam.id, 10, "בונוס מקבילי 1", "op_concurrent_1")
+            }
+        }
+        val t2 = Thread {
+            res2 = kotlinx.coroutines.runBlocking {
+                repository.addMemberPointsAsync(kidNoam.id, 20, "בונוס מקבילי 2", "op_concurrent_2")
+            }
+        }
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        assertTrue(res1?.isSuccess == true)
+        assertTrue(res2?.isSuccess == true)
+        assertEquals(
+            "Both concurrent additions (+10 and +20) must be preserved without race condition (75 + 30 = 105)",
+            105,
+            repository.members.value.first { it.id == kidNoam.id }.earnedPoints
+        )
+
+        // Duplicate operationId must not apply a second time
+        val duplicateRes = repository.addMemberPointsAsync(kidNoam.id, 20, "בונוס מקבילי 2", "op_concurrent_2")
+        assertTrue(duplicateRes.isSuccess)
+        assertEquals(
+            "Duplicate operationId must be idempotent and not double-add points",
+            105,
+            repository.members.value.first { it.id == kidNoam.id }.earnedPoints
+        )
+
+        // Scenario 6: Closing and reopening the app (new FamilyRepository with same Context) preserves balances & history
+        val restartedRepository = FamilyRepository(context = context)
+        assertEquals(
+            "Member points balance must survive app restart without being overwritten",
+            105,
+            restartedRepository.members.value.first { it.id == kidNoam.id }.earnedPoints
+        )
+        assertTrue(
+            "Points history must survive app restart",
+            restartedRepository.pointsHistory.value.count { it.memberId == kidNoam.id } >= 6
+        )
+    }
+
+    @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+    @Test
+    fun `test family points management ui dialogs and full screen alarm permission banner`() = androidx.compose.ui.test.runComposeUiTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.getSharedPreferences("family_tasks_ui_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+        val repository = FamilyRepository(context = context)
+        val parentMember = repository.members.value.first { it.isParent }
+        repository.switchCurrentMember(parentMember)
+
+        // Scenario 9: Test Full-Screen Alarm Permission check when missing (false) and when granted (true)
+        com.example.notifications.FamilyAlarmScheduler.fullScreenPermissionOverrideForTesting = false
+        assertFalse(com.example.notifications.FamilyAlarmScheduler.canUseFullScreenIntent(context))
+
+        val showAlarmScreenState = androidx.compose.runtime.mutableStateOf(true)
+        setContent {
+            val members = repository.members.value
+            val currentMember = repository.currentMember.value
+            val pointsHistory = repository.pointsHistory.value
+            val isProcessing = repository.isProcessingPointsOperation.value
+            val pointsError = repository.pointsOperationError.value
+            val alarms = repository.familyAlarms.value
+
+            com.example.ui.theme.MyApplicationTheme(
+                themeMode = com.example.model.AppThemeMode.LIGHT,
+                textScale = com.example.model.AppTextScale.NORMAL
+            ) {
+                if (showAlarmScreenState.value) {
+                    com.example.ui.screens.FamilyAlarmScreen(
+                        alarms = alarms,
+                        members = members,
+                        currentMember = currentMember,
+                        isHebrew = true,
+                        onSaveAlarm = { repository.addOrUpdateFamilyAlarm(it) },
+                        onToggleAlarm = { repository.toggleFamilyAlarm(it) },
+                        onDeleteAlarm = { repository.deleteFamilyAlarm(it) },
+                        onShowToast = {}
+                    )
+                } else {
+                    com.example.ui.screens.FamilyPointsManagementScreen(
+                        members = members,
+                        currentMember = currentMember,
+                        pointsHistory = pointsHistory,
+                        isProcessingPointsOperation = isProcessing,
+                        pointsOperationError = pointsError,
+                        isHebrew = true,
+                        onAddPoints = { mId, amt, rsn, opId -> repository.addMemberPoints(mId, amt, rsn, opId) },
+                        onDeductPoints = { mId, amt, rsn, opId -> repository.deductMemberPoints(mId, amt, rsn, false, opId) },
+                        onResetPoints = { mId, rsn, opId -> repository.resetMemberPoints(mId, rsn, opId) },
+                        onClearError = { repository.clearPointsOperationError() },
+                        onNavigateBack = {}
+                    )
+                }
+            }
+        }
+
+        waitForIdle()
+
+        // Verify Full-Screen Alarm Permission banner and button appear when permission is missing
+        onNodeWithTag("alarm_screen_fullscreen_permission_banner").assertExists()
+        onNodeWithTag("alarm_screen_fullscreen_permission_text").assertExists()
+        onNodeWithTag("alarm_screen_grant_fullscreen_permission_btn").assertExists()
+
+        // Switch to FamilyPointsManagementScreen and verify member cards, Add, Deduct, and Reset buttons
+        showAlarmScreenState.value = false
+        waitForIdle()
+
+        onNodeWithTag("family_points_management_screen").assertExists()
+        onNodeWithTag("points_management_title").assertExists()
+        onNodeWithTag("points_member_card_m_kid1").assertExists()
+        onNodeWithTag("points_member_balance_m_kid1").assertExists()
+        onNodeWithTag("manage_points_btn_m_kid1").assertExists()
+        onNodeWithTag("add_points_btn_m_kid1").assertExists()
+        onNodeWithTag("deduct_points_btn_m_kid1").assertExists()
+        onNodeWithTag("reset_points_btn_m_kid1").assertExists()
+
+        // Verify when permission is granted (true), canUseFullScreenIntent returns true
+        com.example.notifications.FamilyAlarmScheduler.fullScreenPermissionOverrideForTesting = true
+        assertTrue(com.example.notifications.FamilyAlarmScheduler.canUseFullScreenIntent(context))
+
+        // Restore testing override
+        com.example.notifications.FamilyAlarmScheduler.fullScreenPermissionOverrideForTesting = null
+    }
+
+    @Test
+    fun `test security audit fix prevents duplicate task points and enforces history consistency`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.getSharedPreferences("family_tasks_ui_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+
+        val repository = FamilyRepository(context = context)
+        val dadParent = repository.members.value.first { it.id == "m_dad" }
+        val momParent = repository.members.value.first { it.id == "m_mom" }
+        val kidNoam = repository.members.value.first { it.id == "m_kid1" }
+
+        repository.switchCurrentMember(dadParent)
+        // Reset Noam's balance to 0 as a clean baseline
+        assertTrue(repository.resetMemberPointsAsync(kidNoam.id, "איפוס התחלתי לבדיקה", "op_audit_init_rst").isSuccess)
+        assertEquals(0, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+
+        // 1. Create a task worth 35 points assigned to Noam, child marks completed, parent approves once
+        val taskSingle = FamilyTask(
+            id = "task_audit_single",
+            title = "שטיפת כלים",
+            assignedToMemberId = kidNoam.id,
+            dateEpochDay = LocalDate.now().toEpochDay(),
+            points = 35,
+            isCompleted = false,
+            approvedByParent = false
+        )
+        assertTrue(repository.addTask(taskSingle))
+
+        repository.switchCurrentMember(kidNoam)
+        assertTrue(repository.toggleTaskCompletionAsync(taskSingle.id).isSuccess)
+        assertEquals(0, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+
+        repository.switchCurrentMember(dadParent)
+        val firstApprove = repository.approveTaskCompletionAsync(taskSingle.id)
+        assertTrue(firstApprove.isSuccess)
+        assertEquals(35, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+
+        // Verify deterministic operationId pts_task_{taskId} in points_history
+        val singleTaskEntriesAfterFirst = repository.pointsHistory.value.filter { it.taskId == taskSingle.id }
+        assertEquals(1, singleTaskEntriesAfterFirst.size)
+        assertEquals("pts_task_${taskSingle.id}", singleTaskEntriesAfterFirst.first().operationId)
+        assertEquals(0, singleTaskEntriesAfterFirst.first().previousBalance)
+        assertEquals(35, singleTaskEntriesAfterFirst.first().pointsDelta)
+        assertEquals(35, singleTaskEntriesAfterFirst.first().newBalance)
+
+        // 2. Duplicate approval attempt on the same task -> MUST NOT award additional points or duplicate history
+        val duplicateApprove1 = repository.approveTaskCompletionAsync(taskSingle.id)
+        assertTrue(duplicateApprove1.isSuccess)
+        assertEquals(
+            "Duplicate approval must NOT award points a second time",
+            35,
+            repository.members.value.first { it.id == kidNoam.id }.earnedPoints
+        )
+        assertEquals(
+            "Duplicate approval must NOT create a second TASK_EARNED history entry",
+            1,
+            repository.pointsHistory.value.count { it.taskId == taskSingle.id }
+        )
+
+        // Even if parent uncompletes and re-completes/re-approves the already-rewarded task, no extra points are awarded
+        assertTrue(repository.toggleTaskCompletionAsync(taskSingle.id).isSuccess) // uncomplete
+        assertEquals(35, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+        assertTrue(repository.toggleTaskCompletionAsync(taskSingle.id).isSuccess) // re-complete by parent
+        assertEquals(
+            "Re-completing an already-rewarded task must NOT award duplicate points",
+            35,
+            repository.members.value.first { it.id == kidNoam.id }.earnedPoints
+        )
+        assertEquals(1, repository.pointsHistory.value.count { it.taskId == taskSingle.id })
+
+        // 3. Concurrent approval by two parents (Dad and Mom) on a new task worth 40 points -> credited ONCE only
+        val taskConcurrent = FamilyTask(
+            id = "task_audit_concurrent",
+            title = "סידור הסלון",
+            assignedToMemberId = kidNoam.id,
+            dateEpochDay = LocalDate.now().toEpochDay(),
+            points = 40,
+            isCompleted = true,
+            approvedByParent = false
+        )
+        assertTrue(repository.addTask(taskConcurrent))
+
+        val startLatch = java.util.concurrent.CountDownLatch(1)
+        var dadResult: Result<FamilyTask>? = null
+        var momResult: Result<FamilyTask>? = null
+        val tDad = Thread {
+            startLatch.await()
+            dadResult = kotlinx.coroutines.runBlocking {
+                repository.approveTaskCompletionAsync(taskConcurrent.id)
+            }
+        }
+        val tMom = Thread {
+            startLatch.await()
+            momResult = kotlinx.coroutines.runBlocking {
+                repository.switchCurrentMember(momParent)
+                repository.approveTaskCompletionAsync(taskConcurrent.id)
+            }
+        }
+        tDad.start()
+        tMom.start()
+        startLatch.countDown()
+        tDad.join()
+        tMom.join()
+
+        assertTrue(dadResult?.isSuccess == true)
+        assertTrue(momResult?.isSuccess == true)
+        assertEquals(
+            "Concurrent approval by two parents must credit the 40-point task exactly ONCE (35 + 40 = 75)",
+            75,
+            repository.members.value.first { it.id == kidNoam.id }.earnedPoints
+        )
+        assertEquals(
+            "Concurrent approval must produce exactly 1 points_history entry for task_audit_concurrent",
+            1,
+            repository.pointsHistory.value.count { it.taskId == taskConcurrent.id }
+        )
+
+        // 4. Add (+25 -> 100), Deduct (-30 -> 70), Reset (-70 -> 0), Add (+50 -> 50) & verify ledger consistency
+        repository.switchCurrentMember(dadParent)
+        assertTrue(repository.addMemberPointsAsync(kidNoam.id, 25, "עזרה בגינה", "op_audit_add").isSuccess)
+        assertEquals(100, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+
+        assertTrue(repository.deductMemberPointsAsync(kidNoam.id, 30, "אי סדר", false, "op_audit_ded").isSuccess)
+        assertEquals(70, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+
+        assertTrue(repository.resetMemberPointsAsync(kidNoam.id, "איפוס תקופתי", "op_audit_rst").isSuccess)
+        assertEquals(0, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+
+        assertTrue(repository.addMemberPointsAsync(kidNoam.id, 50, "פתיחת תקופה חדשה", "op_audit_add_after_rst").isSuccess)
+        assertEquals(50, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+
+        val noamHistory = repository.getPointsHistoryForMember(kidNoam.id)
+        for (entry in noamHistory) {
+            assertEquals(
+                "Every history entry must satisfy previousBalance + pointsDelta == newBalance (${entry.operationId})",
+                entry.previousBalance + entry.pointsDelta,
+                entry.newBalance
+            )
+        }
+        assertEquals(
+            "Latest history entry newBalance must equal member's current earnedPoints",
+            repository.members.value.first { it.id == kidNoam.id }.earnedPoints,
+            noamHistory.first().newBalance
+        )
+
+        // 5. Child attempt to modify points or approve task -> blocked
+        repository.switchCurrentMember(kidNoam)
+        assertTrue(repository.addMemberPointsAsync(kidNoam.id, 100, "ניסיון ילד").isFailure)
+        assertTrue(repository.deductMemberPointsAsync(kidNoam.id, 10, "ניסיון ילד").isFailure)
+        assertTrue(repository.resetMemberPointsAsync(kidNoam.id, "ניסיון ילד").isFailure)
+        assertTrue(repository.approveTaskCompletionAsync(taskSingle.id).isFailure)
+        assertEquals(50, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+
+        // 6. Task deletion regression check (Parent can delete task without corrupting points)
+        repository.switchCurrentMember(dadParent)
+        assertTrue(repository.deleteTask(taskSingle.id))
+        assertFalse(repository.tasks.value.any { it.id == taskSingle.id })
+        assertEquals(50, repository.members.value.first { it.id == kidNoam.id }.earnedPoints)
+
+        // 7. Reopen app (new FamilyRepository with same Context) -> balance (50) and history are preserved
+        val reopenedRepo = FamilyRepository(context = context)
+        assertEquals(50, reopenedRepo.members.value.first { it.id == kidNoam.id }.earnedPoints)
+        assertTrue(reopenedRepo.pointsHistory.value.any { it.operationId == "pts_task_${taskSingle.id}" })
+        assertTrue(reopenedRepo.pointsHistory.value.any { it.operationId == "pts_task_${taskConcurrent.id}" })
+    }
 }
+
 
 
 

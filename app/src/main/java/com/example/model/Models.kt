@@ -11,7 +11,8 @@ enum class AppScreen {
     FILES,
     AI_ASSISTANT,
     SETTINGS,
-    ADMIN_DASHBOARD
+    ADMIN_DASHBOARD,
+    POINTS_MANAGEMENT
 }
 
 enum class AppLanguage(val code: String, val displayName: String, val isRtl: Boolean) {
@@ -1166,6 +1167,46 @@ data class DeletedAlarmSyncNotice(
     val confirmedAtMillis: Long = 0L
 )
 
+/**
+ * Type of family points ledger operation recorded in `/families/{familyId}/points_history/{operationId}`.
+ */
+enum class PointsActionType(
+    val firestoreValue: String,
+    val labelHe: String,
+    val labelEn: String
+) {
+    ADD("ADD", "הוספה", "Addition"),
+    DEDUCT("DEDUCT", "הפחתה", "Deduction"),
+    RESET("RESET", "איפוס", "Reset"),
+    TASK_EARNED("TASK_EARNED", "צבירה ממשימה", "Task Earned");
 
+    fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
 
+    companion object {
+        fun fromFirestoreValue(raw: String?): PointsActionType {
+            return entries.find { it.firestoreValue.equals(raw?.trim(), ignoreCase = true) }
+                ?: ADD
+        }
+    }
+}
 
+/**
+ * Immutable audit record for a family member's points balance modification.
+ * Stored in `/families/{familyId}/points_history/{operationId}` and persisted locally.
+ */
+data class PointsHistoryEntry(
+    val id: String = "pts_${UUID.randomUUID().toString().replace("-", "").take(12)}",
+    val operationId: String = id,
+    val familyId: String = "",
+    val memberId: String,
+    val memberName: String = "",
+    val actionType: PointsActionType,
+    val pointsDelta: Int,
+    val previousBalance: Int,
+    val newBalance: Int,
+    val reason: String,
+    val performedByUid: String,
+    val performedByName: String,
+    val timestampMillis: Long = System.currentTimeMillis(),
+    val taskId: String? = null
+)

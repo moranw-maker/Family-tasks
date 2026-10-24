@@ -2466,6 +2466,228 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         assertTrue("Stranger from another family must be denied deleting Family A files", strangerDeleteFamilyAFile.isFailure)
     }
 
+    @Test
+    fun pointsSecurityAudit_atomicTaskApproval_noDuplicatePoints_addDeductReset_andSensitiveFieldsProtected() = runBlocking {
+        val timeoutMs = 15_000L
+        val dadEmail = "dad.pts.audit@example.com"
+        val momEmail = "mom.pts.audit@example.com"
+        val childEmail = "noam.pts.audit@example.com"
+
+        // 1. Dad creates family as PARENT (FATHER)
+        val dadUid = signInTestUser(dadEmail)
+        val dadRepo = repo()
+        val createdFamily = withTimeout(timeoutMs) {
+            dadRepo.createFamilyAsParent(
+                familyNameInput = "משפחת ברק",
+                parentDisplayName = "אבא ברק",
+                creatorUidOverride = dadUid,
+                creatorEmailOverride = dadEmail,
+                familyIdentity = FamilyIdentity.FATHER
+            )
+        }.getOrThrow()
+        val familyId = createdFamily.familyId
+
+        // Create invitations for Mom (PARENT) and Noam (CHILD)
+        val momInvite = withTimeout(timeoutMs) {
+            dadRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.PARENT,
+                invitedNickname = "אמא ברק",
+                intendedEmail = momEmail
+            )
+        }.getOrThrow()
+        val childInvite = withTimeout(timeoutMs) {
+            dadRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "נועם ברק",
+                intendedEmail = childEmail
+            )
+        }.getOrThrow()
+
+        // 2. Mom joins as second PARENT (MOTHER)
+        val momUid = signInTestUser(momEmail)
+        val momRepo = repo()
+        withTimeout(timeoutMs) {
+            momRepo.redeemInvitationAndJoinFamily(
+                rawCode = momInvite.code,
+                memberDisplayName = "אמא ברק",
+                joiningUidOverride = momUid,
+                joiningEmailOverride = momEmail,
+                familyIdentity = FamilyIdentity.MOTHER
+            )
+        }.getOrThrow()
+
+        // 3. Noam joins as CHILD (SON)
+        val childUid = signInTestUser(childEmail)
+        val childRepo = repo()
+        withTimeout(timeoutMs) {
+            childRepo.redeemInvitationAndJoinFamily(
+                rawCode = childInvite.code,
+                memberDisplayName = "נועם ברק",
+                joiningUidOverride = childUid,
+                joiningEmailOverride = childEmail,
+                familyIdentity = FamilyIdentity.SON
+            )
+        }.getOrThrow()
+
+        // 4. Dad signs in, creates a task worth 30 points for Noam
+        signInTestUser(dadEmail)
+        withTimeout(timeoutMs) {
+            dadRepo.checkAuthenticatedUserMembership(
+                uid = dadUid,
+                email = dadEmail,
+                displayName = "אבא ברק"
+            )
+        }
+        val taskId = "task_pts_audit_30"
+        val taskObj = com.example.model.FamilyTask(
+            id = taskId,
+            familyId = familyId,
+            title = "סידור שולחן לימודים",
+            assignedToMemberId = childUid,
+            dateEpochDay = java.time.LocalDate.now().toEpochDay(),
+            points = 30,
+            isCompleted = false,
+            approvedByParent = false
+        )
+        assertTrue(dadRepo.addTask(taskObj))
+        withTimeout(timeoutMs) {
+            while (!firestore.collection("families").document(familyId).collection("tasks").document(taskId).get().awaitTask().exists()) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+
+        // 5. Child marks task completed -> pending approval (0 points)
+        signInTestUser(childEmail)
+        withTimeout(timeoutMs) {
+            childRepo.checkAuthenticatedUserMembership(
+                uid = childUid,
+                email = childEmail,
+                displayName = "נועם ברק"
+            )
+        }
+        val childCompleteRes = withTimeout(timeoutMs) {
+            childRepo.toggleTaskCompletionAsync(taskId)
+        }
+        assertTrue("Child must complete own assigned task: ${childCompleteRes.exceptionOrNull()}", childCompleteRes.isSuccess)
+
+        // Child attempts to modify their own earnedPoints or create points_history in Firestore -> MUST FAIL
+        val childDirectPointsTamper = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyId)
+                    .collection("members").document(childUid)
+                    .update("earnedPoints", 999).awaitTask()
+            }
+        }
+        assertTrue("Security rules must block child from modifying earnedPoints", childDirectPointsTamper.isFailure)
+
+        // 6. Dad signs in and approves the task -> atomic transaction updates task, member (+30), and points_history/pts_task_task_pts_audit_30
+        signInTestUser(dadEmail)
+        withTimeout(timeoutMs) {
+            dadRepo.checkAuthenticatedUserMembership(
+                uid = dadUid,
+                email = dadEmail,
+                displayName = "אבא ברק"
+            )
+        }
+        val dadApproveRes = withTimeout(timeoutMs) {
+            dadRepo.approveTaskCompletionAsync(taskId)
+        }
+        assertTrue("Dad task approval must succeed: ${dadApproveRes.exceptionOrNull()}", dadApproveRes.isSuccess)
+
+        val childMemberSnapAfterApprove = withTimeout(timeoutMs) {
+            firestore.collection("families").document(familyId)
+                .collection("members").document(childUid).get().awaitTask()
+        }
+        assertEquals(30L, childMemberSnapAfterApprove.getLong("earnedPoints"))
+        assertEquals("pts_task_$taskId", childMemberSnapAfterApprove.getString("lastPointsOperationId"))
+
+        val taskHistSnap = withTimeout(timeoutMs) {
+            firestore.collection("families").document(familyId)
+                .collection("points_history").document("pts_task_$taskId").get().awaitTask()
+        }
+        assertTrue("Deterministic points_history/pts_task_$taskId must exist in Firestore", taskHistSnap.exists())
+        assertEquals("TASK_EARNED", taskHistSnap.getString("actionType"))
+        assertEquals(0L, taskHistSnap.getLong("previousBalance"))
+        assertEquals(30L, taskHistSnap.getLong("pointsDelta"))
+        assertEquals(30L, taskHistSnap.getLong("newBalance"))
+        assertEquals(taskId, taskHistSnap.getString("taskId"))
+
+        // 7. Duplicate approval attempt by Dad AND second approval attempt by Mom -> MUST NOT award duplicate points
+        val dadDuplicateApprove = withTimeout(timeoutMs) {
+            dadRepo.approveTaskCompletionAsync(taskId)
+        }
+        assertTrue(dadDuplicateApprove.isSuccess)
+
+        signInTestUser(momEmail)
+        withTimeout(timeoutMs) {
+            momRepo.checkAuthenticatedUserMembership(
+                uid = momUid,
+                email = momEmail,
+                displayName = "אמא ברק"
+            )
+        }
+        val momDuplicateApprove = withTimeout(timeoutMs) {
+            momRepo.approveTaskCompletionAsync(taskId)
+        }
+        assertTrue(momDuplicateApprove.isSuccess)
+
+        val childSnapAfterDuplicateApprovals = withTimeout(timeoutMs) {
+            firestore.collection("families").document(familyId)
+                .collection("members").document(childUid).get().awaitTask()
+        }
+        assertEquals(
+            "Balance in Firestore must remain 30 after duplicate approval attempts by both parents",
+            30L,
+            childSnapAfterDuplicateApprovals.getLong("earnedPoints")
+        )
+
+        // 8. Parent attempting to modify earnedPoints directly without points_history -> MUST FAIL
+        val parentDirectPointsWithoutHistory = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyId)
+                    .collection("members").document(childUid)
+                    .update("earnedPoints", 500).awaitTask()
+            }
+        }
+        assertTrue("Parent must be blocked from updating earnedPoints without an atomic points_history entry", parentDirectPointsWithoutHistory.isFailure)
+
+        // 9. Parent executes ADD (+20 -> 50), DEDUCT (-15 -> 35), RESET (-35 -> 0) against active Firestore database
+        val addRes = withTimeout(timeoutMs) {
+            momRepo.addMemberPointsAsync(childUid, 20, "עזרה בקניות", "pts_add_emul_1")
+        }
+        assertTrue("addMemberPointsAsync must succeed on active DB: ${addRes.exceptionOrNull()}", addRes.isSuccess)
+        assertEquals(50, addRes.getOrThrow().newBalance)
+
+        val deductRes = withTimeout(timeoutMs) {
+            momRepo.deductMemberPointsAsync(childUid, 15, "איחור לשיעור", false, "pts_ded_emul_1")
+        }
+        assertTrue("deductMemberPointsAsync must succeed on active DB: ${deductRes.exceptionOrNull()}", deductRes.isSuccess)
+        assertEquals(35, deductRes.getOrThrow().newBalance)
+
+        val resetRes = withTimeout(timeoutMs) {
+            momRepo.resetMemberPointsAsync(childUid, "איפוס סוף חודש", "pts_rst_emul_1")
+        }
+        assertTrue("resetMemberPointsAsync must succeed on active DB: ${resetRes.exceptionOrNull()}", resetRes.isSuccess)
+        assertEquals(0, resetRes.getOrThrow().newBalance)
+        assertEquals(-35, resetRes.getOrThrow().pointsDelta)
+
+        val allHistDocs = withTimeout(timeoutMs) {
+            firestore.collection("families").document(familyId)
+                .collection("points_history").get().awaitTask().documents
+        }
+        assertEquals("All 4 history entries (TASK_EARNED, ADD, DEDUCT, RESET) must be preserved in Firestore", 4, allHistDocs.size)
+
+        // 10. Attempting to modify sensitive fields (uid, id, familyId, email, familyIdentity) -> MUST FAIL
+        val tamperSensitiveField = runCatching {
+            withTimeout(5000L) {
+                firestore.collection("families").document(familyId)
+                    .collection("members").document(childUid)
+                    .update("uid", "hijacked_uid").awaitTask()
+            }
+        }
+        assertTrue("Tampering with sensitive member field uid must be rejected", tamperSensitiveField.isFailure)
+    }
+
     private val activeRepos = mutableListOf<FamilyRepository>()
 
     private fun repo(): FamilyRepository {
@@ -2496,6 +2718,7 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         }
     }
 }
+
 
 
 

@@ -178,7 +178,11 @@ object FamilyAlarmScheduler {
         return runtimeGranted && channelsEnabled
     }
 
+    @Volatile
+    var fullScreenPermissionOverrideForTesting: Boolean? = null
+
     fun canUseFullScreenIntent(context: Context): Boolean {
+        fullScreenPermissionOverrideForTesting?.let { return it }
         val appCtx = context.applicationContext ?: context
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             val nm = appCtx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return true

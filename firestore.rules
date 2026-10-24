@@ -119,13 +119,12 @@ service cloud.firestore {
 
     // Validates that a CHILD member update on their own member doc is strictly for reward redemption
     function isValidChildRewardSpend() {
-      let changedKeys = request.resource.data.diff(resource.data).affectedKeys();
-      return changedKeys.hasOnly(['spentPoints', 'updatedAt'])
+      return request.resource.data.get('spentPoints', -1) is int
+        && request.resource.data.get('spentPoints', 0) > resource.data.get('spentPoints', 0)
+        && request.resource.data.get('spentPoints', 0) <= resource.data.get('earnedPoints', 0)
         && request.resource.data.get('role', '') == resource.data.get('role', '')
         && request.resource.data.get('earnedPoints', 0) == resource.data.get('earnedPoints', 0)
-        && request.resource.data.get('spentPoints', -1) is int
-        && request.resource.data.get('spentPoints', 0) > resource.data.get('spentPoints', 0)
-        && request.resource.data.get('spentPoints', 0) <= resource.data.get('earnedPoints', 0);
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['spentPoints', 'updatedAt']);
     }
 
     // Alarm ownership & target-device acknowledgement helpers
@@ -269,6 +268,172 @@ service cloud.firestore {
         && isParent(targetUser.data.get('familyId', ''));
     }
 
+    function isFamilyOwner(familyId, targetUid) {
+      return familyId != ''
+        && exists(/databases/$(database)/documents/families/$(familyId))
+        && (
+          get(/databases/$(database)/documents/families/$(familyId)).data.get('createdById', '') == targetUid
+          || get(/databases/$(database)/documents/families/$(familyId)).data.get('createdBy', '') == targetUid
+          || get(/databases/$(database)/documents/families/$(familyId)).data.get('ownerUid', '') == targetUid
+        );
+    }
+
+    // Protects sensitive identity & provenance fields on /families/{familyId}/members/{memberId}
+    function hasImmutableMemberCoreFields(memberId, familyId) {
+      return request.resource.data.get('id', memberId) == memberId
+        && (!('id' in resource.data) || request.resource.data.get('id', '') == resource.data.id)
+        && request.resource.data.get('uid', memberId) == memberId
+        && (!('uid' in resource.data) || request.resource.data.get('uid', '') == resource.data.uid)
+        && request.resource.data.get('familyId', familyId) == familyId
+        && (!('familyId' in resource.data) || request.resource.data.get('familyId', '') == resource.data.familyId)
+        && request.resource.data.get('inviteCode', resource.data.get('inviteCode', '')) == resource.data.get('inviteCode', '')
+        && request.resource.data.get('invitedByMemberId', resource.data.get('invitedByMemberId', '')) == resource.data.get('invitedByMemberId', '')
+        && (resource.data.get('email', '') == '' || request.resource.data.get('email', '') == resource.data.email)
+        && (resource.data.get('googleEmail', '') == '' || request.resource.data.get('googleEmail', '') == resource.data.googleEmail);
+    }
+
+    // Requires any change to a member's earnedPoints to be committed in the same transaction/batch
+    // as a newly created, matching /families/{familyId}/points_history/{opId} entry.
+    function hasMatchingAtomicPointsHistory(familyId, memberId, opId) {
+      let histPath = /databases/$(database)/documents/families/$(familyId)/points_history/$(opId);
+      let afterHist = getAfter(histPath);
+      return !exists(histPath)
+        && existsAfter(histPath)
+        && afterHist != null
+        && afterHist.data.get('familyId', '') == familyId
+        && afterHist.data.get('operationId', opId) == opId
+        && afterHist.data.get('memberId', '') == memberId
+        && afterHist.data.get('previousBalance', -1) == resource.data.get('earnedPoints', 0)
+        && afterHist.data.get('newBalance', -1) == request.resource.data.get('earnedPoints', -1)
+        && afterHist.data.get('pointsDelta', 0) == (request.resource.data.get('earnedPoints', -1) - resource.data.get('earnedPoints', 0))
+        && afterHist.data.get('performedByUid', '') == request.auth.uid;
+    }
+
+    // Allows a parent to update earnedPoints ONLY via an atomic points transaction that preserves all
+    // non-points fields and creates a matching points_history record.
+    function isParentAtomicPointsUpdate(familyId, memberId) {
+      return (
+          request.resource.data.get('earnedPoints', 0) != resource.data.get('earnedPoints', 0)
+          || request.resource.data.get('lastPointsOperationId', '') != resource.data.get('lastPointsOperationId', '')
+        )
+        && request.resource.data.get('role', '') == resource.data.get('role', '')
+        && request.resource.data.get('familyIdentity', '') == resource.data.get('familyIdentity', '')
+        && request.resource.data.get('spentPoints', 0) == resource.data.get('spentPoints', 0)
+        && request.resource.data.get('earnedPoints', -1) is int
+        && request.resource.data.get('earnedPoints', -1) >= 0
+        && request.resource.data.get('lastPointsOperationId', '') is string
+        && request.resource.data.get('lastPointsOperationId', '').size() > 0
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['earnedPoints', 'lastPointsOperationId', 'updatedAt'])
+        && hasMatchingAtomicPointsHistory(familyId, memberId, request.resource.data.lastPointsOperationId);
+    }
+
+    // Allows a parent to update non-points member profile metadata (or normalize legacy V1.5 role/identity)
+    // without modifying earnedPoints, spentPoints, sensitive IDs/emails, or escalating/demoting roles.
+    function isParentMemberProfileUpdate() {
+      return request.resource.data.get('earnedPoints', 0) == resource.data.get('earnedPoints', 0)
+        && request.resource.data.get('spentPoints', 0) == resource.data.get('spentPoints', 0)
+        && isAllowedRoleValue(request.resource.data.get('role', ''))
+        && isSameOrMigratedRole(resource.data.get('role', ''), request.resource.data.get('role', ''))
+        && isValidFamilyIdentity(request.resource.data)
+        && (
+          !('familyIdentity' in resource.data)
+          || resource.data.get('familyIdentity', '') == ''
+          || request.resource.data.get('familyIdentity', '') == resource.data.get('familyIdentity', '')
+        );
+    }
+
+    // Helper that verifies the family's adminUids after a role change matches the member's new role.
+    function hasMatchingAdminUidsAfterRoleChange(familyId, memberId, newRole) {
+      let famPath = /databases/$(database)/documents/families/$(familyId);
+      let afterFam = getAfter(famPath);
+      return existsAfter(famPath)
+        && afterFam != null
+        && (
+          (newRole == 'PARENT' && memberId in afterFam.data.get('adminUids', []))
+          || (newRole == 'CHILD' && !(memberId in afterFam.data.get('adminUids', [])))
+        );
+    }
+
+    // Dedicated rule for authorized parent role management (promoting/demoting a non-owner member)
+    // when atomically synchronized with /families/{familyId}.adminUids.
+    function isAuthorizedParentRoleChange(familyId, memberId) {
+      let newRole = request.resource.data.get('role', '');
+      return newRole != resource.data.get('role', '')
+        && newRole in ['PARENT', 'CHILD']
+        && memberId != request.auth.uid
+        && request.resource.data.get('earnedPoints', 0) == resource.data.get('earnedPoints', 0)
+        && request.resource.data.get('spentPoints', 0) == resource.data.get('spentPoints', 0)
+        && isValidFamilyIdentity(request.resource.data)
+        && !isFamilyOwner(familyId, memberId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role', 'familyIdentity', 'updatedAt'])
+        && hasMatchingAdminUidsAfterRoleChange(familyId, memberId, newRole);
+    }
+
+    function isParentMemberUpdate(familyId, memberId) {
+      return isParent(familyId) && (
+        isParentAtomicPointsUpdate(familyId, memberId)
+        || isAuthorizedParentRoleChange(familyId, memberId)
+        || isParentMemberProfileUpdate()
+      );
+    }
+
+    function isOwnerMemberUpdate(memberId) {
+      return isOwner(memberId) && (
+        (
+          request.resource.data.get('earnedPoints', 0) == resource.data.get('earnedPoints', 0)
+          && request.resource.data.get('spentPoints', 0) == resource.data.get('spentPoints', 0)
+          && isAllowedRoleValue(request.resource.data.get('role', ''))
+          && isSameOrMigratedRole(resource.data.get('role', ''), request.resource.data.get('role', ''))
+          && isValidFamilyIdentity(request.resource.data)
+          && (
+            !('familyIdentity' in resource.data)
+            || resource.data.get('familyIdentity', '') == ''
+            || request.resource.data.get('familyIdentity', '') == resource.data.get('familyIdentity', '')
+          )
+        )
+        || (
+          !isParentRoleValue(resource.data.get('role', ''))
+          && isValidChildRewardSpend()
+        )
+        || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cancelledAlarmIds', 'lastAlarmSyncAtMillis', 'updatedAt'])
+      );
+    }
+
+    function canUpdateFamilyMember(familyId, memberId) {
+      return hasImmutableMemberCoreFields(memberId, familyId)
+        && (
+          isParentMemberUpdate(familyId, memberId)
+          || isOwnerMemberUpdate(memberId)
+        );
+    }
+
+    // Verifies that a TASK_EARNED points_history entry is deterministically keyed as 'pts_task_' + taskId,
+    // references a real task in the same family that is transitioning from unapproved to completed+approved
+    // in the same transaction, and matches the task's assignee and point value.
+    function isValidTaskEarnedHistoryCreate(familyId, entryId, taskId) {
+      let taskPath = /databases/$(database)/documents/families/$(familyId)/tasks/$(taskId);
+      let beforeTask = get(taskPath);
+      let afterTask = getAfter(taskPath);
+      let memberId = request.resource.data.get('memberId', '');
+      let delta = request.resource.data.get('pointsDelta', 0);
+      return entryId == ('pts_task_' + taskId)
+        && exists(taskPath)
+        && existsAfter(taskPath)
+        && beforeTask != null
+        && afterTask != null
+        && !(beforeTask.data.get('isCompleted', false) == true && beforeTask.data.get('approvedByParent', false) == true)
+        && beforeTask.data.get('rewardedOperationId', '') == ''
+        && afterTask.data.get('isCompleted', false) == true
+        && afterTask.data.get('approvedByParent', false) == true
+        && (
+          afterTask.data.get('assignedToMemberId', '') == memberId
+          || afterTask.data.get('assignedUid', '') == memberId
+          || afterTask.data.get('assignedMemberId', '') == memberId
+        )
+        && beforeTask.data.get('points', beforeTask.data.get('pointsValue', -1)) == delta
+        && afterTask.data.get('points', afterTask.data.get('pointsValue', -1)) == delta;
+    }
+
     // =========================================================================
     // 1. User Profiles (/users/{userId})
     // =========================================================================
@@ -277,11 +442,19 @@ service cloud.firestore {
       allow list: if false;
 
       allow create: if isOwner(userId)
+        && request.resource.data.get('uid', userId) == userId
+        && request.resource.data.get('id', userId) == userId
         && (!('role' in request.resource.data) || isAllowedRoleValue(request.resource.data.role))
         && isValidFamilyIdentity(request.resource.data);
 
       allow update: if (
         isOwner(userId)
+        && request.resource.data.get('uid', userId) == userId
+        && request.resource.data.get('id', userId) == userId
+        && (
+          resource.data.get('email', '') == ''
+          || request.resource.data.get('email', '') == resource.data.get('email', '')
+        )
         && (!('role' in request.resource.data) || isAllowedRoleValue(request.resource.data.role))
         && (
           !('role' in request.resource.data)
@@ -295,6 +468,16 @@ service cloud.firestore {
         && isValidFamilyIdentity(request.resource.data)
       ) || (
         isParentOfUserFamily(userId)
+        && !isFamilyOwner(resource.data.get('familyId', ''), userId)
+        && request.resource.data.get('uid', resource.data.get('uid', userId)) == resource.data.get('uid', userId)
+        && request.resource.data.get('uid', userId) == userId
+        && request.resource.data.get('id', resource.data.get('id', userId)) == resource.data.get('id', userId)
+        && request.resource.data.get('id', userId) == userId
+        && request.resource.data.get('familyId', resource.data.get('familyId', '')) == resource.data.get('familyId', '')
+        && (
+          resource.data.get('email', '') == ''
+          || request.resource.data.get('email', '') == resource.data.get('email', '')
+        )
         && (!('role' in request.resource.data) || isAllowedRoleValue(request.resource.data.role))
         && isValidFamilyIdentity(request.resource.data)
       );
@@ -374,6 +557,9 @@ service cloud.firestore {
         allow create: if (
           // 1. Creator bootstrapping or migrating their own PARENT member record
           isOwner(memberId)
+          && request.resource.data.get('id', memberId) == memberId
+          && request.resource.data.get('uid', memberId) == memberId
+          && request.resource.data.get('familyId', familyId) == familyId
           && isParentRoleValue(request.resource.data.get('role', ''))
           && isValidFamilyIdentity(request.resource.data)
           && (
@@ -398,11 +584,17 @@ service cloud.firestore {
         ) || (
           // 2. Existing PARENT adding a member to the family
           isParent(familyId)
+          && request.resource.data.get('id', memberId) == memberId
+          && request.resource.data.get('uid', memberId) == memberId
+          && request.resource.data.get('familyId', familyId) == familyId
           && isAllowedRoleValue(request.resource.data.get('role', ''))
           && isValidFamilyIdentity(request.resource.data)
         ) || (
           // 3. Pre-registered member in memberIds / memberUids onboarding as a child without an inviteCode
           isOwner(memberId)
+          && request.resource.data.get('id', memberId) == memberId
+          && request.resource.data.get('uid', memberId) == memberId
+          && request.resource.data.get('familyId', familyId) == familyId
           && !('inviteCode' in request.resource.data)
           && exists(/databases/$(database)/documents/families/$(familyId))
           && (
@@ -416,6 +608,9 @@ service cloud.firestore {
         ) || (
           // 4. Authenticated user redeeming a valid invitation code atomically
           isOwner(memberId)
+          && request.resource.data.get('id', memberId) == memberId
+          && request.resource.data.get('uid', memberId) == memberId
+          && request.resource.data.get('familyId', familyId) == familyId
           && ('inviteCode' in request.resource.data)
           && isAllowedRoleValue(request.resource.data.get('role', ''))
           && isValidFamilyIdentity(request.resource.data)
@@ -424,29 +619,68 @@ service cloud.firestore {
           && isValidInviteRedemption(familyId, request.resource.data.inviteCode, request.resource.data.get('role', ''))
         );
 
-        allow update: if (
-          isParent(familyId)
-          && isAllowedRoleValue(request.resource.data.get('role', ''))
-          && isValidFamilyIdentity(request.resource.data)
-        ) || (
-          isOwner(memberId)
-          && isFamilyMember(familyId)
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cancelledAlarmIds', 'lastAlarmSyncAtMillis', 'updatedAt'])
-        ) || (
-          isOwner(memberId)
-          && isFamilyMember(familyId)
-          && isAllowedRoleValue(request.resource.data.get('role', ''))
-          && isSameOrMigratedRole(resource.data.get('role', ''), request.resource.data.get('role', ''))
-          && isValidFamilyIdentity(request.resource.data)
-          && request.resource.data.get('earnedPoints', 0) == resource.data.get('earnedPoints', 0)
-          && request.resource.data.get('spentPoints', 0) == resource.data.get('spentPoints', 0)
-        ) || (
-          isOwner(memberId)
-          && isChild(familyId)
-          && isValidChildRewardSpend()
-        );
+        allow update: if canUpdateFamilyMember(familyId, memberId);
 
-        allow delete: if isParent(familyId);
+        allow delete: if isParent(familyId) && !isFamilyOwner(familyId, memberId);
+      }
+
+      // -----------------------------------------------------------------------
+      // 2a-2. Family Points History (/families/{familyId}/points_history/{entryId})
+      // - Readable by active family members.
+      // - Created exclusively by an authenticated PARENT of the family via an atomic
+      //   transaction that simultaneously updates the target member's `earnedPoints`.
+      // - Strictly immutable: neither children nor parents can update or delete history entries.
+      // -----------------------------------------------------------------------
+      match /points_history/{entryId} {
+        allow get, list: if isFamilyMember(familyId);
+
+        allow create: if isParent(familyId)
+          && request.resource.data.get('familyId', '') == familyId
+          && request.resource.data.get('operationId', entryId) == entryId
+          && request.resource.data.get('memberId', '') is string
+          && request.resource.data.get('memberId', '').size() > 0
+          && request.resource.data.get('actionType', '') in ['ADD', 'DEDUCT', 'RESET', 'TASK_EARNED']
+          && request.resource.data.get('pointsDelta', 0) is int
+          && request.resource.data.get('previousBalance', -1) is int
+          && request.resource.data.get('previousBalance', -1) >= 0
+          && request.resource.data.get('newBalance', -1) is int
+          && request.resource.data.get('newBalance', -1) >= 0
+          && request.resource.data.get('performedByUid', '') == request.auth.uid
+          && request.resource.data.get('reason', '') is string
+          && request.resource.data.get('reason', '').size() > 0
+          && (
+            (
+              request.resource.data.actionType == 'ADD'
+              && !entryId.matches('^pts_task_.*')
+              && request.resource.data.pointsDelta > 0
+              && request.resource.data.newBalance == request.resource.data.previousBalance + request.resource.data.pointsDelta
+            ) || (
+              request.resource.data.actionType == 'TASK_EARNED'
+              && request.resource.data.pointsDelta > 0
+              && request.resource.data.newBalance == request.resource.data.previousBalance + request.resource.data.pointsDelta
+              && request.resource.data.get('taskId', '') is string
+              && request.resource.data.get('taskId', '').size() > 0
+              && isValidTaskEarnedHistoryCreate(familyId, entryId, request.resource.data.taskId)
+            ) || (
+              request.resource.data.actionType == 'DEDUCT'
+              && !entryId.matches('^pts_task_.*')
+              && request.resource.data.pointsDelta < 0
+              && request.resource.data.newBalance == request.resource.data.previousBalance + request.resource.data.pointsDelta
+              && request.resource.data.newBalance >= 0
+            ) || (
+              request.resource.data.actionType == 'RESET'
+              && !entryId.matches('^pts_task_.*')
+              && request.resource.data.newBalance == 0
+              && request.resource.data.pointsDelta == -request.resource.data.previousBalance
+            )
+          )
+          && exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId))
+          && existsAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId))
+          && get(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('earnedPoints', 0) == request.resource.data.previousBalance
+          && getAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('earnedPoints', -1) == request.resource.data.newBalance
+          && getAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('lastPointsOperationId', '') == entryId;
+
+        allow update, delete: if false;
       }
 
       // -----------------------------------------------------------------------
@@ -455,10 +689,16 @@ service cloud.firestore {
       match /tasks/{taskId} {
         allow get, list: if isFamilyMember(familyId);
         allow create: if isParent(familyId);
-        allow update: if isParent(familyId)
-          || (isChild(familyId) && isChildTaskCompletionOnly());
+        allow update: if (
+          isParent(familyId)
+          && (
+            resource.data.get('rewardedOperationId', '') == ''
+            || request.resource.data.get('rewardedOperationId', '') == resource.data.get('rewardedOperationId', '')
+          )
+        ) || (isChild(familyId) && isChildTaskCompletionOnly());
         allow delete: if isParent(familyId);
       }
+
 
       // -----------------------------------------------------------------------
       // 2c. Family Rewards (/families/{familyId}/rewards/{rewardId})

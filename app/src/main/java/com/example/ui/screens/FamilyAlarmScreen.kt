@@ -528,21 +528,16 @@ fun FamilyAlarmScreen(
                                 verticalArrangement = Arrangement.spacedBy(2.dp)
                             ) {
                                 Text(
-                                    text = if (isHebrew) "נדרשת הרשאת \"התראות במסך מלא\"" else "Full-Screen Alarm Permission Required",
-                                    style = MaterialTheme.typography.labelLarge.copy(
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = if (glassColors.isDark) glassColors.warningText else PastelYellowDark
-                                    )
-                                )
-                                Text(
                                     text = if (isHebrew) {
-                                        "כדי שמסך הזריחה יקפוץ אוטומטית כשהשעון מצלצל (ללא צורך בלחיצה על ההתראה), אשרו התראות במסך מלא."
+                                        "נדרשת הרשאת התראה במסך מלא כדי שהשעון המעורר יוכל להופיע מעל מסך הנעילה."
                                     } else {
-                                        "Allow Full-Screen Notifications so the sunrise alarm screen opens automatically when ringing."
+                                        "Full-screen notification permission is required so the alarm can appear over the lock screen."
                                     },
                                     style = MaterialTheme.typography.bodySmall.copy(
-                                        color = glassColors.textSecondary
-                                    )
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (glassColors.isDark) glassColors.warningText else PastelYellowDark
+                                    ),
+                                    modifier = Modifier.testTag("alarm_screen_fullscreen_permission_text")
                                 )
                             }
 
@@ -557,7 +552,7 @@ fun FamilyAlarmScreen(
                                 modifier = Modifier.testTag("alarm_screen_grant_fullscreen_permission_btn")
                             ) {
                                 Text(
-                                    text = if (isHebrew) "אשר מסך מלא" else "Allow",
+                                    text = if (isHebrew) "אפשר מסך מלא" else "Allow Full-Screen",
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
                                 )

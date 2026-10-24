@@ -52,6 +52,9 @@ class FamilyViewModel(
     val pendingInvitations: StateFlow<List<FamilyInvitation>> = repository.pendingInvitations
     val taskSyncStates: StateFlow<Map<String, TaskCompletionSyncState>> = repository.taskSyncStates
     val taskOperationError: StateFlow<String?> = repository.taskOperationError
+    val pointsHistory: StateFlow<List<PointsHistoryEntry>> = repository.pointsHistory
+    val isProcessingPointsOperation: StateFlow<Boolean> = repository.isProcessingPointsOperation
+    val pointsOperationError: StateFlow<String?> = repository.pointsOperationError
 
     private val _validatedInvitationPreview = MutableStateFlow<FamilyInvitation?>(null)
     val validatedInvitationPreview: StateFlow<FamilyInvitation?> = _validatedInvitationPreview.asStateFlow()
@@ -188,6 +191,13 @@ class FamilyViewModel(
                 }
             }
         }
+        viewModelScope.launch {
+            repository.pointsOperationError.collect { err ->
+                if (!err.isNullOrBlank()) {
+                    _snackbarMessage.value = err
+                }
+            }
+        }
     }
 
     /**
@@ -224,8 +234,12 @@ class FamilyViewModel(
     // --- Navigation Actions ---
 
     fun navigateTo(screen: AppScreen) {
-        if (screen == AppScreen.ADMIN_DASHBOARD && !currentMember.value.isParent) {
-            _snackbarMessage.value = "גישה לניהול המשפחה מותרת להורים בלבד 🔒"
+        if ((screen == AppScreen.ADMIN_DASHBOARD || screen == AppScreen.POINTS_MANAGEMENT) && !currentMember.value.isParent) {
+            _snackbarMessage.value = if (screen == AppScreen.POINTS_MANAGEMENT) {
+                "גישה לניהול נקודות משפחתי מותרת להורים בלבד 🔒"
+            } else {
+                "גישה לניהול המשפחה מותרת להורים בלבד 🔒"
+            }
             return
         }
         _currentScreen.value = screen
@@ -1242,6 +1256,84 @@ class FamilyViewModel(
         repository.addTask(task2)
         repository.addTask(task3)
         _snackbarMessage.value = "3 משימות חדשות נוספו מלוח ההמלצות של Gemini ✓"
+    }
+
+    // --- Family Points Management (Parent Only) ---
+
+    fun addMemberPoints(
+        memberId: String,
+        amount: Int,
+        reason: String,
+        operationId: String = "pts_add_${java.util.UUID.randomUUID().toString().replace("-", "").take(12)}"
+    ): Boolean {
+        val targetName = members.value.find { it.id == memberId }?.name.orEmpty()
+        val ok = repository.addMemberPoints(
+            memberId = memberId,
+            amount = amount,
+            reason = reason,
+            operationId = operationId
+        )
+        if (ok) {
+            val isHe = appLanguage.value == AppLanguage.HEBREW
+            _snackbarMessage.value = if (isHe) {
+                "נוספו +$amount נקודות ל-$targetName ⭐"
+            } else {
+                "Added +$amount points to $targetName ⭐"
+            }
+        }
+        return ok
+    }
+
+    fun deductMemberPoints(
+        memberId: String,
+        amount: Int,
+        reason: String,
+        allowNegativeBalance: Boolean = false,
+        operationId: String = "pts_ded_${java.util.UUID.randomUUID().toString().replace("-", "").take(12)}"
+    ): Boolean {
+        val targetName = members.value.find { it.id == memberId }?.name.orEmpty()
+        val ok = repository.deductMemberPoints(
+            memberId = memberId,
+            amount = amount,
+            reason = reason,
+            allowNegativeBalance = allowNegativeBalance,
+            operationId = operationId
+        )
+        if (ok) {
+            val isHe = appLanguage.value == AppLanguage.HEBREW
+            _snackbarMessage.value = if (isHe) {
+                "הופחתו -$amount נקודות מ-$targetName"
+            } else {
+                "Deducted -$amount points from $targetName"
+            }
+        }
+        return ok
+    }
+
+    fun resetMemberPoints(
+        memberId: String,
+        reason: String = "איפוס יתרת נקודות ע\"י הורה",
+        operationId: String = "pts_rst_${java.util.UUID.randomUUID().toString().replace("-", "").take(12)}"
+    ): Boolean {
+        val targetName = members.value.find { it.id == memberId }?.name.orEmpty()
+        val ok = repository.resetMemberPoints(
+            memberId = memberId,
+            reason = reason,
+            operationId = operationId
+        )
+        if (ok) {
+            val isHe = appLanguage.value == AppLanguage.HEBREW
+            _snackbarMessage.value = if (isHe) {
+                "יתרת הנקודות של $targetName אופסה ל-0 ✓"
+            } else {
+                "Reset $targetName's points balance to 0 ✓"
+            }
+        }
+        return ok
+    }
+
+    fun clearPointsOperationError() {
+        repository.clearPointsOperationError()
     }
 
     fun showToastMessage(msg: String) {
