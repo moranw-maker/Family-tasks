@@ -23,6 +23,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.*
+import com.example.ui.components.FamilyGlassCard
+import com.example.ui.components.FamilyPrimaryButton
+import com.example.ui.components.SoftGlassScreenBackground
+import com.example.ui.components.VelvetSearchContainer
+import com.example.ui.components.velvetNeumorphicSheen
 import com.example.ui.theme.*
 
 @Composable
@@ -37,6 +42,8 @@ fun GeminiScreen(
     onShowToast: (String) -> Unit
 ) {
     var userPrompt by remember { mutableStateOf("") }
+    val glass = LocalSoftGlassColors.current
+    val isDark = glass.isDark
 
     val presetPrompts = listOf(
         "🌟 הצע חלוקת משימות לניקיון לשבת לכל המשפחה" to "Suggest weekend cleaning chores for everyone",
@@ -45,303 +52,310 @@ fun GeminiScreen(
         "🏆 איך לבנות שיטת ניקוד ותגמול מעודדת לילדים?" to "How to motivate kids with points & rewards?"
     )
 
-    LazyColumn(
-        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 90.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                androidx.compose.ui.graphics.Brush.verticalGradient(
-                    colors = listOf(
-                        androidx.compose.ui.graphics.Color(0xFFEBF3FE),
-                        androidx.compose.ui.graphics.Color(0xFFF7F9FD),
-                        androidx.compose.ui.graphics.Color.White
-                    )
+    SoftGlassScreenBackground(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 90.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            // Quick Screen Help Guide
+            item {
+                com.example.ui.components.ScreenHelpBanner(
+                    title = if (isHebrew) "עוזר ה-AI של Gemini" else "Gemini AI Family Assistant",
+                    tips = if (isHebrew) listOf(
+                        "הצעת משימות: שאלו את Gemini לרעיונות למטלות שבועיות מותאמות לגילאי הילדים.",
+                        "חלוקה שווה: בקשו חלוקת תורנויות מאוזנת בין כל בני המשפחה.",
+                        "הוספה בקליק: משימות ש-Gemini מציע ניתנות להוספה ישירה לרשימת המשימות.",
+                        "סיוע בלימודים: עזרה ברעיונות לפרויקטים ושיעורי בית."
+                    ) else listOf(
+                        "Task Suggestions: Ask Gemini for chore suggestions tailored to your kids.",
+                        "Fair Balance: Request equal chore distributions across the family.",
+                        "One-Tap Add: Add suggested tasks directly to your household list.",
+                        "Homework Ideas: Get school project and schedule tips."
+                    ),
+                    isHebrew = isHebrew
                 )
-            )
-    ) {
-        // Quick Screen Help Guide
-        item {
-            com.example.ui.components.ScreenHelpBanner(
-                title = if (isHebrew) "עוזר ה-AI של Gemini" else "Gemini AI Family Assistant",
-                tips = if (isHebrew) listOf(
-                    "הצעת משימות: שאלו את Gemini לרעיונות למטלות שבועיות מותאמות לגילאי הילדים.",
-                    "חלוקה שווה: בקשו חלוקת תורנויות מאוזנת בין כל בני המשפחה.",
-                    "הוספה בקליק: משימות ש-Gemini מציע ניתנות להוספה ישירה לרשימת המשימות.",
-                    "סיוע בלימודים: עזרה ברעיונות לפרויקטים ושיעורי בית."
-                ) else listOf(
-                    "Task Suggestions: Ask Gemini for chore suggestions tailored to your kids.",
-                    "Fair Balance: Request equal chore distributions across the family.",
-                    "One-Tap Add: Add suggested tasks directly to your household list.",
-                    "Homework Ideas: Get school project and schedule tips."
-                ),
-                isHebrew = isHebrew
-            )
-        }
-
-        // Hero Header Card
-        item {
-            Surface(
-                shape = RoundedCornerShape(24.dp),
-                color = GoogleBlueLight,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(18.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(46.dp)
-                                    .clip(CircleShape)
-                                    .background(GoogleBlue),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(text = "✨", fontSize = 24.sp)
-                            }
-
-                            Column {
-                                Text(
-                                    text = if (isHebrew) "עוזר המשפחה החכם של Gemini" else "Gemini Family Assistant",
-                                    style = MaterialTheme.typography.titleMedium.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = GoogleBlueDark
-                                    )
-                                )
-                                Text(
-                                    text = if (isHebrew)
-                                        "בינה מלאכותית לארגון משימות הבית, מערכות שעות ותפריטים"
-                                    else
-                                        "AI-powered chores planner, school checklist & advice",
-                                    style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
-                                )
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    // Caution notice for prototype mode as required by Gemini API guidelines
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = Color.White.copy(alpha = 0.8f)
-                    ) {
-                        Text(
-                            text = "ℹ️ Powered by Google Gemini (gemini-3.5-flash) • Prototype Mode",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = TextSecondary,
-                                fontSize = 10.sp
-                            ),
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
-                    }
-                }
             }
-        }
 
-        // Quick Preset Suggestions
-        item {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = if (isHebrew) "שאלות ורעיונות מהירים:" else "Quick Suggestions:",
-                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                presetPrompts.forEach { (heb, eng) ->
-                    val promptText = if (isHebrew) heb else eng
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        tonalElevation = 1.dp,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 3.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .clickable {
-                                userPrompt = promptText
-                                onAskGemini(promptText)
-                            }
-                            .testTag("preset_prompt_${promptText.hashCode()}")
-                    ) {
+            // Hero Header Card
+            item {
+                FamilyGlassCard(
+                    cornerRadius = 26.dp,
+                    isTintedBlue = true,
+                    elevation = 7.dp,
+                    contentPadding = PaddingValues(18.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            androidx.compose.ui.graphics.Brush.linearGradient(
+                                                colors = listOf(
+                                                    glass.primaryAccent,
+                                                    glass.velvetVioletAccent
+                                                )
+                                            )
+                                        )
+                                        .velvetNeumorphicSheen(
+                                            isDark = isDark,
+                                            cornerRadius = 24.dp,
+                                            accentColor = MaterialTheme.colorScheme.primary
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(text = "✨", fontSize = 24.sp)
+                                }
+
+                                Column {
+                                    Text(
+                                        text = if (isHebrew) "עוזר המשפחה החכם של Gemini" else "Gemini Family Assistant",
+                                        style = MaterialTheme.typography.titleMedium.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    )
+                                    Text(
+                                        text = if (isHebrew)
+                                            "בינה מלאכותית לארגון משימות הבית, מערכות שעות ותפריטים"
+                                        else
+                                            "AI-powered chores planner, school checklist & advice",
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Caution notice for prototype mode as required by Gemini API guidelines
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = glass.cardBackground,
+                            border = androidx.compose.foundation.BorderStroke(0.75.dp, glass.cardBorder)
+                        ) {
                             Text(
-                                text = promptText,
-                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
-                                modifier = Modifier.weight(1f)
-                            )
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                                contentDescription = null,
-                                tint = GoogleBlue,
-                                modifier = Modifier.size(16.dp)
+                                text = "ℹ️ Powered by Google Gemini (gemini-3.5-flash) • Prototype Mode",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 10.sp
+                                ),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                             )
                         }
                     }
                 }
             }
-        }
 
-        // Custom Prompt Input Box
-        item {
-            Surface(
-                shape = RoundedCornerShape(22.dp),
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 2.dp,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
+            // Quick Preset Suggestions
+            item {
+                Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        text = if (isHebrew) "שאלו את Gemini כל שאלה למשפחה:" else "Ask Gemini anything for your family:",
-                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                        text = if (isHebrew) "שאלות ורעיונות מהירים:" else "Quick Suggestions:",
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
                     )
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    OutlinedTextField(
-                        value = userPrompt,
-                        onValueChange = { userPrompt = it },
-                        placeholder = {
-                            Text(
-                                text = if (isHebrew)
-                                    "לדוגמה: הצע 3 משימות יומיות לנועם ומאיה עם ניקוד..."
-                                else
-                                    "e.g. Suggest 3 daily chores for kids with points..."
-                            )
-                        },
-                        shape = RoundedCornerShape(16.dp),
-                        maxLines = 3,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("gemini_prompt_input")
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
-                    ) {
-                        Button(
-                            onClick = {
-                                if (userPrompt.isNotBlank() && !isLoading) {
-                                    onAskGemini(userPrompt)
+                    presetPrompts.forEach { (heb, eng) ->
+                        val promptText = if (isHebrew) heb else eng
+                        FamilyGlassCard(
+                            cornerRadius = 18.dp,
+                            elevation = 4.dp,
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 3.dp)
+                                .clickable {
+                                    userPrompt = promptText
+                                    onAskGemini(promptText)
                                 }
-                            },
-                            enabled = userPrompt.isNotBlank() && !isLoading,
-                            shape = RoundedCornerShape(16.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = GoogleBlue),
-                            modifier = Modifier.testTag("gemini_send_btn")
+                                .testTag("preset_prompt_${promptText.hashCode()}")
                         ) {
-                            if (isLoading) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    color = Color.White,
-                                    strokeWidth = 2.dp
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(text = if (isHebrew) "מעבד..." else "Thinking...")
-                            } else {
-                                Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
                                 Text(
-                                    text = if (isHebrew) "שאל את Gemini" else "Ask Gemini",
-                                    fontWeight = FontWeight.Bold
+                                    text = promptText,
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(16.dp)
                                 )
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Response Section
-        item {
-            AnimatedVisibility(visible = responseContent != null || isLoading) {
-                Surface(
-                    shape = RoundedCornerShape(22.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 3.dp,
-                    border = androidx.compose.foundation.BorderStroke(1.5.dp, GoogleBlue.copy(alpha = 0.3f)),
+            // Custom Prompt Input Box
+            item {
+                FamilyGlassCard(
+                    cornerRadius = 24.dp,
+                    elevation = 6.dp,
+                    contentPadding = PaddingValues(16.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.padding(18.dp)) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Column {
+                        Text(
+                            text = if (isHebrew) "שאלו את Gemini כל שאלה למשפחה:" else "Ask Gemini anything for your family:",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        VelvetSearchContainer(
+                            cornerRadius = 18.dp,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text(text = "✨", fontSize = 20.sp)
-                            Text(
-                                text = if (isHebrew) "תשובת Gemini למשפחה:" else "Gemini's Response:",
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = GoogleBlue
-                                )
+                            OutlinedTextField(
+                                value = userPrompt,
+                                onValueChange = { userPrompt = it },
+                                placeholder = {
+                                    Text(
+                                        text = if (isHebrew)
+                                            "לדוגמה: הצע 3 משימות יומיות לנועם ומאיה עם ניקוד..."
+                                        else
+                                            "e.g. Suggest 3 daily chores for kids with points..."
+                                    )
+                                },
+                                shape = RoundedCornerShape(18.dp),
+                                maxLines = 3,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = Color.Transparent,
+                                    unfocusedContainerColor = Color.Transparent,
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
+                                    unfocusedBorderColor = Color.Transparent
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("gemini_prompt_input")
                             )
                         }
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        if (isLoading) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            FamilyPrimaryButton(
+                                text = if (isLoading) {
+                                    if (isHebrew) "מעבד..." else "Thinking..."
+                                } else {
+                                    if (isHebrew) "שאל את Gemini" else "Ask Gemini"
+                                },
+                                onClick = {
+                                    if (userPrompt.isNotBlank() && !isLoading) {
+                                        onAskGemini(userPrompt)
+                                    }
+                                },
+                                enabled = userPrompt.isNotBlank() && !isLoading,
+                                leadingIcon = if (isLoading) null else Icons.Default.AutoAwesome,
+                                modifier = Modifier.testTag("gemini_send_btn")
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Response Section
+            item {
+                AnimatedVisibility(visible = responseContent != null || isLoading) {
+                    FamilyGlassCard(
+                        cornerRadius = 24.dp,
+                        isTintedBlue = true,
+                        elevation = 7.dp,
+                        contentPadding = PaddingValues(18.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column {
                             Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 20.dp),
-                                horizontalArrangement = Arrangement.Center,
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                CircularProgressIndicator(color = GoogleBlue, modifier = Modifier.size(28.dp))
-                                Spacer(modifier = Modifier.width(12.dp))
+                                Text(text = "✨", fontSize = 20.sp)
                                 Text(
-                                    text = if (isHebrew) "Gemini מכין את התשובה והתוכנית..." else "Gemini is preparing your plan...",
-                                    style = MaterialTheme.typography.bodyMedium.copy(color = TextSecondary)
+                                    text = if (isHebrew) "תשובת Gemini למשפחה:" else "Gemini's Response:",
+                                    style = MaterialTheme.typography.titleSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
                                 )
                             }
-                        } else if (responseContent != null) {
-                            Text(
-                                text = responseContent,
-                                style = MaterialTheme.typography.bodyMedium.copy(
-                                    lineHeight = 22.sp,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            )
 
-                            Spacer(modifier = Modifier.height(14.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
 
-                            // Action button: Add suggested chores directly to the family app!
-                            Button(
-                                onClick = {
-                                    onAddSuggestedTasks()
-                                    onShowToast(if (isHebrew) "המשימות נוספו בהצלחה לרשימת המטלות! 🎉" else "Chores added to task list! 🎉")
-                                },
-                                shape = RoundedCornerShape(16.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = GoogleGreen),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("gemini_add_chores_btn")
-                            ) {
-                                Icon(imageVector = Icons.AutoMirrored.Filled.PlaylistAddCheck, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(8.dp))
+                            if (isLoading) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 20.dp),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Text(
+                                        text = if (isHebrew) "Gemini מכין את התשובה והתוכנית..." else "Gemini is preparing your plan...",
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    )
+                                }
+                            } else if (responseContent != null) {
                                 Text(
+                                    text = responseContent,
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        lineHeight = 22.sp,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                )
+
+                                Spacer(modifier = Modifier.height(14.dp))
+
+                                // Action button: Add suggested chores directly to the family app!
+                                FamilyPrimaryButton(
                                     text = if (isHebrew) "שבץ משימות אלו ברשימת המטלות המשפחתית (+)" else "Add these tasks to family chores (+)",
-                                    fontWeight = FontWeight.Bold
+                                    onClick = {
+                                        onAddSuggestedTasks()
+                                        onShowToast(if (isHebrew) "המשימות נוספו בהצלחה לרשימת המטלות! 🎉" else "Chores added to task list! 🎉")
+                                    },
+                                    leadingIcon = Icons.AutoMirrored.Filled.PlaylistAddCheck,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("gemini_add_chores_btn")
                                 )
                             }
                         }

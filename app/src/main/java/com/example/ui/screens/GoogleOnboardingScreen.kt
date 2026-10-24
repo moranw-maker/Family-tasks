@@ -115,18 +115,9 @@ fun GoogleOnboardingScreen(
         else -> null
     }
 
-    Box(
+    com.example.ui.components.SoftGlassScreenBackground(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFFEAF2FF),
-                        Color(0xFFF3F6FC),
-                        Color(0xFFFFFFFF)
-                    )
-                )
-            )
             .testTag("google_onboarding_screen")
     ) {
         Column(
@@ -146,10 +137,10 @@ fun GoogleOnboardingScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Surface(
-                    shape = RoundedCornerShape(28.dp),
-                    color = Color.White,
-                    shadowElevation = 6.dp,
+                com.example.ui.components.FamilyGlassCard(
+                    cornerRadius = 28.dp,
+                    elevation = 7.dp,
+                    contentPadding = PaddingValues(0.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(175.dp)
@@ -168,7 +159,7 @@ fun GoogleOnboardingScreen(
                     text = if (isHebrew) "המשימות המשפחתיות" else "Family Tasks ${com.example.util.AppVersionManager.displayVersionLabel}",
                     style = MaterialTheme.typography.headlineMedium.copy(
                         fontWeight = FontWeight.ExtraBold,
-                        color = TextPrimary,
+                        color = MaterialTheme.colorScheme.onSurface,
                         fontSize = 26.sp
                     ),
                     textAlign = TextAlign.Center
@@ -192,7 +183,7 @@ fun GoogleOnboardingScreen(
                             }
                         },
                         style = MaterialTheme.typography.bodyMedium.copy(
-                            color = TextSecondary,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             lineHeight = 20.sp
                         ),
                         textAlign = TextAlign.Center,

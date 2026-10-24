@@ -103,26 +103,20 @@ fun BiometricLockScreen(
         }
     }
 
-    Box(
+    com.example.ui.components.SoftGlassScreenBackground(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFFEBF3FE),
-                        Color(0xFFF7F9FD),
-                        Color.White
-                    )
-                )
-            )
             .statusBarsPadding()
             .navigationBarsPadding()
             .imePadding()
             .padding(24.dp)
-            .testTag("biometric_lock_screen"),
-        contentAlignment = Alignment.Center
+            .testTag("biometric_lock_screen")
     ) {
-        Column(
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
             modifier = Modifier
@@ -272,6 +266,7 @@ fun BiometricLockScreen(
                     text = if (isHebrew) "כניסה באמצעות קוד גישה (PIN)" else "Unlock with Backup PIN",
                     fontWeight = FontWeight.SemiBold
                 )
+            }
             }
         }
     }

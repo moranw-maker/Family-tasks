@@ -77,6 +77,7 @@ import com.example.ui.dialogs.RenameFolderDialog
 import com.example.ui.components.FamilyGlassCard
 import com.example.ui.components.FamilySectionHeader
 import com.example.ui.components.SoftGlassScreenBackground
+import com.example.ui.components.VelvetSearchContainer
 import com.example.ui.theme.LocalSoftGlassColors
 import java.io.File
 
@@ -584,34 +585,45 @@ fun FilesScreen(
                         AnimatedVisibility(visible = showSearchBar || searchQuery.isNotEmpty()) {
                             Column {
                                 Spacer(modifier = Modifier.height(10.dp))
-                                OutlinedTextField(
-                                    value = searchQuery,
-                                    onValueChange = onSearchQueryChange,
-                                    placeholder = {
-                                        Text(
-                                            text = if (isHebrew) "חיפוש קובץ או תיקייה..." else "Search files or folders...",
-                                            style = MaterialTheme.typography.bodyMedium
-                                        )
-                                    },
-                                    leadingIcon = {
-                                        Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp))
-                                    },
-                                    trailingIcon = {
-                                        if (searchQuery.isNotEmpty()) {
-                                            IconButton(
-                                                onClick = { onSearchQueryChange("") },
-                                                modifier = Modifier.testTag("clear_file_search_button")
-                                            ) {
-                                                Icon(Icons.Default.Clear, contentDescription = "Clear", modifier = Modifier.size(18.dp))
+                                VelvetSearchContainer(
+                                    cornerRadius = 16.dp,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    OutlinedTextField(
+                                        value = searchQuery,
+                                        onValueChange = onSearchQueryChange,
+                                        placeholder = {
+                                            Text(
+                                                text = if (isHebrew) "חיפוש קובץ או תיקייה..." else "Search files or folders...",
+                                                style = MaterialTheme.typography.bodyMedium
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp))
+                                        },
+                                        trailingIcon = {
+                                            if (searchQuery.isNotEmpty()) {
+                                                IconButton(
+                                                    onClick = { onSearchQueryChange("") },
+                                                    modifier = Modifier.testTag("clear_file_search_button")
+                                                ) {
+                                                    Icon(Icons.Default.Clear, contentDescription = "Clear", modifier = Modifier.size(18.dp))
+                                                }
                                             }
-                                        }
-                                    },
-                                    singleLine = true,
-                                    shape = RoundedCornerShape(14.dp),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("file_search_input")
-                                )
+                                        },
+                                        singleLine = true,
+                                        shape = RoundedCornerShape(16.dp),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedContainerColor = Color.Transparent,
+                                            unfocusedContainerColor = Color.Transparent,
+                                            focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
+                                            unfocusedBorderColor = Color.Transparent
+                                        ),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("file_search_input")
+                                    )
+                                }
                             }
                         }
 

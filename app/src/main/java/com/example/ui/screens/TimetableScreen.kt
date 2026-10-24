@@ -17,6 +17,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -32,6 +34,7 @@ import com.example.ui.components.FamilyPrimaryButton
 import com.example.ui.components.FamilySectionHeader
 import com.example.ui.components.FamilyStatusChip
 import com.example.ui.components.SoftGlassScreenBackground
+import com.example.ui.components.velvetNeumorphicSheen
 import com.example.ui.theme.*
 import java.time.LocalDate
 import kotlin.math.abs
@@ -118,12 +121,12 @@ fun TimetableScreen(
                     )
                 }
 
-                // Soft Glass Top Control Card: View Switcher + Child Selector Tabs
+                // Luxury Soft Neumorphism Top Control Card: View Switcher + Single Add Period Button + Child Selector Tabs
                 FamilyGlassCard(
-                    cornerRadius = 22.dp,
+                    cornerRadius = 24.dp,
                     isTintedBlue = true,
-                    elevation = 3.dp,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                    elevation = 7.dp,
+                    contentPadding = PaddingValues(horizontal = 13.dp, vertical = 12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 14.dp, vertical = 4.dp)
@@ -133,10 +136,24 @@ fun TimetableScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
+                        val switcherShape = RoundedCornerShape(15.dp)
                         Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = glass.cardBackground,
-                            border = BorderStroke(1.dp, glass.cardBorder)
+                            shape = switcherShape,
+                            color = Color.Transparent,
+                            border = BorderStroke(0.9.dp, glass.cardBorder),
+                            modifier = Modifier
+                                .clip(switcherShape)
+                                .background(
+                                    Brush.verticalGradient(
+                                        colors = if (glass.isDark) {
+                                            listOf(Color(0xFF0E1628), Color(0xFF162138))
+                                        } else {
+                                            listOf(Color(0xFFE8EFFB), Color(0xFFF6F9FE))
+                                        }
+                                    ),
+                                    switcherShape
+                                )
+                                .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 15.dp, isRecessed = true)
                         ) {
                             Row(modifier = Modifier.padding(3.dp)) {
                                 TimetableViewPill(
@@ -163,9 +180,9 @@ fun TimetableScreen(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                    // Kids Tabs Row with FamilyMemberAvatar
+                    // Kids Tabs Row with 3D Neumorphic Pill & FamilyMemberAvatar
                     LazyRow(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -173,21 +190,42 @@ fun TimetableScreen(
                     ) {
                         items(kids) { kid ->
                             val isSelected = kid.id == activeKid.id
+                            val tabShape = RoundedCornerShape(16.dp)
                             Surface(
-                                shape = RoundedCornerShape(16.dp),
-                                color = if (isSelected) glass.primaryAccent else glass.cardBackground,
+                                shape = tabShape,
+                                color = Color.Transparent,
                                 border = BorderStroke(
-                                    if (isSelected) 1.5.dp else 1.dp,
-                                    if (isSelected) glass.primaryAccent else glass.cardBorder
+                                    if (isSelected) 1.3.dp else 0.9.dp,
+                                    if (isSelected) Color.White.copy(alpha = 0.45f) else glass.cardBorder
                                 ),
-                                shadowElevation = if (isSelected) 3.dp else 1.dp,
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(16.dp))
+                                    .shadow(
+                                        elevation = if (isSelected) 6.dp else 2.dp,
+                                        shape = tabShape,
+                                        spotColor = if (isSelected) glass.primaryAccent.copy(alpha = 0.40f) else Color.Black.copy(alpha = 0.15f)
+                                    )
+                                    .clip(tabShape)
+                                    .background(
+                                        Brush.verticalGradient(
+                                            colors = if (isSelected) {
+                                                if (glass.isDark) {
+                                                    listOf(Color(0xFF60A5FA), Color(0xFF3B82F6), Color(0xFF4F46E5))
+                                                } else {
+                                                    listOf(Color(0xFF3B82F6), Color(0xFF2563EB), Color(0xFF1D4ED8))
+                                                }
+                                            } else if (glass.isDark) {
+                                                listOf(Color(0xFF202D47), Color(0xFF151F33))
+                                            } else {
+                                                listOf(Color.White, Color(0xFFF0F5FE))
+                                            }
+                                        ),
+                                        tabShape
+                                    )
                                     .clickable { onSelectChild(kid.id) }
                                     .testTag("child_tab_${kid.id}")
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(7.dp)
                                 ) {
@@ -201,7 +239,7 @@ fun TimetableScreen(
                                         style = MaterialTheme.typography.labelMedium.copy(
                                             fontWeight = FontWeight.ExtraBold,
                                             color = if (isSelected) {
-                                                if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                                Color.White
                                             } else {
                                                 glass.textPrimary
                                             }
@@ -213,7 +251,7 @@ fun TimetableScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 if (timetableViewMode == TimetableViewMode.WEEKLY_TABLE) {
                     WeeklyTimetableTableView(
@@ -236,18 +274,40 @@ fun TimetableScreen(
                         SchoolDay.schoolDays.forEach { day ->
                             val isDaySelected = day == selectedDay
                             val dayPeriodsCount = kidPeriods.count { it.day == day }
+                            val dayShape = RoundedCornerShape(16.dp)
                             Surface(
-                                shape = RoundedCornerShape(16.dp),
-                                color = if (isDaySelected) glass.primaryAccentSoftBg else glass.cardBackground,
+                                shape = dayShape,
+                                color = Color.Transparent,
                                 border = BorderStroke(
-                                    if (isDaySelected) 1.6.dp else 1.dp,
+                                    if (isDaySelected) 1.4.dp else 0.9.dp,
                                     if (isDaySelected) glass.primaryAccent else glass.cardBorder
                                 ),
-                                shadowElevation = if (isDaySelected) 3.dp else 1.dp,
                                 modifier = Modifier
                                     .weight(1f)
                                     .padding(horizontal = 2.dp)
-                                    .clip(RoundedCornerShape(16.dp))
+                                    .shadow(
+                                        elevation = if (isDaySelected) 5.dp else 2.dp,
+                                        shape = dayShape,
+                                        spotColor = if (isDaySelected) glass.primaryAccent.copy(alpha = 0.35f) else Color.Black.copy(alpha = 0.14f)
+                                    )
+                                    .clip(dayShape)
+                                    .background(
+                                        Brush.verticalGradient(
+                                            colors = if (isDaySelected) {
+                                                if (glass.isDark) {
+                                                    listOf(Color(0xFF263B6A), Color(0xFF1B2B4E))
+                                                } else {
+                                                    listOf(Color.White, Color(0xFFDFEBFE))
+                                                }
+                                            } else if (glass.isDark) {
+                                                listOf(Color(0xFF1F2B44), Color(0xFF151F32))
+                                            } else {
+                                                listOf(Color.White, Color(0xFFF3F6FC))
+                                            }
+                                        ),
+                                        dayShape
+                                    )
+                                    .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 16.dp)
                                     .clickable { selectedDay = day }
                                     .testTag("day_tab_${day.name}")
                             ) {
@@ -274,7 +334,7 @@ fun TimetableScreen(
                                                 fontSize = 9.sp,
                                                 fontWeight = FontWeight.ExtraBold,
                                                 color = if (isDaySelected) {
-                                                    if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                                    Color.White
                                                 } else {
                                                     glass.primaryAccent
                                                 },
@@ -341,11 +401,34 @@ fun TimetableViewPill(
     onClick: () -> Unit
 ) {
     val glass = LocalSoftGlassColors.current
+    val pillShape = RoundedCornerShape(12.dp)
     Surface(
-        shape = RoundedCornerShape(11.dp),
-        color = if (isSelected) glass.primaryAccent else Color.Transparent,
+        shape = pillShape,
+        color = Color.Transparent,
         modifier = Modifier
-            .clip(RoundedCornerShape(11.dp))
+            .then(
+                if (isSelected) {
+                    Modifier
+                        .shadow(
+                            elevation = 4.dp,
+                            shape = pillShape,
+                            spotColor = glass.primaryAccent.copy(alpha = 0.35f)
+                        )
+                        .clip(pillShape)
+                        .background(
+                            Brush.verticalGradient(
+                                colors = if (glass.isDark) {
+                                    listOf(Color(0xFF60A5FA), Color(0xFF3B82F6))
+                                } else {
+                                    listOf(Color(0xFF3B82F6), Color(0xFF2563EB))
+                                }
+                            ),
+                            pillShape
+                        )
+                } else {
+                    Modifier.clip(pillShape)
+                }
+            )
             .clickable { onClick() }
     ) {
         Text(
@@ -353,12 +436,12 @@ fun TimetableViewPill(
             style = MaterialTheme.typography.labelSmall.copy(
                 fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
                 color = if (isSelected) {
-                    if (glass.isDark) Color(0xFF0B1120) else Color.White
+                    Color.White
                 } else {
                     glass.textSecondary
                 }
             ),
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
         )
     }
 }
@@ -390,9 +473,9 @@ fun WeeklyTimetableTableView(
         Spacer(modifier = Modifier.height(8.dp))
 
         FamilyGlassCard(
-            cornerRadius = 22.dp,
-            elevation = 3.dp,
-            contentPadding = PaddingValues(8.dp),
+            cornerRadius = 24.dp,
+            elevation = 7.dp,
+            contentPadding = PaddingValues(10.dp),
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
@@ -420,13 +503,25 @@ fun WeeklyTimetableTableView(
                     }
 
                     schoolDays.forEach { day ->
+                        val headerCellShape = RoundedCornerShape(10.dp)
                         Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = glass.primaryAccentSoftBg,
-                            border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.25f)),
+                            shape = headerCellShape,
+                            color = Color.Transparent,
+                            border = BorderStroke(0.9.dp, glass.primaryAccent.copy(alpha = 0.28f)),
                             modifier = Modifier
                                 .width(112.dp)
                                 .padding(horizontal = 2.dp)
+                                .shadow(2.dp, headerCellShape, spotColor = glass.primaryAccent.copy(alpha = 0.20f))
+                                .background(
+                                    Brush.verticalGradient(
+                                        colors = if (glass.isDark) {
+                                            listOf(Color(0xFF243763), glass.primaryAccentSoftBg)
+                                        } else {
+                                            listOf(Color.White, glass.primaryAccentSoftBg)
+                                        }
+                                    ),
+                                    headerCellShape
+                                )
                         ) {
                             Text(
                                 text = day.getDisplayName(isHebrew),
@@ -481,13 +576,31 @@ fun WeeklyTimetableTableView(
                                             period.colorHex,
                                             glass.isDark
                                         )
+                                        val cellShape = RoundedCornerShape(12.dp)
                                         Surface(
-                                            shape = RoundedCornerShape(12.dp),
-                                            color = subjectAccent.copy(alpha = if (glass.isDark) 0.18f else 0.12f),
-                                            border = BorderStroke(1.dp, subjectAccent.copy(alpha = 0.45f)),
+                                            shape = cellShape,
+                                            color = Color.Transparent,
+                                            border = BorderStroke(0.95.dp, subjectAccent.copy(alpha = 0.45f)),
                                             modifier = Modifier
                                                 .fillMaxSize()
-                                                .clip(RoundedCornerShape(12.dp))
+                                                .shadow(3.dp, cellShape, spotColor = subjectAccent.copy(alpha = 0.25f))
+                                                .clip(cellShape)
+                                                .background(
+                                                    Brush.verticalGradient(
+                                                        colors = if (glass.isDark) {
+                                                            listOf(
+                                                                subjectAccent.copy(alpha = 0.26f),
+                                                                subjectAccent.copy(alpha = 0.14f)
+                                                            )
+                                                        } else {
+                                                            listOf(
+                                                                Color.White,
+                                                                subjectAccent.copy(alpha = 0.15f)
+                                                            )
+                                                        }
+                                                    ),
+                                                    cellShape
+                                                )
                                                 .clickable {
                                                     if (isAdmin) onEditPeriod(period)
                                                 }
@@ -545,8 +658,8 @@ fun WeeklyTimetableTableView(
                                     } else {
                                         Surface(
                                             shape = RoundedCornerShape(10.dp),
-                                            color = glass.screenBackground.copy(alpha = 0.6f),
-                                            border = BorderStroke(0.5.dp, glass.cardBorder.copy(alpha = 0.5f)),
+                                            color = glass.screenBackground.copy(alpha = 0.55f),
+                                            border = BorderStroke(0.6.dp, glass.cardBorder.copy(alpha = 0.5f)),
                                             modifier = Modifier.fillMaxSize()
                                         ) {}
                                     }
@@ -578,7 +691,7 @@ fun PeriodCardItem(
     FamilyGlassCard(
         cornerRadius = 22.dp,
         accentColor = subjectAccent,
-        elevation = 3.dp,
+        elevation = 6.dp,
         contentPadding = PaddingValues(14.dp),
         modifier = Modifier
             .fillMaxWidth()
@@ -589,12 +702,36 @@ fun PeriodCardItem(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Period number squircle badge with subject accent
+            // 3D Raised Period Number Squircle Badge with Subject Accent
+            val badgeShape = RoundedCornerShape(15.dp)
             Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = subjectAccent.copy(alpha = if (glass.isDark) 0.24f else 0.14f),
-                border = BorderStroke(1.2.dp, subjectAccent.copy(alpha = 0.45f)),
-                modifier = Modifier.size(46.dp)
+                shape = badgeShape,
+                color = Color.Transparent,
+                border = BorderStroke(1.1.dp, subjectAccent.copy(alpha = 0.45f)),
+                modifier = Modifier
+                    .size(46.dp)
+                    .shadow(
+                        elevation = 4.dp,
+                        shape = badgeShape,
+                        spotColor = subjectAccent.copy(alpha = 0.35f)
+                    )
+                    .background(
+                        Brush.verticalGradient(
+                            colors = if (glass.isDark) {
+                                listOf(
+                                    subjectAccent.copy(alpha = 0.32f),
+                                    subjectAccent.copy(alpha = 0.16f)
+                                )
+                            } else {
+                                listOf(
+                                    Color.White,
+                                    subjectAccent.copy(alpha = 0.18f)
+                                )
+                            }
+                        ),
+                        badgeShape
+                    )
+                    .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 15.dp, accentColor = subjectAccent)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Text(
@@ -607,7 +744,7 @@ fun PeriodCardItem(
                 }
             }
 
-            // Subject & Soft Glass Chips
+            // Subject & Velvet Status Chips
             Column(modifier = Modifier.weight(1f)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -654,17 +791,30 @@ fun PeriodCardItem(
                 }
             }
 
-            // Actions: Edit, Test Notification, Delete
+            // Raised 3D Action Pills: Test Notification, Edit, Delete
+            val btnShape = RoundedCornerShape(11.dp)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
             ) {
                 Surface(
-                    shape = RoundedCornerShape(11.dp),
-                    color = glass.primaryAccentSoftBg,
+                    shape = btnShape,
+                    color = Color.Transparent,
+                    border = BorderStroke(0.85.dp, glass.primaryAccent.copy(alpha = 0.30f)),
                     modifier = Modifier
                         .size(34.dp)
-                        .clip(RoundedCornerShape(11.dp))
+                        .shadow(3.dp, btnShape, spotColor = glass.primaryAccent.copy(alpha = 0.25f))
+                        .clip(btnShape)
+                        .background(
+                            Brush.verticalGradient(
+                                colors = if (glass.isDark) {
+                                    listOf(Color(0xFF243763), glass.primaryAccentSoftBg)
+                                } else {
+                                    listOf(Color.White, glass.primaryAccentSoftBg)
+                                }
+                            ),
+                            btnShape
+                        )
                         .clickable { onTestAlert() }
                         .testTag("test_alert_period_${period.id}")
                 ) {
@@ -680,12 +830,23 @@ fun PeriodCardItem(
 
                 if (isAdmin) {
                     Surface(
-                        shape = RoundedCornerShape(11.dp),
-                        color = glass.cardBackground,
-                        border = BorderStroke(1.dp, glass.cardBorder),
+                        shape = btnShape,
+                        color = Color.Transparent,
+                        border = BorderStroke(0.85.dp, glass.cardBorder),
                         modifier = Modifier
                             .size(34.dp)
-                            .clip(RoundedCornerShape(11.dp))
+                            .shadow(3.dp, btnShape, spotColor = glass.primaryAccent.copy(alpha = 0.20f))
+                            .clip(btnShape)
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = if (glass.isDark) {
+                                        listOf(Color(0xFF233250), Color(0xFF172238))
+                                    } else {
+                                        listOf(Color.White, Color(0xFFF0F5FE))
+                                    }
+                                ),
+                                btnShape
+                            )
                             .clickable { onEdit() }
                             .testTag("edit_period_${period.id}")
                     ) {
@@ -700,11 +861,23 @@ fun PeriodCardItem(
                     }
 
                     Surface(
-                        shape = RoundedCornerShape(11.dp),
-                        color = glass.dangerBg,
+                        shape = btnShape,
+                        color = Color.Transparent,
+                        border = BorderStroke(0.85.dp, glass.dangerText.copy(alpha = 0.32f)),
                         modifier = Modifier
                             .size(34.dp)
-                            .clip(RoundedCornerShape(11.dp))
+                            .shadow(3.dp, btnShape, spotColor = glass.dangerText.copy(alpha = 0.25f))
+                            .clip(btnShape)
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = if (glass.isDark) {
+                                        listOf(glass.dangerBg, Color(0xFF2C0808))
+                                    } else {
+                                        listOf(Color.White, glass.dangerBg)
+                                    }
+                                ),
+                                btnShape
+                            )
                             .clickable { onDelete() }
                     ) {
                         Box(contentAlignment = Alignment.Center) {
@@ -721,3 +894,4 @@ fun PeriodCardItem(
         }
     }
 }
+

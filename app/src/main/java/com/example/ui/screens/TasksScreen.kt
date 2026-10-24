@@ -22,6 +22,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -38,6 +40,8 @@ import com.example.ui.components.FamilySectionHeader
 import com.example.ui.components.FamilyStatusChip
 import com.example.ui.components.SoftGlassScreenBackground
 import com.example.ui.components.TimeFormatUtils
+import com.example.ui.components.VelvetSearchContainer
+import com.example.ui.components.velvetNeumorphicSheen
 import com.example.ui.dialogs.TaskDetailDialog
 import com.example.ui.theme.*
 import java.time.DayOfWeek
@@ -89,7 +93,7 @@ private fun formatHebrewDashboardDate(date: LocalDate, isHebrew: Boolean): Strin
         8 -> "אוגוסט"
         9 -> "ספטמבר"
         10 -> "אוקטובר"
-        11 -> "נובמבר"
+        11 -> "נונובמבר".removePrefix("נו")
         12 -> "דצמבר"
         else -> ""
     }
@@ -210,12 +214,12 @@ fun TasksScreen(
                     .fillMaxSize()
                     .testTag("tasks_screen")
             ) {
-                // 1. Soft Glass Hero Greeting + Current Date + Family Profile Banner
+                // 1. Luxury Soft Neumorphism Hero Greeting + Current Date + Family Profile Banner
                 item {
                     FamilyGlassCard(
                         cornerRadius = 26.dp,
                         isTintedBlue = true,
-                        elevation = 5.dp,
+                        elevation = 8.dp,
                         onClick = if (currentMember.isParent) onOpenFamilyAdmin else null,
                         contentPadding = PaddingValues(horizontal = 18.dp, vertical = 16.dp),
                         modifier = Modifier
@@ -232,7 +236,7 @@ fun TasksScreen(
                                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 modifier = Modifier.weight(1f)
                             ) {
-                                // Stacked FamilyMemberAvatars
+                                // Stacked 3D FamilyMemberAvatars
                                 Row(horizontalArrangement = Arrangement.spacedBy((-8).dp)) {
                                     members.take(4).forEach { m ->
                                         FamilyMemberAvatar(
@@ -243,7 +247,7 @@ fun TasksScreen(
                                     }
                                 }
 
-                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                     Text(
                                         text = formatDashboardGreeting(currentMember.name, isHebrew),
                                         style = MaterialTheme.typography.titleMedium.copy(
@@ -265,18 +269,36 @@ fun TasksScreen(
                                             "המשפחה שלנו • ${members.size} חברים פעילים"
                                         else
                                             "Our Family • ${members.size} active members",
-                                        containerColor = glass.cardBackground.copy(alpha = 0.85f),
+                                        containerColor = glass.cardBackground.copy(alpha = 0.88f),
                                         contentColor = glass.textSecondary
                                     )
                                 }
                             }
 
                             if (currentMember.isParent) {
+                                val manageShape = RoundedCornerShape(14.dp)
                                 Surface(
-                                    shape = RoundedCornerShape(14.dp),
-                                    color = glass.cardBackground,
-                                    border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.35f)),
-                                    shadowElevation = 2.dp
+                                    shape = manageShape,
+                                    color = Color.Transparent,
+                                    border = BorderStroke(0.95.dp, glass.primaryAccent.copy(alpha = 0.35f)),
+                                    modifier = Modifier
+                                        .shadow(
+                                            elevation = 4.dp,
+                                            shape = manageShape,
+                                            spotColor = glass.primaryAccent.copy(alpha = 0.25f)
+                                        )
+                                        .clip(manageShape)
+                                        .background(
+                                            Brush.verticalGradient(
+                                                colors = if (glass.isDark) {
+                                                    listOf(Color(0xFF243456), Color(0xFF18233C))
+                                                } else {
+                                                    listOf(Color.White, Color(0xFFEEF4FE))
+                                                }
+                                            ),
+                                            manageShape
+                                        )
+                                        .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 14.dp)
                                 ) {
                                     Row(
                                         modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
@@ -309,7 +331,7 @@ fun TasksScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         DashboardQuickShortcutChip(
                             emoji = "📅",
@@ -332,22 +354,23 @@ fun TasksScreen(
                     }
                 }
 
-                // 3. Soft Glass Bento Dashboard Summary Cards (Points + Completed + Live Family Overview)
+                // 3. Luxury Soft Neumorphism Bento Dashboard Summary Cards (Points + Completed + Live Family Overview)
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            // Total Points Soft Glass Card
+                            // Total Points Velvet Neumorphic Card
                             FamilyGlassCard(
                                 cornerRadius = 22.dp,
                                 accentColor = GoogleYellow,
+                                elevation = 7.dp,
                                 onClick = onOpenRewards,
                                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
                                 modifier = Modifier
                                     .weight(1f)
-                                    .heightIn(min = 82.dp)
+                                    .heightIn(min = 84.dp)
                                     .testTag("stat_card_points")
                             ) {
                                 Row(
@@ -371,11 +394,35 @@ fun TasksScreen(
                                             )
                                         )
                                     }
+                                    val trophyShape = RoundedCornerShape(14.dp)
                                     Surface(
-                                        shape = RoundedCornerShape(14.dp),
-                                        color = (if (glass.isDark) glass.warningText else PastelYellowBorder).copy(alpha = 0.30f),
-                                        border = BorderStroke(1.dp, (if (glass.isDark) glass.warningText else PastelYellowAccent).copy(alpha = 0.35f)),
-                                        modifier = Modifier.size(40.dp)
+                                        shape = trophyShape,
+                                        color = Color.Transparent,
+                                        border = BorderStroke(1.dp, (if (glass.isDark) glass.warningText else PastelYellowAccent).copy(alpha = 0.40f)),
+                                        modifier = Modifier
+                                            .size(42.dp)
+                                            .shadow(
+                                                elevation = 4.dp,
+                                                shape = trophyShape,
+                                                spotColor = GoogleYellow.copy(alpha = 0.35f)
+                                            )
+                                            .background(
+                                                Brush.verticalGradient(
+                                                    colors = if (glass.isDark) {
+                                                        listOf(
+                                                            glass.warningText.copy(alpha = 0.32f),
+                                                            glass.warningText.copy(alpha = 0.16f)
+                                                        )
+                                                    } else {
+                                                        listOf(
+                                                            Color.White,
+                                                            PastelYellowBorder.copy(alpha = 0.55f)
+                                                        )
+                                                    }
+                                                ),
+                                                trophyShape
+                                            )
+                                            .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 14.dp, accentColor = GoogleYellow)
                                     ) {
                                         Box(contentAlignment = Alignment.Center) {
                                             Icon(
@@ -389,15 +436,16 @@ fun TasksScreen(
                                 }
                             }
 
-                            // Completed Chores Soft Glass Card
+                            // Completed Chores Velvet Neumorphic Card
                             FamilyGlassCard(
                                 cornerRadius = 22.dp,
                                 accentColor = GoogleGreen,
+                                elevation = 7.dp,
                                 onClick = { filterTab = 3 },
                                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
                                 modifier = Modifier
                                     .weight(1f)
-                                    .heightIn(min = 82.dp)
+                                    .heightIn(min = 84.dp)
                                     .testTag("stat_card_completed")
                             ) {
                                 Row(
@@ -421,11 +469,35 @@ fun TasksScreen(
                                             )
                                         )
                                     }
+                                    val doneShape = RoundedCornerShape(14.dp)
                                     Surface(
-                                        shape = RoundedCornerShape(14.dp),
-                                        color = (if (glass.isDark) glass.successText else PastelGreenBorder).copy(alpha = 0.30f),
-                                        border = BorderStroke(1.dp, (if (glass.isDark) glass.successText else PastelGreenAccent).copy(alpha = 0.35f)),
-                                        modifier = Modifier.size(40.dp)
+                                        shape = doneShape,
+                                        color = Color.Transparent,
+                                        border = BorderStroke(1.dp, (if (glass.isDark) glass.successText else PastelGreenAccent).copy(alpha = 0.40f)),
+                                        modifier = Modifier
+                                            .size(42.dp)
+                                            .shadow(
+                                                elevation = 4.dp,
+                                                shape = doneShape,
+                                                spotColor = GoogleGreen.copy(alpha = 0.35f)
+                                            )
+                                            .background(
+                                                Brush.verticalGradient(
+                                                    colors = if (glass.isDark) {
+                                                        listOf(
+                                                            glass.successText.copy(alpha = 0.32f),
+                                                            glass.successText.copy(alpha = 0.16f)
+                                                        )
+                                                    } else {
+                                                        listOf(
+                                                            Color.White,
+                                                            PastelGreenBorder.copy(alpha = 0.55f)
+                                                        )
+                                                    }
+                                                ),
+                                                doneShape
+                                            )
+                                            .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 14.dp, accentColor = GoogleGreen)
                                     ) {
                                         Box(contentAlignment = Alignment.Center) {
                                             Icon(
@@ -477,14 +549,14 @@ fun TasksScreen(
                     }
                 }
 
-                // 4. Soft Glass Points Leader Card
+                // 4. Velvet Neumorphic Points Leader Card
                 item {
                     FamilyGlassCard(
                         cornerRadius = 20.dp,
                         accentColor = SoftLavender,
-                        elevation = 3.dp,
+                        elevation = 6.dp,
                         onClick = onOpenRewards,
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 11.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("achievement_champion_card")
@@ -499,11 +571,35 @@ fun TasksScreen(
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 modifier = Modifier.weight(1f)
                             ) {
+                                val crownShape = RoundedCornerShape(12.dp)
                                 Surface(
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = SoftLavender.copy(alpha = if (glass.isDark) 0.28f else 0.16f),
-                                    border = BorderStroke(1.dp, SoftLavender.copy(alpha = 0.4f)),
-                                    modifier = Modifier.size(34.dp)
+                                    shape = crownShape,
+                                    color = Color.Transparent,
+                                    border = BorderStroke(1.dp, SoftLavender.copy(alpha = 0.42f)),
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .shadow(
+                                            elevation = 4.dp,
+                                            shape = crownShape,
+                                            spotColor = SoftLavender.copy(alpha = 0.35f)
+                                        )
+                                        .background(
+                                            Brush.verticalGradient(
+                                                colors = if (glass.isDark) {
+                                                    listOf(
+                                                        SoftLavender.copy(alpha = 0.36f),
+                                                        SoftLavender.copy(alpha = 0.18f)
+                                                    )
+                                                } else {
+                                                    listOf(
+                                                        Color.White,
+                                                        SoftLavender.copy(alpha = 0.22f)
+                                                    )
+                                                }
+                                            ),
+                                            crownShape
+                                        )
+                                        .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 12.dp, accentColor = SoftLavender)
                                 ) {
                                     Box(contentAlignment = Alignment.Center) {
                                         Icon(
@@ -540,7 +636,7 @@ fun TasksScreen(
                     }
                 }
 
-                // 5. Role-Appropriate Soft Glass Section Header + Primary Button
+                // 5. Role-Appropriate Velvet Section Header + Primary Button
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -566,12 +662,12 @@ fun TasksScreen(
                     }
                 }
 
-                // 6. Soft Glass Filter Tabs, Search Bar & Member Chips
+                // 6. Luxury Soft Neumorphism Filter Tabs, Recessed Search Bar & Member Chips
                 item {
                     FamilyGlassCard(
-                        cornerRadius = 22.dp,
-                        elevation = 2.dp,
-                        contentPadding = PaddingValues(12.dp),
+                        cornerRadius = 24.dp,
+                        elevation = 6.dp,
+                        contentPadding = PaddingValues(13.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -601,64 +697,91 @@ fun TasksScreen(
                                 )
                             }
 
-                            OutlinedTextField(
-                                value = searchQuery,
-                                onValueChange = { searchQuery = it },
-                                placeholder = {
-                                    Text(
-                                        text = if (isHebrew) "חיפוש משימות..." else "Search tasks...",
-                                        style = MaterialTheme.typography.bodySmall.copy(color = glass.textMuted)
-                                    )
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Default.Search,
-                                        contentDescription = null,
-                                        tint = glass.primaryAccent,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                },
-                                trailingIcon = {
-                                    if (searchQuery.isNotBlank()) {
-                                        IconButton(onClick = { searchQuery = "" }) {
-                                            Icon(
-                                                imageVector = Icons.Default.Close,
-                                                contentDescription = "Clear",
-                                                tint = glass.textSecondary,
-                                                modifier = Modifier.size(18.dp)
-                                            )
+                            VelvetSearchContainer(
+                                cornerRadius = 16.dp,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                OutlinedTextField(
+                                    value = searchQuery,
+                                    onValueChange = { searchQuery = it },
+                                    placeholder = {
+                                        Text(
+                                            text = if (isHebrew) "חיפוש משימות..." else "Search tasks...",
+                                            style = MaterialTheme.typography.bodySmall.copy(color = glass.textMuted)
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Search,
+                                            contentDescription = null,
+                                            tint = glass.primaryAccent,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
+                                    trailingIcon = {
+                                        if (searchQuery.isNotBlank()) {
+                                            IconButton(onClick = { searchQuery = "" }) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Close,
+                                                    contentDescription = "Clear",
+                                                    tint = glass.textSecondary,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
                                         }
-                                    }
-                                },
-                                singleLine = true,
-                                shape = RoundedCornerShape(16.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedContainerColor = glass.screenBackground,
-                                    unfocusedContainerColor = glass.screenBackground.copy(alpha = 0.7f),
-                                    focusedBorderColor = glass.primaryAccent,
-                                    unfocusedBorderColor = glass.cardBorder
-                                ),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("task_search_field")
-                            )
+                                    },
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(16.dp),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedContainerColor = Color.Transparent,
+                                        unfocusedContainerColor = Color.Transparent,
+                                        focusedBorderColor = glass.primaryAccent.copy(alpha = 0.55f),
+                                        unfocusedBorderColor = Color.Transparent
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("task_search_field")
+                                )
+                            }
 
                             LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 item {
                                     val isAllSelected = selectedMemberFilter == null
+                                    val chipShape = RoundedCornerShape(14.dp)
                                     Surface(
-                                        shape = RoundedCornerShape(14.dp),
-                                        color = if (isAllSelected) glass.primaryAccent else glass.screenBackground,
+                                        shape = chipShape,
+                                        color = Color.Transparent,
                                         border = BorderStroke(
-                                            1.dp,
+                                            0.9.dp,
                                             if (isAllSelected) glass.primaryAccent else glass.cardBorder
                                         ),
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(14.dp))
+                                            .shadow(
+                                                elevation = if (isAllSelected) 4.dp else 2.dp,
+                                                shape = chipShape,
+                                                spotColor = if (isAllSelected) glass.primaryAccent.copy(alpha = 0.35f) else Color.Black.copy(alpha = 0.15f)
+                                            )
+                                            .clip(chipShape)
+                                            .background(
+                                                Brush.verticalGradient(
+                                                    colors = if (isAllSelected) {
+                                                        if (glass.isDark) {
+                                                            listOf(Color(0xFF60A5FA), Color(0xFF3B82F6))
+                                                        } else {
+                                                            listOf(Color(0xFF3B82F6), Color(0xFF2563EB))
+                                                        }
+                                                    } else if (glass.isDark) {
+                                                        listOf(Color(0xFF1F2B44), Color(0xFF151F32))
+                                                    } else {
+                                                        listOf(Color.White, Color(0xFFF1F5FD))
+                                                    }
+                                                ),
+                                                chipShape
+                                            )
                                             .clickable { onFilterChange(null) }
                                             .testTag("filter_member_all")
                                     ) {
@@ -667,7 +790,7 @@ fun TasksScreen(
                                             style = MaterialTheme.typography.labelMedium.copy(
                                                 fontWeight = FontWeight.Bold,
                                                 color = if (isAllSelected) {
-                                                    if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                                    Color.White
                                                 } else {
                                                     glass.textSecondary
                                                 }
@@ -679,15 +802,37 @@ fun TasksScreen(
 
                                 items(members) { m ->
                                     val isSelected = selectedMemberFilter == m.id
+                                    val chipShape = RoundedCornerShape(14.dp)
                                     Surface(
-                                        shape = RoundedCornerShape(14.dp),
-                                        color = if (isSelected) glass.primaryAccentSoftBg else glass.screenBackground,
+                                        shape = chipShape,
+                                        color = Color.Transparent,
                                         border = BorderStroke(
-                                            if (isSelected) 1.5.dp else 1.dp,
+                                            if (isSelected) 1.3.dp else 0.9.dp,
                                             if (isSelected) glass.primaryAccent else glass.cardBorder
                                         ),
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(14.dp))
+                                            .shadow(
+                                                elevation = if (isSelected) 4.dp else 2.dp,
+                                                shape = chipShape,
+                                                spotColor = if (isSelected) glass.primaryAccent.copy(alpha = 0.30f) else Color.Black.copy(alpha = 0.15f)
+                                            )
+                                            .clip(chipShape)
+                                            .background(
+                                                Brush.verticalGradient(
+                                                    colors = if (isSelected) {
+                                                        if (glass.isDark) {
+                                                            listOf(Color(0xFF263B6A), Color(0xFF1B2B4E))
+                                                        } else {
+                                                            listOf(Color.White, Color(0xFFDFEBFE))
+                                                        }
+                                                    } else if (glass.isDark) {
+                                                        listOf(Color(0xFF1F2B44), Color(0xFF151F32))
+                                                    } else {
+                                                        listOf(Color.White, Color(0xFFF1F5FD))
+                                                    }
+                                                ),
+                                                chipShape
+                                            )
                                             .clickable { onFilterChange(m.id) }
                                             .testTag("filter_member_${m.id}")
                                     ) {
@@ -853,31 +998,56 @@ private fun DashboardQuickShortcutChip(
     isPrimary: Boolean = false
 ) {
     val glass = LocalSoftGlassColors.current
+    val chipShape = RoundedCornerShape(16.dp)
+    val surfaceGradient = Brush.verticalGradient(
+        colors = if (isPrimary) {
+            listOf(Color(0xFF3B82F6), Color(0xFF2563EB))
+        } else if (glass.isDark) {
+            listOf(Color(0xFF22304C), Color(0xFF162035))
+        } else {
+            listOf(Color.White, Color(0xFFF0F5FE))
+        }
+    )
+
     Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = if (isPrimary) glass.primaryAccent else glass.cardBackground,
+        shape = chipShape,
+        color = Color.Transparent,
         border = BorderStroke(
-            1.1.dp,
-            if (isPrimary) glass.primaryAccent else glass.primaryAccent.copy(alpha = 0.25f)
+            0.95.dp,
+            Brush.verticalGradient(
+                colors = if (glass.isDark) {
+                    listOf(glass.primaryAccent.copy(alpha = 0.42f), glass.cardBorder)
+                } else {
+                    listOf(Color.White, glass.primaryAccent.copy(alpha = 0.26f))
+                }
+            )
         ),
-        shadowElevation = if (isPrimary) 4.dp else 2.dp,
         modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
+            .shadow(
+                elevation = 5.dp,
+                shape = chipShape,
+                ambientColor = if (glass.isDark) Color.Black.copy(alpha = 0.7f) else Color(0xFF1E3A8A).copy(alpha = 0.14f),
+                spotColor = if (glass.isDark) Color.Black.copy(alpha = 0.8f) else Color(0xFF1E3A8A).copy(alpha = 0.22f)
+            )
+            .clip(chipShape)
+            .background(surfaceGradient, chipShape)
+            .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 16.dp)
             .clickable(onClick = onClick)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+            modifier = Modifier.padding(horizontal = 13.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(7.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Surface(
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(9.dp),
                 color = if (isPrimary) {
                     Color.White.copy(alpha = 0.22f)
                 } else {
                     glass.primaryAccentSoftBg
                 },
-                modifier = Modifier.size(24.dp)
+                border = BorderStroke(0.7.dp, glass.primaryAccent.copy(alpha = 0.25f)),
+                modifier = Modifier.size(26.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Text(text = emoji, fontSize = 13.sp)
@@ -888,7 +1058,7 @@ private fun DashboardQuickShortcutChip(
                 style = MaterialTheme.typography.labelMedium.copy(
                     fontWeight = FontWeight.ExtraBold,
                     color = if (isPrimary) {
-                        if (glass.isDark) Color(0xFF0B1120) else Color.White
+                        Color.White
                     } else {
                         glass.textPrimary
                     }
@@ -909,7 +1079,7 @@ private fun MiniOverviewMetricCard(
     val glass = LocalSoftGlassColors.current
     FamilyGlassCard(
         cornerRadius = 18.dp,
-        elevation = 2.dp,
+        elevation = 5.dp,
         onClick = onClick,
         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp),
         modifier = modifier
@@ -918,16 +1088,34 @@ private fun MiniOverviewMetricCard(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            val iconShape = RoundedCornerShape(10.dp)
             Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = glass.primaryAccentSoftBg.copy(alpha = 0.7f),
-                modifier = Modifier.size(28.dp)
+                shape = iconShape,
+                color = Color.Transparent,
+                border = BorderStroke(0.8.dp, glass.primaryAccent.copy(alpha = 0.28f)),
+                modifier = Modifier
+                    .size(30.dp)
+                    .shadow(
+                        elevation = 2.dp,
+                        shape = iconShape,
+                        spotColor = glass.primaryAccent.copy(alpha = 0.22f)
+                    )
+                    .background(
+                        Brush.verticalGradient(
+                            colors = if (glass.isDark) {
+                                listOf(Color(0xFF253759), glass.primaryAccentSoftBg)
+                            } else {
+                                listOf(Color.White, glass.primaryAccentSoftBg)
+                            }
+                        ),
+                        iconShape
+                    )
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Text(text = emoji, fontSize = 14.sp)
                 }
             }
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(5.dp))
             Text(
                 text = valueText,
                 style = MaterialTheme.typography.labelLarge.copy(
@@ -978,11 +1166,11 @@ private fun TaskItemCardModern(
 
     val checkBgColor by animateColorAsState(
         targetValue = when {
-            isSaving -> glass.primaryAccent.copy(alpha = 0.18f)
+            isSaving -> glass.primaryAccent.copy(alpha = 0.22f)
             isFailed -> glass.dangerBg
             isFullyApproved -> GoogleGreen
             isPendingApproval -> GoogleYellow
-            else -> glass.primaryAccentSoftBg.copy(alpha = 0.35f)
+            else -> glass.primaryAccentSoftBg.copy(alpha = if (glass.isDark) 0.50f else 0.65f)
         },
         animationSpec = spring(),
         label = "checkBg"
@@ -1004,7 +1192,7 @@ private fun TaskItemCardModern(
         cornerRadius = 22.dp,
         isSelected = isSaving,
         accentColor = cardAccentColor,
-        elevation = 3.dp,
+        elevation = 6.dp,
         onClick = onCardClick,
         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 13.dp),
         modifier = Modifier
@@ -1016,24 +1204,40 @@ private fun TaskItemCardModern(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Tactile Soft Glass Completion Button
+            // 3D Luxury Soft Neumorphic Completion Orb
+            val orbBorderColor = when {
+                isFailed -> glass.dangerText
+                isSaving -> glass.primaryAccent
+                isFullyApproved -> GoogleGreen
+                isPendingApproval -> GoogleYellow
+                canToggle -> glass.primaryAccent.copy(alpha = 0.72f)
+                else -> glass.cardBorder
+            }
             Box(
                 modifier = Modifier
-                    .size(36.dp)
+                    .size(38.dp)
+                    .shadow(
+                        elevation = if (task.isCompleted) 5.dp else 3.dp,
+                        shape = CircleShape,
+                        spotColor = orbBorderColor.copy(alpha = 0.45f)
+                    )
                     .clip(CircleShape)
-                    .background(checkBgColor)
-                    .border(
-                        2.dp,
-                        when {
-                            isFailed -> glass.dangerText
-                            isSaving -> glass.primaryAccent
-                            isFullyApproved -> GoogleGreen
-                            isPendingApproval -> GoogleYellow
-                            canToggle -> glass.primaryAccent.copy(alpha = 0.65f)
-                            else -> glass.cardBorder
-                        },
+                    .background(
+                        Brush.verticalGradient(
+                            colors = if (task.isCompleted) {
+                                listOf(
+                                    checkBgColor,
+                                    checkBgColor.copy(alpha = 0.85f)
+                                )
+                            } else if (glass.isDark) {
+                                listOf(Color(0xFF243454), checkBgColor)
+                            } else {
+                                listOf(Color.White, checkBgColor)
+                            }
+                        ),
                         CircleShape
                     )
+                    .border(1.6.dp, orbBorderColor, CircleShape)
                     .clickable(enabled = !isSaving && canToggle) { onToggle() }
                     .testTag("task_toggle_${task.id}"),
                 contentAlignment = Alignment.Center
@@ -1067,7 +1271,7 @@ private fun TaskItemCardModern(
 
             Spacer(modifier = Modifier.width(12.dp))
 
-            // Task Title, Optional Description, and Soft Glass Status Chips
+            // Task Title, Optional Description, and Velvet Status Chips
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = task.title,
@@ -1168,28 +1372,47 @@ private fun TaskItemCardModern(
 
             Spacer(modifier = Modifier.width(8.dp))
 
-            // Category Squircle Badge + Contextual Menu for PARENT secondary actions
+            // 3D Raised Category Squircle Badge + Contextual Menu for PARENT secondary actions
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
+                val catShape = RoundedCornerShape(14.dp)
+                val catBaseBg = if (glass.isDark) {
+                    glass.primaryAccentSoftBg.copy(alpha = 0.65f)
+                } else {
+                    when (task.category) {
+                        TaskCategory.BEDROOM -> GoogleBlueLight
+                        TaskCategory.DISHES -> PastelGreenBackground
+                        TaskCategory.HOMEWORK -> SoftLavenderLight
+                        TaskCategory.CLEANING -> SoftTealLight
+                        TaskCategory.GROCERIES -> WarmCoralLight
+                        TaskCategory.PETS -> PastelYellowBackground
+                        else -> glass.primaryAccentSoftBg
+                    }
+                }
                 Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = if (glass.isDark) {
-                        glass.primaryAccentSoftBg.copy(alpha = 0.55f)
-                    } else {
-                        when (task.category) {
-                            TaskCategory.BEDROOM -> GoogleBlueLight
-                            TaskCategory.DISHES -> PastelGreenBackground
-                            TaskCategory.HOMEWORK -> SoftLavenderLight
-                            TaskCategory.CLEANING -> SoftTealLight
-                            TaskCategory.GROCERIES -> WarmCoralLight
-                            TaskCategory.PETS -> PastelYellowBackground
-                            else -> glass.primaryAccentSoftBg
-                        }
-                    },
-                    border = BorderStroke(1.dp, glass.cardBorder),
-                    modifier = Modifier.size(42.dp)
+                    shape = catShape,
+                    color = Color.Transparent,
+                    border = BorderStroke(0.9.dp, glass.cardBorder),
+                    modifier = Modifier
+                        .size(42.dp)
+                        .shadow(
+                            elevation = 3.dp,
+                            shape = catShape,
+                            spotColor = glass.primaryAccent.copy(alpha = 0.20f)
+                        )
+                        .background(
+                            Brush.verticalGradient(
+                                colors = if (glass.isDark) {
+                                    listOf(Color(0xFF253555), catBaseBg)
+                                } else {
+                                    listOf(Color.White, catBaseBg)
+                                }
+                            ),
+                            catShape
+                        )
+                        .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 14.dp)
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Text(text = task.category.defaultEmoji, fontSize = 19.sp)
@@ -1309,17 +1532,38 @@ private fun RowScope.FilterPillChip(
     onClick: () -> Unit
 ) {
     val glass = LocalSoftGlassColors.current
+    val pillShape = RoundedCornerShape(14.dp)
+    val pillBrush = Brush.verticalGradient(
+        colors = if (isSelected) {
+            if (glass.isDark) {
+                listOf(Color(0xFF60A5FA), Color(0xFF3B82F6), Color(0xFF4F46E5))
+            } else {
+                listOf(Color(0xFF3B82F6), Color(0xFF2563EB), Color(0xFF1D4ED8))
+            }
+        } else if (glass.isDark) {
+            listOf(Color(0xFF1D2840), Color(0xFF141D30))
+        } else {
+            listOf(Color(0xFFFFFFFF), Color(0xFFEEF3FC))
+        }
+    )
+
     Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = if (isSelected) glass.primaryAccent else glass.screenBackground,
+        shape = pillShape,
+        color = Color.Transparent,
         border = BorderStroke(
-            1.dp,
-            if (isSelected) glass.primaryAccent else glass.cardBorder
+            0.9.dp,
+            if (isSelected) Color.White.copy(alpha = 0.45f) else glass.cardBorder
         ),
-        shadowElevation = if (isSelected) 2.dp else 0.dp,
         modifier = Modifier
             .weight(1f)
-            .clip(RoundedCornerShape(14.dp))
+            .shadow(
+                elevation = if (isSelected) 5.dp else 2.dp,
+                shape = pillShape,
+                ambientColor = if (isSelected) glass.primaryAccent.copy(alpha = 0.35f) else Color.Black.copy(alpha = 0.12f),
+                spotColor = if (isSelected) glass.primaryAccent.copy(alpha = 0.45f) else Color.Black.copy(alpha = 0.18f)
+            )
+            .clip(pillShape)
+            .background(pillBrush, pillShape)
             .clickable { onClick() }
     ) {
         Box(
@@ -1330,7 +1574,7 @@ private fun RowScope.FilterPillChip(
                 text = label,
                 style = MaterialTheme.typography.labelMedium.copy(
                     color = if (isSelected) {
-                        if (glass.isDark) Color(0xFF0B1120) else Color.White
+                        Color.White
                     } else {
                         glass.textSecondary
                     },
@@ -1340,6 +1584,7 @@ private fun RowScope.FilterPillChip(
         }
     }
 }
+
 
 @Composable
 fun TaskCardItem(

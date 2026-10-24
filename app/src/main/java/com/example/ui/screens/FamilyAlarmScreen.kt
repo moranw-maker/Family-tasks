@@ -104,10 +104,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
+import com.example.ui.components.FamilyGlassCard
+import com.example.ui.components.FamilyPrimaryButton
+import com.example.ui.components.SoftGlassScreenBackground
+import com.example.ui.components.velvetNeumorphicSheen
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -314,116 +319,108 @@ fun FamilyAlarmScreen(
 
     val glassColors = LocalSoftGlassColors.current
 
-    BoxWithConstraints(
+    SoftGlassScreenBackground(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = if (glassColors.isDark) {
-                        listOf(
-                            glassColors.screenBackgroundTop,
-                            glassColors.screenBackgroundMid,
-                            glassColors.screenBackgroundBottom
-                        )
-                    } else {
-                        listOf(
-                            Color(0xFFEAF3FE),
-                            Color(0xFFF6F9FE),
-                            Color.White
-                        )
-                    }
-                )
-            )
             .testTag("family_alarm_screen")
     ) {
-        val isCompactScreen = maxWidth < 360.dp
-        val horizontalPad = if (isCompactScreen) 12.dp else 16.dp
-
-        LazyColumn(
-            contentPadding = PaddingValues(
-                start = horizontalPad,
-                end = horizontalPad,
-                top = 12.dp,
-                bottom = 96.dp
-            ),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier
-                .fillMaxSize()
-                .widthIn(max = 640.dp)
-                .align(Alignment.TopCenter)
-                .testTag("family_alarms_list")
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize()
         ) {
-            // 1. Clean Soft Glass Header ("שעונים מעוררים" + Prominent Compact Blue Add Button)
-            item(key = "main_alarm_header") {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Surface(
-                            shape = CircleShape,
-                            color = if (glassColors.isDark) glassColors.primaryAccentSoft else Color(0xFFDCEBFE),
-                            modifier = Modifier.size(40.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Default.Alarm,
-                                    contentDescription = null,
-                                    tint = if (glassColors.isDark) glassColors.primaryAccent else GoogleBlueDark,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
-                        }
-                        Text(
-                            text = if (isHebrew) "שעונים מעוררים" else "Alarms",
-                            style = MaterialTheme.typography.headlineSmall.copy(
-                                fontWeight = FontWeight.ExtraBold,
-                                color = if (glassColors.isDark) glassColors.textPrimary else Color(0xFF15366B),
-                                fontSize = 23.sp
-                            ),
-                            modifier = Modifier.testTag("main_alarm_screen_title")
-                        )
-                    }
+            val isCompactScreen = maxWidth < 360.dp
+            val horizontalPad = if (isCompactScreen) 12.dp else 16.dp
 
-                    // Prominent compact blue Add (+) button
-                    Surface(
-                        onClick = {
-                            alarmToEdit = null
-                            showAddOrEditDialog = true
-                        },
-                        shape = RoundedCornerShape(16.dp),
-                        color = GoogleBlue,
-                        contentColor = Color.White,
-                        shadowElevation = 4.dp,
-                        modifier = Modifier
-                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                            .testTag("add_alarm_fab")
+            LazyColumn(
+                contentPadding = PaddingValues(
+                    start = horizontalPad,
+                    end = horizontalPad,
+                    top = 12.dp,
+                    bottom = 96.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .widthIn(max = 640.dp)
+                    .align(Alignment.TopCenter)
+                    .testTag("family_alarms_list")
+            ) {
+                // 1. Luxury Soft Neumorphism Header ("שעונים מעוררים" + Prominent Raised 3D Add Button)
+                item(key = "main_alarm_header") {
+                    FamilyGlassCard(
+                        cornerRadius = 24.dp,
+                        isTintedBlue = true,
+                        elevation = 7.dp,
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Add,
-                                contentDescription = if (isHebrew) "שעון מעורר חדש" else "Add Alarm",
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Text(
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = Color.Transparent,
+                                    border = BorderStroke(1.dp, glassColors.primaryAccent.copy(alpha = 0.35f)),
+                                    modifier = Modifier
+                                        .size(42.dp)
+                                        .shadow(
+                                            elevation = 4.dp,
+                                            shape = RoundedCornerShape(14.dp),
+                                            spotColor = glassColors.primaryAccent.copy(alpha = 0.30f)
+                                        )
+                                        .background(
+                                            Brush.verticalGradient(
+                                                colors = if (glassColors.isDark) {
+                                                    listOf(Color(0xFF25375D), glassColors.primaryAccentSoft)
+                                                } else {
+                                                    listOf(Color.White, Color(0xFFDCEBFE))
+                                                }
+                                            ),
+                                            RoundedCornerShape(14.dp)
+                                        )
+                                        .velvetNeumorphicSheen(isDark = glassColors.isDark, cornerRadius = 14.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = Icons.Default.Alarm,
+                                            contentDescription = null,
+                                            tint = glassColors.primaryAccent,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = if (isHebrew) "שעונים מעוררים" else "Alarms",
+                                    style = MaterialTheme.typography.headlineSmall.copy(
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = glassColors.textPrimary,
+                                        fontSize = 22.sp
+                                    ),
+                                    modifier = Modifier.testTag("main_alarm_screen_title")
+                                )
+                            }
+
+                            // Prominent Raised 3D Velvet Add (+) button
+                            FamilyPrimaryButton(
                                 text = if (isHebrew) "חדש" else "New",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp
+                                leadingIcon = Icons.Default.Add,
+                                onClick = {
+                                    alarmToEdit = null
+                                    showAddOrEditDialog = true
+                                },
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                                modifier = Modifier
+                                    .defaultMinSize(minWidth = 48.dp, minHeight = 44.dp)
+                                    .testTag("add_alarm_fab")
                             )
                         }
                     }
                 }
-            }
 
             // 2. Auto-Dismissing Green Success Message (7 Seconds)
             item(key = "alarm_saved_success_banner_slot") {
@@ -609,25 +606,26 @@ fun FamilyAlarmScreen(
             // 5. Alarms List or Empty State
             if (visibleAlarms.isEmpty()) {
                 item(key = "empty_alarms_state") {
-                    Surface(
-                        shape = RoundedCornerShape(22.dp),
-                        color = if (glassColors.isDark) glassColors.cardBackground else Color.White.copy(alpha = 0.92f),
-                        border = BorderStroke(1.dp, if (glassColors.isDark) glassColors.cardBorder else Color(0xFFDCE8F8)),
-                        shadowElevation = 2.dp,
+                    FamilyGlassCard(
+                        cornerRadius = 24.dp,
+                        isTintedBlue = true,
+                        elevation = 7.dp,
+                        contentPadding = PaddingValues(vertical = 36.dp, horizontal = 20.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 16.dp)
                     ) {
                         Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 36.dp, horizontal = 20.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Surface(
                                 shape = CircleShape,
-                                color = if (glassColors.isDark) glassColors.primaryAccentSoft else Color(0xFFEAF3FE),
-                                modifier = Modifier.size(68.dp)
+                                color = glassColors.primaryAccentSoft,
+                                border = BorderStroke(1.dp, glassColors.primaryAccent.copy(alpha = 0.30f)),
+                                modifier = Modifier
+                                    .size(68.dp)
+                                    .shadow(4.dp, CircleShape, spotColor = glassColors.primaryAccent.copy(alpha = 0.25f))
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
                                     Icon(
@@ -643,7 +641,7 @@ fun FamilyAlarmScreen(
                                 text = if (isHebrew) "עדיין אין שעונים מעוררים מוגדרים" else "No alarms configured yet",
                                 style = MaterialTheme.typography.titleMedium.copy(
                                     fontWeight = FontWeight.Bold,
-                                    color = if (glassColors.isDark) glassColors.textPrimary else Color(0xFF15366B)
+                                    color = glassColors.textPrimary
                                 )
                             )
                             Spacer(modifier = Modifier.height(6.dp))
@@ -726,6 +724,7 @@ fun FamilyAlarmScreen(
                     )
                 }
             }
+        }
         }
     }
 
@@ -1100,33 +1099,18 @@ private fun FamilyAlarmCard(
         )
     }
 
-    Surface(
-        shape = RoundedCornerShape(22.dp),
-        color = if (glassColors.isDark) {
-            if (alarm.isEnabled) glassColors.cardBackground else glassColors.cardElevated
-        } else {
-            if (alarm.isEnabled) Color.White else Color(0xFFF7FAFF)
-        },
-        shadowElevation = if (alarm.isEnabled) 3.dp else 1.dp,
-        border = BorderStroke(
-            width = 1.dp,
-            color = if (glassColors.isDark) {
-                if (alarm.isEnabled) glassColors.cardBorderStrong else glassColors.cardBorder
-            } else {
-                if (alarm.isEnabled) Color(0xFFCCE0FA) else OutlineLight
-            }
-        ),
+    FamilyGlassCard(
+        cornerRadius = 24.dp,
+        isTintedBlue = alarm.isEnabled,
+        accentColor = if (alarm.isEnabled) glassColors.primaryAccent else null,
+        elevation = if (alarm.isEnabled) 7.dp else 3.dp,
+        onClick = if (canModify) onEdit else null,
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(22.dp))
-            .clickable(enabled = canModify) { onEdit() }
             .testTag("family_alarm_card_${alarm.id}")
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp)
-        ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1145,11 +1129,7 @@ private fun FamilyAlarmCard(
                                     fontWeight = FontWeight.ExtraBold,
                                     fontSize = 32.sp,
                                     letterSpacing = (-0.5).sp,
-                                    color = if (glassColors.isDark) {
-                                        if (alarm.isEnabled) glassColors.textPrimary else glassColors.textMuted
-                                    } else {
-                                        if (alarm.isEnabled) Color(0xFF12366E) else Color(0xFF7B8FA8)
-                                    }
+                                    color = if (alarm.isEnabled) glassColors.textPrimary else glassColors.textMuted
                                 )
                             )
                         }
@@ -1158,6 +1138,7 @@ private fun FamilyAlarmCard(
                         Surface(
                             shape = RoundedCornerShape(8.dp),
                             color = statusBg,
+                            border = BorderStroke(0.8.dp, statusFg.copy(alpha = 0.25f)),
                             modifier = Modifier.testTag("alarm_status_badge_${alarm.id}")
                         ) {
                             Text(
@@ -1174,7 +1155,7 @@ private fun FamilyAlarmCard(
                         if (!canModify) {
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                color = if (glassColors.isDark) glassColors.secondaryContainer else Color(0xFFEEF3FA),
+                                color = glassColors.secondaryContainer,
                                 modifier = Modifier.testTag("alarm_parent_locked_badge_${alarm.id}")
                             ) {
                                 Row(
@@ -1185,14 +1166,14 @@ private fun FamilyAlarmCard(
                                     Icon(
                                         imageVector = Icons.Default.Lock,
                                         contentDescription = null,
-                                        tint = if (glassColors.isDark) glassColors.textSecondary else Color(0xFF5D7290),
+                                        tint = glassColors.textSecondary,
                                         modifier = Modifier.size(11.dp)
                                     )
                                     Text(
                                         text = if (isHebrew) "הורה" else "Parent",
                                         style = MaterialTheme.typography.labelSmall.copy(
                                             fontWeight = FontWeight.Bold,
-                                            color = if (glassColors.isDark) glassColors.textSecondary else Color(0xFF5D7290),
+                                            color = glassColors.textSecondary,
                                             fontSize = 10.sp
                                         )
                                     )
@@ -1207,11 +1188,7 @@ private fun FamilyAlarmCard(
                         text = alarm.title,
                         style = MaterialTheme.typography.bodyLarge.copy(
                             fontWeight = FontWeight.Bold,
-                            color = if (glassColors.isDark) {
-                                if (alarm.isEnabled) glassColors.textPrimary else glassColors.textMuted
-                            } else {
-                                if (alarm.isEnabled) Color(0xFF1F3B66) else Color(0xFF7B8FA8)
-                            }
+                            color = if (alarm.isEnabled) glassColors.textPrimary else glassColors.textMuted
                         ),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -1222,7 +1199,7 @@ private fun FamilyAlarmCard(
                     Text(
                         text = "$repeatDaysText • $assignmentText",
                         style = MaterialTheme.typography.labelMedium.copy(
-                            color = if (glassColors.isDark) glassColors.textSecondary else Color(0xFF5A7194),
+                            color = glassColors.textSecondary,
                             fontWeight = FontWeight.Medium
                         ),
                         maxLines = 1,
@@ -1230,7 +1207,7 @@ private fun FamilyAlarmCard(
                     )
                 }
 
-                // Controls: Sound preview + Enable/Disable Switch
+                // Controls: 3D Raised Sound preview + Enable/Disable Switch
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1239,16 +1216,21 @@ private fun FamilyAlarmCard(
                         onClick = onPreviewToggle,
                         modifier = Modifier
                             .size(40.dp)
+                            .shadow(
+                                elevation = 3.dp,
+                                shape = CircleShape,
+                                spotColor = (if (isPreviewing) glassColors.dangerText else glassColors.primaryAccent).copy(alpha = 0.25f)
+                            )
                             .clip(CircleShape)
                             .background(
-                                if (isPreviewing) GoogleRedLight else Color(0xFFEAF3FE)
+                                if (isPreviewing) glassColors.dangerBg else glassColors.primaryAccentSoftBg
                             )
                             .testTag("preview_alarm_card_${alarm.id}")
                     ) {
                         Icon(
                             imageVector = if (isPreviewing) Icons.Default.Stop else Icons.Default.PlayArrow,
                             contentDescription = if (isHebrew) "השמע צלצול" else "Preview sound",
-                            tint = if (isPreviewing) GoogleRedDark else GoogleBlueDark,
+                            tint = if (isPreviewing) glassColors.dangerText else glassColors.primaryAccent,
                             modifier = Modifier.size(18.dp)
                         )
                     }
@@ -1264,7 +1246,7 @@ private fun FamilyAlarmCard(
 
             if (canModify || canDelete) {
                 Spacer(modifier = Modifier.height(6.dp))
-                HorizontalDivider(color = Color(0xFFEEF4FC), thickness = 1.dp)
+                HorizontalDivider(color = glassColors.divider, thickness = 1.dp)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1279,7 +1261,7 @@ private fun FamilyAlarmCard(
                             isHebrew = isHebrew
                         ),
                         style = MaterialTheme.typography.labelSmall.copy(
-                            color = Color(0xFF6B80A0),
+                            color = glassColors.textMuted,
                             fontWeight = FontWeight.Medium
                         ),
                         maxLines = 1,
@@ -1301,7 +1283,7 @@ private fun FamilyAlarmCard(
                                 Icon(
                                     imageVector = Icons.Default.Edit,
                                     contentDescription = if (isHebrew) "עריכה" else "Edit",
-                                    tint = GoogleBlue,
+                                    tint = glassColors.primaryAccent,
                                     modifier = Modifier.size(17.dp)
                                 )
                             }
@@ -1317,7 +1299,7 @@ private fun FamilyAlarmCard(
                                 Icon(
                                     imageVector = Icons.Default.DeleteOutline,
                                     contentDescription = if (isHebrew) "מחיקה" else "Delete",
-                                    tint = Color(0xFFD93025),
+                                    tint = glassColors.dangerText,
                                     modifier = Modifier.size(17.dp)
                                 )
                             }

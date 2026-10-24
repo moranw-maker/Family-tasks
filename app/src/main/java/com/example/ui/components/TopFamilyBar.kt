@@ -13,6 +13,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
@@ -40,17 +41,47 @@ fun TopFamilyBar(
 ) {
     val isHebrew = currentLanguage == AppLanguage.HEBREW
     val glass = LocalSoftGlassColors.current
-    val headerShape = RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp)
+    val headerShape = RoundedCornerShape(bottomStart = 26.dp, bottomEnd = 26.dp)
     val headerGradient = Brush.verticalGradient(
         colors = if (glass.isDark) {
             listOf(
-                Color(0xFF172136),
-                Color(0xFF101829)
+                Color(0xFF1D2942),
+                Color(0xFF141E33),
+                Color(0xFF0E1626)
             )
         } else {
             listOf(
                 Color(0xFFFFFFFF),
-                Color(0xFFF5F8FE)
+                Color(0xFFF8FAFE),
+                Color(0xFFEEF4FC)
+            )
+        }
+    )
+
+    val pillGradient = Brush.verticalGradient(
+        colors = if (glass.isDark) {
+            listOf(
+                Color(0xFF233252),
+                Color(0xFF172238)
+            )
+        } else {
+            listOf(
+                Color(0xFFFFFFFF),
+                Color(0xFFF0F5FE)
+            )
+        }
+    )
+
+    val pillBorderBrush = Brush.verticalGradient(
+        colors = if (glass.isDark) {
+            listOf(
+                glass.primaryAccent.copy(alpha = 0.42f),
+                glass.cardBorder
+            )
+        } else {
+            listOf(
+                Color.White,
+                Color(0xFFCBD8F2)
             )
         }
     )
@@ -58,27 +89,34 @@ fun TopFamilyBar(
     Surface(
         shape = headerShape,
         color = Color.Transparent,
-        tonalElevation = 4.dp,
-        shadowElevation = 6.dp,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
         border = BorderStroke(
-            width = 1.dp,
+            width = 0.9.dp,
             brush = Brush.horizontalGradient(
                 colors = if (glass.isDark) {
                     listOf(
                         glass.cardBorder,
-                        glass.primaryAccent.copy(alpha = 0.42f),
-                        glass.velvetVioletAccent.copy(alpha = 0.36f)
+                        glass.primaryAccent.copy(alpha = 0.45f),
+                        glass.velvetVioletAccent.copy(alpha = 0.38f)
                     )
                 } else {
                     listOf(
-                        glass.cardBorder,
-                        glass.primaryAccent.copy(alpha = 0.28f)
+                        Color.White,
+                        glass.primaryAccent.copy(alpha = 0.26f),
+                        Color.White
                     )
                 }
             )
         ),
         modifier = Modifier
             .fillMaxWidth()
+            .shadow(
+                elevation = 10.dp,
+                shape = headerShape,
+                ambientColor = if (glass.isDark) Color.Black.copy(alpha = 0.75f) else Color(0xFF1E3A8A).copy(alpha = 0.14f),
+                spotColor = if (glass.isDark) Color.Black.copy(alpha = 0.85f) else Color(0xFF1E3A8A).copy(alpha = 0.22f)
+            )
             .testTag("top_family_bar")
     ) {
         CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
@@ -86,6 +124,7 @@ fun TopFamilyBar(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(headerGradient)
+                    .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 26.dp)
                     .statusBarsPadding()
             ) {
                 val isCompactHeader = maxWidth < 390.dp
@@ -93,7 +132,8 @@ fun TopFamilyBar(
                 val avatarSize = if (isCompactHeader) 38.dp else 42.dp
                 val actionBtnSize = if (isCompactHeader) 34.dp else 36.dp
                 val actionIconSize = if (isCompactHeader) 17.dp else 18.dp
-                val actionSpacing = if (isCompactHeader) 4.dp else 5.dp
+                val actionSpacing = if (isCompactHeader) 4.dp else 6.dp
+                val actionBtnShape = RoundedCornerShape(12.dp)
 
                 Row(
                     modifier = Modifier
@@ -116,24 +156,29 @@ fun TopFamilyBar(
                             .testTag("user_profile_avatar_button")
                     )
 
-                    // 2. Center: Brand House Squircle & FamilyTasks Capsule (Weighted so it never overlaps icons)
+                    // 2. Center: Raised Velvet Neumorphic FamilyTasks Capsule
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .padding(horizontal = if (isCompactHeader) 6.dp else 8.dp),
                         contentAlignment = Alignment.Center
                     ) {
+                        val centerCapsuleShape = RoundedCornerShape(18.dp)
                         Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = glass.cardTintedBlueBackground.copy(alpha = if (glass.isDark) 0.72f else 0.90f),
-                            border = BorderStroke(
-                                1.dp,
-                                if (glass.isDark) glass.velvetVioletAccent.copy(alpha = 0.28f)
-                                else glass.primaryAccent.copy(alpha = 0.22f)
-                            ),
+                            shape = centerCapsuleShape,
+                            color = Color.Transparent,
+                            border = BorderStroke(0.9.dp, pillBorderBrush),
                             modifier = Modifier
                                 .widthIn(max = 240.dp)
-                                .clip(RoundedCornerShape(16.dp))
+                                .shadow(
+                                    elevation = 4.dp,
+                                    shape = centerCapsuleShape,
+                                    ambientColor = if (glass.isDark) Color.Black.copy(alpha = 0.65f) else Color(0xFF1E3A8A).copy(alpha = 0.12f),
+                                    spotColor = if (glass.isDark) Color.Black.copy(alpha = 0.75f) else Color(0xFF1E3A8A).copy(alpha = 0.18f)
+                                )
+                                .clip(centerCapsuleShape)
+                                .background(pillGradient, centerCapsuleShape)
+                                .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 18.dp)
                                 .clickable { onOpenProfile() }
                         ) {
                             Row(
@@ -188,18 +233,25 @@ fun TopFamilyBar(
                         }
                     }
 
-                    // 3. Velvet Action Pills (Language Pill, Gemini AI, Notification Bell, Settings)
+                    // 3. Raised 3D Velvet Action Pills (Language Pill, Gemini AI, Notification Bell, Settings)
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(actionSpacing)
                     ) {
                         Surface(
-                            shape = RoundedCornerShape(11.dp),
-                            color = glass.primaryAccentSoftBg,
-                            border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.32f)),
+                            shape = actionBtnShape,
+                            color = Color.Transparent,
+                            border = BorderStroke(0.9.dp, pillBorderBrush),
                             modifier = Modifier
                                 .height(actionBtnSize)
-                                .clip(RoundedCornerShape(11.dp))
+                                .shadow(
+                                    elevation = 3.dp,
+                                    shape = actionBtnShape,
+                                    spotColor = glass.primaryAccent.copy(alpha = 0.24f)
+                                )
+                                .clip(actionBtnShape)
+                                .background(pillGradient, actionBtnShape)
+                                .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 12.dp)
                                 .clickable { onLanguageToggle() }
                                 .testTag("language_toggle_button")
                         ) {
@@ -219,12 +271,19 @@ fun TopFamilyBar(
                         }
 
                         Surface(
-                            shape = RoundedCornerShape(11.dp),
-                            color = glass.cardTintedBlueBackground,
-                            border = BorderStroke(1.dp, glass.cardBorder),
+                            shape = actionBtnShape,
+                            color = Color.Transparent,
+                            border = BorderStroke(0.9.dp, pillBorderBrush),
                             modifier = Modifier
                                 .size(actionBtnSize)
-                                .clip(RoundedCornerShape(11.dp))
+                                .shadow(
+                                    elevation = 3.dp,
+                                    shape = actionBtnShape,
+                                    spotColor = glass.velvetVioletAccent.copy(alpha = 0.24f)
+                                )
+                                .clip(actionBtnShape)
+                                .background(pillGradient, actionBtnShape)
+                                .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 12.dp)
                                 .clickable { onOpenGemini() }
                                 .testTag("top_gemini_button")
                         ) {
@@ -239,12 +298,19 @@ fun TopFamilyBar(
                         }
 
                         Surface(
-                            shape = RoundedCornerShape(11.dp),
-                            color = glass.cardTintedBlueBackground,
-                            border = BorderStroke(1.dp, glass.cardBorder),
+                            shape = actionBtnShape,
+                            color = Color.Transparent,
+                            border = BorderStroke(0.9.dp, pillBorderBrush),
                             modifier = Modifier
                                 .size(actionBtnSize)
-                                .clip(RoundedCornerShape(11.dp))
+                                .shadow(
+                                    elevation = 3.dp,
+                                    shape = actionBtnShape,
+                                    spotColor = glass.primaryAccent.copy(alpha = 0.24f)
+                                )
+                                .clip(actionBtnShape)
+                                .background(pillGradient, actionBtnShape)
+                                .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 12.dp)
                                 .clickable { onOpenNotifications() }
                                 .testTag("notification_bell_button")
                         ) {
@@ -276,12 +342,19 @@ fun TopFamilyBar(
                         }
 
                         Surface(
-                            shape = RoundedCornerShape(11.dp),
-                            color = glass.cardTintedBlueBackground,
-                            border = BorderStroke(1.dp, glass.cardBorder),
+                            shape = actionBtnShape,
+                            color = Color.Transparent,
+                            border = BorderStroke(0.9.dp, pillBorderBrush),
                             modifier = Modifier
                                 .size(actionBtnSize)
-                                .clip(RoundedCornerShape(11.dp))
+                                .shadow(
+                                    elevation = 3.dp,
+                                    shape = actionBtnShape,
+                                    spotColor = glass.primaryAccent.copy(alpha = 0.20f)
+                                )
+                                .clip(actionBtnShape)
+                                .background(pillGradient, actionBtnShape)
+                                .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 12.dp)
                                 .clickable { onOpenSettings() }
                                 .testTag("top_settings_button")
                         ) {
@@ -300,3 +373,4 @@ fun TopFamilyBar(
         }
     }
 }
+
