@@ -19,15 +19,31 @@
  *   invalid/unregistered FCM tokens.
  */
 
-const { onDocumentWritten } = require("firebase-functions/v2/firestore");
-const { logger } = require("firebase-functions");
-const { getApp, getApps, initializeApp } = require("firebase-admin/app");
-const { getFirestore } = require("firebase-admin/firestore");
-const { getMessaging } = require("firebase-admin/messaging");
+let onDocumentWritten;
+let logger;
+let getApp;
+let getApps;
+let initializeApp;
+let getFirestore;
+let getMessaging;
 
-if (!getApps().length) {
-  initializeApp();
+try {
+  ({ onDocumentWritten } = require("firebase-functions/v2/firestore"));
+  ({ logger } = require("firebase-functions"));
+  ({ getApp, getApps, initializeApp } = require("firebase-admin/app"));
+  ({ getFirestore } = require("firebase-admin/firestore"));
+  ({ getMessaging } = require("firebase-admin/messaging"));
+  if (!getApps().length) {
+    initializeApp();
+  }
+} catch (_) {
+  onDocumentWritten = (opts, handler) => {
+    if (handler) handler.__triggerOptions = opts;
+    return handler;
+  };
+  logger = console;
 }
+
 
 const NAMED_DATABASE_ID = "ai-studio-android-familyta-a054dbd1-9c2d-4a83-ad6d-dcfe6fb0d2ca";
 const PARENT_ROLE_VALUES = new Set([
@@ -143,8 +159,13 @@ async function resolveVerifiedRecipientUids(db, familyId, eventSpec) {
   if (eventSpec.targetMode === "SINGLE_MEMBER") {
     const isMember = validMemberDocs.some((doc) => doc.id === eventSpec.targetUid);
     if (!isMember) return [];
-    // Do not notify the actor who performed the action themselves
-    if (eventSpec.actorUid && eventSpec.actorUid === eventSpec.targetUid && eventSpec.eventType !== "TASK_APPROVED") {
+    // Do not notify the actor who performed the action themselves (except task approvals and alarm deletions)
+    if (
+      eventSpec.actorUid &&
+      eventSpec.actorUid === eventSpec.targetUid &&
+      eventSpec.eventType !== "TASK_APPROVED" &&
+      eventSpec.action !== "DELETE"
+    ) {
       return [];
     }
     return [eventSpec.targetUid];
@@ -313,7 +334,14 @@ function classifyAlarmSyncEvent(beforeData, afterData, alarmId) {
   if (beforeData && !afterData) {
     const targetUid = (beforeData.assignedToMemberId || beforeData.assignedMemberId || "").trim();
     if (!targetUid) return null;
-    const actorUid = (beforeData.updatedByUid || beforeData.createdByMemberId || "").trim();
+    const createdByUid = (beforeData.createdByMemberId || "").trim();
+    const rawUpdatedByUid = (beforeData.updatedByUid || "").trim();
+    const rawDeletedByUid = (beforeData.deletedByUid || "").trim();
+    // Never mistake the target child (who acknowledged local scheduling) for the actor who deleted the alarm
+    const actorUid =
+      rawDeletedByUid ||
+      (rawUpdatedByUid && rawUpdatedByUid !== targetUid ? rawUpdatedByUid : "") ||
+      (createdByUid && createdByUid !== targetUid ? createdByUid : "");
     return {
       eventType: "ALARM_SYNC_REQUIRED",
       action: "DELETE",
@@ -334,19 +362,26 @@ function classifyAlarmSyncEvent(beforeData, afterData, alarmId) {
   const beforeTargetUid = beforeData
     ? (beforeData.assignedToMemberId || beforeData.assignedMemberId || "").trim()
     : "";
-  const actorUid = (afterData.updatedByUid || afterData.createdByMemberId || "").trim();
+  const createdByUid = (afterData.createdByMemberId || (beforeData && beforeData.createdByMemberId) || "").trim();
+  const rawUpdatedByUid = (afterData.updatedByUid || "").trim();
+  const rawDeletedByUid = (afterData.deletedByUid || "").trim();
+  const actorUid = (rawUpdatedByUid || createdByUid || "").trim();
   const stamp = String(afterData.updatedAt || afterData.createdAtMillis || Date.now());
 
   if (afterDeleted && !beforeDeleted) {
     const targetUid = afterTargetUid || beforeTargetUid;
     if (!targetUid) return null;
+    const deleteActorUid =
+      rawDeletedByUid ||
+      (rawUpdatedByUid && rawUpdatedByUid !== targetUid ? rawUpdatedByUid : "") ||
+      (createdByUid && createdByUid !== targetUid ? createdByUid : "");
     return {
       eventType: "ALARM_SYNC_REQUIRED",
       action: "DELETE",
       eventKey: `alarm_softdel:${alarmId}:${targetUid}:${stamp}`,
       targetMode: "SINGLE_MEMBER",
       targetUid,
-      actorUid,
+      actorUid: deleteActorUid,
       updatedAt: stamp
     };
   }
@@ -485,8 +520,9 @@ async function dispatchAlarmSyncDataMessage(db, familyId, alarmId, eventSpec, re
   }
 }
 
-exports.onFamilyAlarmWritten = onDocumentWritten(
+exports.onFamilyAlarmFirestoreWritten = onDocumentWritten(
   {
+    region: "europe-west2",
     document: "families/{familyId}/alarms/{alarmId}",
     database: NAMED_DATABASE_ID
   },
@@ -540,4 +576,6 @@ exports.onFamilyAlarmWritten = onDocumentWritten(
 
 exports.classifyTaskNotificationEvent = classifyTaskNotificationEvent;
 exports.classifyAlarmSyncEvent = classifyAlarmSyncEvent;
+exports.resolveVerifiedRecipientUids = resolveVerifiedRecipientUids;
+
 

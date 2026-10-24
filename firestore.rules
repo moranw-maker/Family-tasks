@@ -157,7 +157,8 @@ service cloud.firestore {
     }
 
     // Allows the assigned child's device to update ONLY local scheduling acknowledgement fields
-    // on a parent-created alarm assigned to that child, without modifying time, enabled state, sound, or recurrence.
+    // on a parent-created alarm assigned to that child, without modifying time, enabled state, sound,
+    // recurrence, or updatedByUid (separating who updated the alarm from who acknowledged the schedule).
     function isChildTargetDeviceAckOnly() {
       let changedKeys = request.resource.data.diff(resource.data).affectedKeys();
       let targetId = alarmTargetMemberId(resource.data);
@@ -170,12 +171,11 @@ service cloud.firestore {
           'acknowledgedAtMillis',
           'nextTriggerAtMillis',
           'lastScheduleError',
-          'updatedByUid',
           'updatedAt',
           'updatedAtMillis'
         ])
         && request.resource.data.get('acknowledgedByMemberId', '') == request.auth.uid
-        && (!('updatedByUid' in request.resource.data) || request.resource.data.updatedByUid == request.auth.uid);
+        && request.resource.data.get('updatedByUid', '') == resource.data.get('updatedByUid', '');
     }
 
     // Validates invitation-based membership creation in /families/{familyId}/members/{uid}:

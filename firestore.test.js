@@ -1665,7 +1665,7 @@ test("Family Alarm Clock Ownership & Editing Permissions: Parent-for-Child, Chil
     });
   });
 
-  // 1. Parent creates an alarm assigned to the Child (BOB_UID) -> SUCCEEDS
+  // 1. Parent creates an alarm assigned to the Child (BOB_UID) with updatedByUid = ALICE_UID -> SUCCEEDS
   const parentForChildRef = parentDb.collection("families").doc("fam_alarms").collection("alarms").doc("alarm_parent_for_child");
   await assertSucceeds(
     parentForChildRef.set({
@@ -1683,6 +1683,7 @@ test("Family Alarm Clock Ownership & Editing Permissions: Parent-for-Child, Chil
       volumePercent: 85,
       snoozeDurationMinutes: 5,
       scheduleStatus: "PENDING_TARGET_DEVICE",
+      updatedByUid: ALICE_UID,
     })
   );
 
@@ -1690,13 +1691,21 @@ test("Family Alarm Clock Ownership & Editing Permissions: Parent-for-Child, Chil
   const childViewOfParentAlarm = childDb.collection("families").doc("fam_alarms").collection("alarms").doc("alarm_parent_for_child");
   await assertSucceeds(childViewOfParentAlarm.get());
 
-  // Child CANNOT edit time, disable, change volume/sound, or delete the parent-created alarm -> MUST FAIL
+  // Child CANNOT edit time, disable, change volume/sound, overwrite updatedByUid, or delete the parent-created alarm -> MUST FAIL
   await assertFails(childViewOfParentAlarm.update({ isEnabled: false }));
   await assertFails(childViewOfParentAlarm.update({ hour: 9, minute: 30 }));
   await assertFails(childViewOfParentAlarm.update({ volumePercent: 10 }));
+  await assertFails(
+    childViewOfParentAlarm.update({
+      scheduleStatus: "SCHEDULED_LOCALLY",
+      acknowledgedByMemberId: BOB_UID,
+      updatedByUid: BOB_UID,
+    })
+  );
   await assertFails(childViewOfParentAlarm.delete());
 
-  // Child's device CAN write local scheduling acknowledgement on the parent-created alarm assigned to that child -> SUCCEEDS
+  // Child's device CAN write local scheduling acknowledgement on the parent-created alarm assigned to that child
+  // WITHOUT overwriting updatedByUid -> SUCCEEDS and preserves updatedByUid == ALICE_UID
   await assertSucceeds(
     childViewOfParentAlarm.update({
       scheduleStatus: "SCHEDULED_LOCALLY",
@@ -1705,7 +1714,6 @@ test("Family Alarm Clock Ownership & Editing Permissions: Parent-for-Child, Chil
       acknowledgedAtMillis: 1700000100000,
       nextTriggerAtMillis: 1700050000000,
       lastScheduleError: "",
-      updatedByUid: BOB_UID,
       updatedAt: 1700000100000,
     })
   );
@@ -2121,4 +2129,180 @@ test("Security Audit Fix: Atomic Points Ledger, Duplicate TASK_EARNED Prevention
   });
   await assertFails(illegalDemoteOwnerBatch.commit());
 });
+
+test("Alarm Cancellation Sync Root-Cause Fix: Create -> Child Ack (preserves updatedByUid) -> Parent Delete -> Cloud Function DELETE & Child Confirmation", async () => {
+  const assert = require("node:assert");
+  const functionsIndex = require("./functions/index.js");
+  const functionsPkg = require("./functions/package.json");
+  const { classifyAlarmSyncEvent, resolveVerifiedRecipientUids } = functionsIndex;
+
+  // Verify Cloud Function export alignment with deployed Firebase environment:
+  // 1. Exported name is onFamilyAlarmFirestoreWritten (v2 onDocumentWritten, region europe-west2)
+  // 2. No duplicate export under onFamilyAlarmWritten
+  // 3. onFamilyTaskWritten remains intact
+  // 4. Runtime configured for Node.js 22
+  assert.strictEqual(typeof functionsIndex.onFamilyAlarmFirestoreWritten, "function");
+  assert.strictEqual(functionsIndex.onFamilyAlarmWritten, undefined);
+  assert.strictEqual(typeof functionsIndex.onFamilyTaskWritten, "function");
+  assert.strictEqual(functionsPkg.engines && functionsPkg.engines.node, "22");
+  if (functionsIndex.onFamilyAlarmFirestoreWritten.__triggerOptions) {
+    assert.strictEqual(functionsIndex.onFamilyAlarmFirestoreWritten.__triggerOptions.region, "europe-west2");
+    assert.strictEqual(
+      functionsIndex.onFamilyAlarmFirestoreWritten.__triggerOptions.document,
+      "families/{familyId}/alarms/{alarmId}"
+    );
+    assert.strictEqual(
+      functionsIndex.onFamilyAlarmFirestoreWritten.__triggerOptions.database,
+      "ai-studio-android-familyta-a054dbd1-9c2d-4a83-ad6d-dcfe6fb0d2ca"
+    );
+  }
+
+  const parentDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const childDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const famId = "fam_alarm_cancel_sync";
+  const alarmId = "alarm_roey_wakeup_700";
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const adminDb = context.firestore();
+    await adminDb.collection("families").doc(famId).set({
+      id: famId,
+      familyId: famId,
+      familyName: "משפחת כהן",
+      ownerUid: ALICE_UID,
+      createdById: ALICE_UID,
+      adminUids: [ALICE_UID],
+      memberUids: [ALICE_UID, BOB_UID],
+      memberIds: [ALICE_UID, BOB_UID],
+    });
+    await adminDb.collection("families").doc(famId).collection("members").doc(ALICE_UID).set({
+      id: ALICE_UID,
+      uid: ALICE_UID,
+      familyId: famId,
+      name: "אבא",
+      role: "PARENT",
+      earnedPoints: 0,
+      spentPoints: 0,
+    });
+    await adminDb.collection("families").doc(famId).collection("members").doc(BOB_UID).set({
+      id: BOB_UID,
+      uid: BOB_UID,
+      familyId: famId,
+      name: "רועי",
+      role: "CHILD",
+      earnedPoints: 0,
+      spentPoints: 0,
+    });
+  });
+
+  // Step 1: Parent creates alarm for Child (Roey = BOB_UID)
+  const parentAlarmRef = parentDb.collection("families").doc(famId).collection("alarms").doc(alarmId);
+  const initialAlarmData = {
+    id: alarmId,
+    familyId: famId,
+    title: "השכמה לרועי",
+    hour: 7,
+    minute: 0,
+    createdByMemberId: ALICE_UID,
+    createdByRole: "PARENT",
+    assignedToMemberId: BOB_UID,
+    assignedMemberId: BOB_UID,
+    isEnabled: true,
+    soundType: "SYSTEM_ALARM",
+    volumePercent: 85,
+    snoozeDurationMinutes: 5,
+    scheduleStatus: "PENDING_TARGET_DEVICE",
+    acknowledgedByMemberId: "",
+    updatedByUid: ALICE_UID,
+    updatedAt: 1700010000000,
+  };
+  await assertSucceeds(parentAlarmRef.set(initialAlarmData));
+
+  const createEventSpec = classifyAlarmSyncEvent(null, initialAlarmData, alarmId);
+  assert.ok(createEventSpec, "Parent creating child alarm must produce CREATE sync event");
+  assert.strictEqual(createEventSpec.action, "CREATE");
+  assert.strictEqual(createEventSpec.targetUid, BOB_UID);
+  assert.strictEqual(createEventSpec.actorUid, ALICE_UID);
+
+  // Step 2: Child device acknowledges local scheduling WITHOUT overwriting updatedByUid
+  const childAlarmRef = childDb.collection("families").doc(famId).collection("alarms").doc(alarmId);
+  await assertSucceeds(
+    childAlarmRef.update({
+      scheduleStatus: "SCHEDULED_LOCALLY",
+      acknowledgedByMemberId: BOB_UID,
+      acknowledgedByDeviceName: "Galaxy S24",
+      acknowledgedAtMillis: 1700010005000,
+      nextTriggerAtMillis: 1700050000000,
+      lastScheduleError: "",
+      updatedAt: 1700010005000,
+    })
+  );
+
+  const snapAfterAck = await childAlarmRef.get();
+  const dataAfterAck = snapAfterAck.data();
+  assert.strictEqual(dataAfterAck.acknowledgedByMemberId, BOB_UID);
+  assert.strictEqual(
+    dataAfterAck.updatedByUid,
+    ALICE_UID,
+    "Child acknowledgement must preserve parent's updatedByUid unchanged"
+  );
+
+  // Ack-only update must NOT trigger another FCM sync loop
+  const ackEventSpec = classifyAlarmSyncEvent(initialAlarmData, dataAfterAck, alarmId);
+  assert.strictEqual(ackEventSpec, null, "Ack-only write must not trigger redundant FCM sync push");
+
+  // Step 3: Parent deletes the alarm after Child acknowledged it
+  await assertSucceeds(parentAlarmRef.delete());
+  await assertSucceeds(
+    parentDb.collection("families").doc(famId).update({
+      deletedAlarmIds: [alarmId],
+      updatedAt: 1700010010000,
+    })
+  );
+
+  // Cloud Function classifies hard delete (beforeData = dataAfterAck, afterData = null)
+  const deleteEventSpec = classifyAlarmSyncEvent(dataAfterAck, null, alarmId);
+  assert.ok(deleteEventSpec, "Parent deleting acknowledged child alarm must produce DELETE sync event");
+  assert.strictEqual(deleteEventSpec.eventType, "ALARM_SYNC_REQUIRED");
+  assert.strictEqual(deleteEventSpec.action, "DELETE");
+  assert.strictEqual(deleteEventSpec.targetUid, BOB_UID);
+  assert.strictEqual(
+    deleteEventSpec.actorUid,
+    ALICE_UID,
+    "DELETE event actorUid must be the parent (ALICE_UID), never the acknowledging child (BOB_UID)"
+  );
+
+  // Even if legacy data had updatedByUid == BOB_UID, classifyAlarmSyncEvent & resolveVerifiedRecipientUids must still target BOB_UID
+  const legacyBeforeData = { ...dataAfterAck, updatedByUid: BOB_UID };
+  const legacyDeleteSpec = classifyAlarmSyncEvent(legacyBeforeData, null, alarmId);
+  assert.ok(legacyDeleteSpec);
+  assert.strictEqual(legacyDeleteSpec.action, "DELETE");
+  assert.strictEqual(legacyDeleteSpec.targetUid, BOB_UID);
+  assert.notStrictEqual(legacyDeleteSpec.actorUid, BOB_UID);
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const adminDb = context.firestore();
+    const recipientsNormal = await resolveVerifiedRecipientUids(adminDb, famId, deleteEventSpec);
+    assert.deepStrictEqual(recipientsNormal, [BOB_UID]);
+    const recipientsLegacy = await resolveVerifiedRecipientUids(adminDb, famId, legacyDeleteSpec);
+    assert.deepStrictEqual(recipientsLegacy, [BOB_UID]);
+  });
+
+  // Step 4: Child background worker cancels local alarm and writes cancelledAlarmIds confirmation to member doc
+  const childMemberRef = childDb.collection("families").doc(famId).collection("members").doc(BOB_UID);
+  await assertSucceeds(
+    childMemberRef.update({
+      cancelledAlarmIds: [alarmId],
+      lastAlarmSyncAtMillis: 1700010012000,
+    })
+  );
+
+  // Step 5: Duplicate deletion / duplicate confirmation is idempotent and does not fail
+  await assertSucceeds(
+    childMemberRef.update({
+      cancelledAlarmIds: [alarmId],
+      lastAlarmSyncAtMillis: 1700010015000,
+    })
+  );
+});
+
 

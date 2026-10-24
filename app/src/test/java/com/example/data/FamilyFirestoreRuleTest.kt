@@ -2688,6 +2688,220 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         assertTrue("Tampering with sensitive member field uid must be rejected", tamperSensitiveField.isFailure)
     }
 
+    @Test
+    fun alarmCancellationSync_parentCreate_childAckPreservesUpdatedByUid_parentDelete_backgroundWorkerCancelsAndConfirms() = runBlocking {
+        val timeoutMs = 15_000L
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        com.example.notifications.FcmTokenManager.clearAllDispatchedEventsForTesting()
+        com.example.notifications.FamilyAlarmCloudSyncWorker.clearCompletedSyncEventsForTesting(context)
+
+        val dadEmail = "dad.alarm.cancel@example.com"
+        val roeyEmail = "roey.alarm.cancel@example.com"
+
+        // 1. Parent (Dad) creates family and invites Child (Roey)
+        val dadUid = signInTestUser(dadEmail)
+        val dadRepo = repo()
+        val createdFamily = withTimeout(timeoutMs) {
+            dadRepo.createFamilyAsParent(
+                familyNameInput = "משפחת אלמוג",
+                parentDisplayName = "אבא אלמוג",
+                creatorUidOverride = dadUid,
+                creatorEmailOverride = dadEmail,
+                familyIdentity = FamilyIdentity.FATHER
+            )
+        }.getOrThrow()
+        val familyId = createdFamily.familyId
+
+        val roeyInvite = withTimeout(timeoutMs) {
+            dadRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "רועי",
+                intendedEmail = roeyEmail
+            )
+        }.getOrThrow()
+        dadRepo.detachAll()
+
+        // 2. Roey joins family as CHILD
+        val roeyUid = signInTestUser(roeyEmail)
+        val roeyRepo = repo()
+        withTimeout(timeoutMs) {
+            roeyRepo.redeemInvitationAndJoinFamily(
+                rawCode = roeyInvite.code,
+                memberDisplayName = "רועי",
+                joiningUidOverride = roeyUid,
+                joiningEmailOverride = roeyEmail,
+                familyIdentity = FamilyIdentity.SON
+            )
+        }.getOrThrow()
+        // Close/detach Roey's foreground repository to simulate Roey's app being completely closed!
+        roeyRepo.detachAll()
+
+        // 3. Dad signs in and creates an alarm for Roey
+        signInTestUser(dadEmail)
+        withTimeout(timeoutMs) {
+            dadRepo.checkAuthenticatedUserMembership(
+                uid = dadUid,
+                email = dadEmail,
+                displayName = "אבא אלמוג",
+                forceRefresh = true
+            )
+        }
+        val alarmId = "alarm_roey_school_0715"
+        val alarmForRoey = FamilyAlarm(
+            id = alarmId,
+            familyId = familyId,
+            title = "השכמה לרועי",
+            hour = 7,
+            minute = 15,
+            assignedMemberId = roeyUid,
+            assignedToMemberId = roeyUid,
+            assignedMemberName = "רועי",
+            createdByMemberId = dadUid,
+            createdByMemberName = "אבא אלמוג",
+            createdByRole = "PARENT",
+            isPersonal = false,
+            isEnabled = true
+        )
+        assertTrue(dadRepo.addOrUpdateFamilyAlarm(alarmForRoey))
+
+        val alarmRef = firestore.collection("families").document(familyId).collection("alarms").document(alarmId)
+        withTimeout(timeoutMs) {
+            while (!alarmRef.get().awaitTask().exists()) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+        val snapAfterCreate = withTimeout(timeoutMs) { alarmRef.get().awaitTask() }
+        assertEquals(dadUid, snapAfterCreate.getString("updatedByUid"))
+        assertEquals(FamilyAlarm.STATUS_PENDING_TARGET_DEVICE, snapAfterCreate.getString("scheduleStatus"))
+        dadRepo.detachAll()
+
+        // 4. Roey's device (with app closed) runs FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestore for CREATE
+        signInTestUser(roeyEmail)
+        val createSyncResult = withTimeout(timeoutMs) {
+            com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestore(
+                context = context,
+                hintFamilyId = familyId,
+                hintAlarmId = alarmId,
+                hintAction = "CREATE",
+                dbOverride = firestore,
+                uidOverride = roeyUid
+            )
+        }
+        assertTrue("Child background CREATE reconciliation must succeed: ${createSyncResult.errorMessage}", createSyncResult.success)
+        assertTrue(
+            "Alarm must be scheduled in Android AlarmManager on child's device while app is closed",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmId)
+        )
+
+        val snapAfterChildAck = withTimeout(timeoutMs) { alarmRef.get().awaitTask() }
+        assertEquals(
+            "Child schedule acknowledgement must set acknowledgedByMemberId to childUid",
+            roeyUid,
+            snapAfterChildAck.getString("acknowledgedByMemberId")
+        )
+        assertEquals(
+            "CRITICAL: Child schedule acknowledgement must NOT overwrite updatedByUid (must remain dadUid)",
+            dadUid,
+            snapAfterChildAck.getString("updatedByUid")
+        )
+
+        // 5. Dad deletes the alarm -> Dad sees pending cancellation notice ("ממתין לביטול אצל רועי")
+        signInTestUser(dadEmail)
+        withTimeout(timeoutMs) {
+            dadRepo.checkAuthenticatedUserMembership(
+                uid = dadUid,
+                email = dadEmail,
+                displayName = "אבא אלמוג",
+                forceRefresh = true
+            )
+        }
+        withTimeout(timeoutMs) {
+            while (dadRepo.familyAlarms.value.none { it.id == alarmId }) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+        assertTrue(dadRepo.deleteFamilyAlarm(alarmId))
+        withTimeout(timeoutMs) {
+            while (alarmRef.get().awaitTask().exists()) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+        val noticeBeforeChildCancel = dadRepo.deletedAlarmNotices.value.find { it.alarmId == alarmId }
+        assertNotNull("Parent must see pending cancellation notice for Roey", noticeBeforeChildCancel)
+        assertFalse(
+            "Cancellation notice must remain unconfirmed before Roey's device cancels in background",
+            noticeBeforeChildCancel!!.isConfirmedCancelledOnTarget
+        )
+        dadRepo.detachAll()
+
+        // 6. Roey's device (app still closed!) receives ALARM_SYNC_REQUIRED (action=DELETE) and runs background worker
+        signInTestUser(roeyEmail)
+        val deleteSyncResult = withTimeout(timeoutMs) {
+            com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestore(
+                context = context,
+                hintFamilyId = familyId,
+                hintAlarmId = alarmId,
+                hintAction = "DELETE",
+                dbOverride = firestore,
+                uidOverride = roeyUid
+            )
+        }
+        assertTrue("Child background DELETE reconciliation must succeed: ${deleteSyncResult.errorMessage}", deleteSyncResult.success)
+        assertEquals("Exactly 1 alarm must be reported cancelled", 1, deleteSyncResult.cancelledCount)
+        assertFalse(
+            "Alarm PendingIntent MUST be cancelled in AlarmManager on child's device while app is closed",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmId)
+        )
+        assertTrue(
+            "Cancelled alarm ID must be recorded in local tombstones on child's device",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmTombstoned(context, alarmId)
+        )
+
+        // Verify Roey's member document in Firestore now confirms cancelledAlarmIds
+        val roeyMemberSnap = withTimeout(timeoutMs) {
+            firestore.collection("families").document(familyId)
+                .collection("members").document(roeyUid).get().awaitTask()
+        }
+        val confirmedIds = (roeyMemberSnap.get("cancelledAlarmIds") as? List<*>)?.mapNotNull { it as? String }.orEmpty()
+        assertTrue("Roey's member doc must contain cancelled alarmId in cancelledAlarmIds", alarmId in confirmedIds)
+
+        // Verify Dad's repository automatically transitions notice to isConfirmedCancelledOnTarget == true
+        signInTestUser(dadEmail)
+        withTimeout(timeoutMs) {
+            dadRepo.checkAuthenticatedUserMembership(
+                uid = dadUid,
+                email = dadEmail,
+                displayName = "אבא אלמוג",
+                forceRefresh = true
+            )
+        }
+        withTimeout(timeoutMs) {
+            while (dadRepo.deletedAlarmNotices.value.find { it.alarmId == alarmId }?.isConfirmedCancelledOnTarget != true) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+        assertTrue(
+            "Parent's deletion notice must transition to confirmed after child's background cancellation",
+            dadRepo.deletedAlarmNotices.value.first { it.alarmId == alarmId }.isConfirmedCancelledOnTarget
+        )
+        dadRepo.detachAll()
+
+        // 7. Duplicate background DELETE reconciliation must be idempotent and succeed without error
+        signInTestUser(roeyEmail)
+        val duplicateDeleteSyncResult = withTimeout(timeoutMs) {
+            com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestore(
+                context = context,
+                hintFamilyId = familyId,
+                hintAlarmId = alarmId,
+                hintAction = "DELETE",
+                dbOverride = firestore,
+                uidOverride = roeyUid
+            )
+        }
+        assertTrue("Duplicate DELETE reconciliation must succeed idempotently", duplicateDeleteSyncResult.success)
+        assertFalse(com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmId))
+    }
+
     private val activeRepos = mutableListOf<FamilyRepository>()
 
     private fun repo(): FamilyRepository {

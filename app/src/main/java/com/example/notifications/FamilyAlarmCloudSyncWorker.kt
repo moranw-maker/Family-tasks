@@ -476,16 +476,63 @@ object FamilyAlarmCloudSyncWorker {
                 }
             }
 
-            // Immediately cancel any deleted alarms in AlarmManager
-            val newlyCancelledIds = mutableSetOf<String>()
+            // Preserve any purely local personal alarms that have not been deleted
+            val preservedLocalPersonal = previouslyPersisted.filter { local ->
+                local.id !in remoteIds &&
+                    local.id !in deletedIds &&
+                    !local.isDeleted &&
+                    local.scheduleStatus != FamilyAlarm.STATUS_DELETED &&
+                    local.familyId.isBlank() &&
+                    (local.createdByMemberId == uid || local.isPersonal)
+            }
+
+            val mergedAlarms = (remoteAlarms + preservedLocalPersonal)
+                .filterNot { it.id in deletedIds || it.isDeleted || it.scheduleStatus == FamilyAlarm.STATUS_DELETED }
+                .distinctBy { it.id }
+                .sortedWith(compareBy({ it.hour }, { it.minute }))
+
+            val deviceModelLabel = runCatching {
+                "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+            }.getOrDefault("Android Device")
+
+            // 1. First execute local cancellation in AlarmManager, snooze cancellation, active ringing dismissal,
+            //    and persisted disk synchronization BEFORE reporting cancellation confirmation to Firestore.
             deletedIds.forEach { deletedId ->
                 FamilyAlarmScheduler.markAlarmDeletedAndCancel(appCtx, deletedId)
-                newlyCancelledIds.add(deletedId)
+            }
+
+            FamilyAlarmScheduler.syncAllDeviceAlarms(
+                context = appCtx,
+                alarms = mergedAlarms,
+                currentMemberId = uid,
+                currentAuthUid = uid,
+                currentMemberName = memberName,
+                isChildDevice = isChildDevice,
+                deletedAlarmIds = deletedIds
+            )
+
+            val scheduleResults = FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
+                context = appCtx,
+                alarms = mergedAlarms,
+                currentMemberId = uid,
+                currentAuthUid = uid,
+                currentMemberName = memberName,
+                isChildDevice = isChildDevice,
+                authoritativeRemoteSync = true
+            )
+
+            val newlyCancelledIds = mutableSetOf<String>()
+            deletedIds.forEach { deletedId ->
+                val isStillScheduled = FamilyAlarmScheduler.isAlarmLocallyScheduled(appCtx, deletedId) ||
+                    FamilyAlarmScheduler.isSnoozeLocallyScheduled(appCtx, deletedId)
+                if (!isStillScheduled) {
+                    newlyCancelledIds.add(deletedId)
+                }
             }
 
             var transientAckWriteError: String? = null
 
-            // Confirm deleted alarm cancellations on member doc so parent sees target confirmation
+            // 2. Confirm deleted alarm cancellations on member doc ONLY AFTER local AlarmManager cancellation succeeded
             if (newlyCancelledIds.isNotEmpty()) {
                 val existingCancelledOnDoc = (memberSnap?.get("cancelledAlarmIds") as? List<*>)
                     ?.mapNotNull { it as? String }
@@ -509,46 +556,9 @@ object FamilyAlarmCloudSyncWorker {
                 }
             }
 
-            // Preserve any purely local personal alarms that have not been deleted
-            val preservedLocalPersonal = previouslyPersisted.filter { local ->
-                local.id !in remoteIds &&
-                    local.id !in deletedIds &&
-                    !local.isDeleted &&
-                    local.scheduleStatus != FamilyAlarm.STATUS_DELETED &&
-                    local.familyId.isBlank() &&
-                    (local.createdByMemberId == uid || local.isPersonal)
-            }
-
-            val mergedAlarms = (remoteAlarms + preservedLocalPersonal)
-                .filterNot { it.id in deletedIds || it.isDeleted || it.scheduleStatus == FamilyAlarm.STATUS_DELETED }
-                .distinctBy { it.id }
-                .sortedWith(compareBy({ it.hour }, { it.minute }))
-
-            val deviceModelLabel = runCatching {
-                "${Build.MANUFACTURER} ${Build.MODEL}".trim()
-            }.getOrDefault("Android Device")
-
-            FamilyAlarmScheduler.syncAllDeviceAlarms(
-                context = appCtx,
-                alarms = mergedAlarms,
-                currentMemberId = uid,
-                currentAuthUid = uid,
-                currentMemberName = memberName,
-                isChildDevice = isChildDevice,
-                deletedAlarmIds = deletedIds
-            )
-
-            val scheduleResults = FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
-                context = appCtx,
-                alarms = mergedAlarms,
-                currentMemberId = uid,
-                currentAuthUid = uid,
-                currentMemberName = memberName,
-                isChildDevice = isChildDevice,
-                authoritativeRemoteSync = true
-            )
-
-            // Write target-device schedule acknowledgement back to Firestore for remote alarms targeted at this device
+            // 3. Write target-device schedule acknowledgement back to Firestore for remote alarms targeted at this device.
+            //    IMPORTANT: Do NOT overwrite updatedByUid here — acknowledgedByMemberId records who acknowledged local scheduling,
+            //    while updatedByUid records who last created/modified the alarm configuration.
             for (remoteAlarm in remoteAlarms) {
                 if (remoteAlarm.id in deletedIds) continue
                 val isTargetedHere = remoteAlarm.isTargetedAtDeviceMember(
@@ -587,7 +597,6 @@ object FamilyAlarmCloudSyncWorker {
                                     "acknowledgedAtMillis" to System.currentTimeMillis(),
                                     "nextTriggerAtMillis" to resolvedNextTrigger,
                                     "lastScheduleError" to resolvedError,
-                                    "updatedByUid" to uid,
                                     "updatedAt" to System.currentTimeMillis()
                                 )
                             )

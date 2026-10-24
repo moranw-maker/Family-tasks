@@ -1018,7 +1018,7 @@ object FamilyAlarmScheduler {
                 appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                     .edit()
                     .putString(KEY_DELETED_ALARM_IDS, current.toList().takeLast(200).joinToString(","))
-                    .apply()
+                    .commit()
             }
         }
     }
@@ -1032,7 +1032,7 @@ object FamilyAlarmScheduler {
             appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putString(KEY_DELETED_ALARM_IDS, current.toList().takeLast(200).joinToString(","))
-                .apply()
+                .commit()
         }
     }
 

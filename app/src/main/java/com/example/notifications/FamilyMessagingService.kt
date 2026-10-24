@@ -128,7 +128,9 @@ class FamilyMessagingService : FirebaseMessagingService() {
             }.getOrNull() ?: FcmTokenManager.getCachedUid(appCtx)
 
             if (!signedInUid.isNullOrBlank()) {
-                if (actorUid.isNotBlank() && actorUid == signedInUid) {
+                val isAlarmDelete = eventType == FcmTokenManager.EVENT_ALARM_SYNC_REQUIRED &&
+                    alarmAction.equals("DELETE", ignoreCase = true)
+                if (actorUid.isNotBlank() && actorUid == signedInUid && !isAlarmDelete) {
                     // Sender must not process their own push event
                     return false
                 }

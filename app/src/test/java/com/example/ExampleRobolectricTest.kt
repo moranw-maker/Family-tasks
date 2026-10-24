@@ -2990,7 +2990,137 @@ class ExampleRobolectricTest {
         assertTrue(reopenedRepo.pointsHistory.value.any { it.operationId == "pts_task_${taskSingle.id}" })
         assertTrue(reopenedRepo.pointsHistory.value.any { it.operationId == "pts_task_${taskConcurrent.id}" })
     }
+
+    @Test
+    fun `test parent create child acknowledge parent delete background fcm cancel prevents ringing and handles duplicate delete`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.notifications.FcmTokenManager.clearAllDispatchedEventsForTesting()
+        com.example.notifications.FamilyAlarmCloudSyncWorker.clearCompletedSyncEventsForTesting(context)
+
+        val repository = FamilyRepository(context = context)
+        val parentDad = repository.members.value.first { it.id == "m_dad" }
+        val childRoey = repository.members.value.first { it.id == "m_kid1" }
+
+        // 1. Parent creates an alarm assigned to the child
+        repository.switchCurrentMember(parentDad)
+        val alarmId = "alarm_bg_cancel_roey_0700"
+        val childAlarm = com.example.model.FamilyAlarm(
+            id = alarmId,
+            familyId = "fam_local_test",
+            title = "השכמה לרועי",
+            hour = 7,
+            minute = 0,
+            assignedMemberId = childRoey.id,
+            assignedToMemberId = childRoey.id,
+            assignedMemberName = childRoey.name,
+            createdByMemberId = parentDad.id,
+            createdByMemberName = parentDad.name,
+            createdByRole = "PARENT",
+            isPersonal = false,
+            isEnabled = true
+        )
+        assertTrue(repository.addOrUpdateFamilyAlarm(childAlarm))
+
+        // 2. Child device receives CREATE sync in background, schedules alarm in AlarmManager, and acknowledges
+        com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
+            context = context,
+            alarms = repository.familyAlarms.value,
+            currentMemberId = childRoey.id,
+            currentAuthUid = childRoey.id,
+            currentMemberName = childRoey.name,
+            isChildDevice = true,
+            authoritativeRemoteSync = true
+        )
+        assertTrue(
+            "Child device must have the alarm scheduled in AlarmManager after CREATE sync",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmId)
+        )
+
+        // 3. Parent deletes the alarm -> Parent sees pending target cancellation notice ("ממתין לביטול...")
+        assertTrue(repository.deleteFamilyAlarm(alarmId))
+        val pendingNotice = repository.deletedAlarmNotices.value.find { it.alarmId == alarmId }
+        assertNotNull("Parent must see pending cancellation notice", pendingNotice)
+        assertFalse("Cancellation notice must initially be unconfirmed", pendingNotice!!.isConfirmedCancelledOnTarget)
+
+        // 4. Child device (while app is closed) receives ALARM_SYNC_REQUIRED (action=DELETE) via FamilyMessagingService
+        val deleteEventKey = "alarm_del:$alarmId:${childRoey.id}:1700020000"
+        val deleteFcmPayload = mapOf(
+            "eventKey" to deleteEventKey,
+            "eventType" to com.example.notifications.FcmTokenManager.EVENT_ALARM_SYNC_REQUIRED,
+            "action" to "DELETE",
+            "familyId" to "fam_local_test",
+            "alarmId" to alarmId,
+            "targetUid" to childRoey.id,
+            "actorUid" to parentDad.id,
+            "updatedAt" to "1700020000"
+        )
+
+        var backgroundReconcileCount = 0
+        val handledFirstDelete = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+            context = context,
+            data = deleteFcmPayload,
+            signedInUidOverride = childRoey.id,
+            onAlarmReconcileRequested = { famId, delAlarmId, action ->
+                backgroundReconcileCount++
+                assertEquals("DELETE", action)
+                assertEquals(alarmId, delAlarmId)
+                // Execute the background cancellation logic
+                com.example.notifications.FamilyAlarmScheduler.markAlarmDeletedAndCancel(context, delAlarmId)
+                com.example.notifications.FamilyAlarmScheduler.syncAllDeviceAlarms(
+                    context = context,
+                    alarms = emptyList(),
+                    currentMemberId = childRoey.id,
+                    currentAuthUid = childRoey.id,
+                    currentMemberName = childRoey.name,
+                    isChildDevice = true,
+                    deletedAlarmIds = setOf(delAlarmId)
+                )
+            }
+        )
+        assertTrue("Child FamilyMessagingService must accept and process ALARM_SYNC_REQUIRED (DELETE)", handledFirstDelete)
+        assertEquals(1, backgroundReconcileCount)
+
+        // 5. Verify PendingIntent is cancelled in AlarmManager and tombstoned on disk
+        assertFalse(
+            "Cancelled alarm PendingIntent must be removed from AlarmManager in background",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmId)
+        )
+        assertTrue(
+            "Cancelled alarm ID must be persisted in deleted alarm tombstones on disk",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmTombstoned(context, alarmId)
+        )
+
+        // 6. Verify that even if an OS alarm broadcast fires at the scheduled time, FamilyAlarmReceiver blocks ringing
+        com.example.notifications.FamilyAlarmRingingService.dismissActiveAlarm(context)
+        val staleTriggerIntent = com.example.notifications.FamilyAlarmScheduler.buildTriggerBroadcastIntent(
+            context = context,
+            alarm = childAlarm,
+            isSnooze = false
+        )
+        com.example.notifications.FamilyAlarmReceiver().onReceive(context, staleTriggerIntent)
+        assertNull(
+            "Cancelled alarm must NEVER start ringing if a stale broadcast arrives at scheduled time",
+            com.example.notifications.FamilyAlarmRingingService.activeRingingAlarm.value
+        )
+
+        // 7. Verify duplicate DELETE FCM event and duplicate local deletion do not cause errors
+        val handledDuplicateDelete = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+            context = context,
+            data = deleteFcmPayload,
+            signedInUidOverride = childRoey.id,
+            onAlarmReconcileRequested = { _, _, _ ->
+                backgroundReconcileCount++
+            }
+        )
+        assertFalse("Duplicate completed DELETE eventKey must be ignored idempotently", handledDuplicateDelete)
+        assertEquals(1, backgroundReconcileCount)
+
+        // Calling markAlarmDeletedAndCancel a second time must be a safe no-op
+        com.example.notifications.FamilyAlarmScheduler.markAlarmDeletedAndCancel(context, alarmId)
+        assertFalse(com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmId))
+    }
 }
+
 
 
 

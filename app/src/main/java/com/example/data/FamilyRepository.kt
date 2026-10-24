@@ -5578,9 +5578,15 @@ class FamilyRepository(
             explicitlyDeletedAlarmIds.add(delId)
             locallyManagedAlarms.remove(delId)
             knownRemoteAlarmIds.remove(delId)
-            ctx?.let { com.example.notifications.FamilyAlarmScheduler.markAlarmDeletedAndCancel(it, delId) }
+            val cancelledLocally = if (ctx != null) {
+                com.example.notifications.FamilyAlarmScheduler.markAlarmDeletedAndCancel(ctx, delId)
+                !com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(ctx, delId) &&
+                    !com.example.notifications.FamilyAlarmScheduler.isSnoozeLocallyScheduled(ctx, delId)
+            } else {
+                true
+            }
 
-            if (wasInMemory || wasScheduledOrPersisted) {
+            if (cancelledLocally && (wasInMemory || wasScheduledOrPersisted)) {
                 newlyCancelledOnDevice.add(delId)
             }
         }
@@ -5800,11 +5806,13 @@ class FamilyRepository(
 
     private fun acknowledgeAlarmOnTargetDeviceInFirestore(familyId: String, alarm: FamilyAlarm) {
         val db = firestoreProvider() ?: return
-        val authUser = authProvider()?.currentUser ?: return
+        authProvider()?.currentUser ?: return
         if (familyId.isBlank() || alarm.id in explicitlyDeletedAlarmIds) return
         repoScope.launch {
             val docRef = db.collection("families").document(familyId)
                 .collection("alarms").document(alarm.id)
+            // Separate who updated the alarm configuration (updatedByUid) from who acknowledged
+            // local scheduling on the target device (acknowledgedByMemberId).
             val ackFields = mapOf(
                 "scheduleStatus" to alarm.scheduleStatus,
                 "acknowledgedByMemberId" to alarm.acknowledgedByMemberId,
@@ -5812,7 +5820,6 @@ class FamilyRepository(
                 "acknowledgedAtMillis" to alarm.acknowledgedAtMillis,
                 "nextTriggerAtMillis" to alarm.nextTriggerAtMillis,
                 "lastScheduleError" to alarm.lastScheduleError,
-                "updatedByUid" to authUser.uid,
                 "updatedAt" to System.currentTimeMillis()
             )
             runCatching {
