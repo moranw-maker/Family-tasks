@@ -541,6 +541,32 @@ enum class TaskCompletionSyncState {
     FAILED
 }
 
+enum class TaskReminderOffset(
+    val labelHe: String,
+    val labelEn: String,
+    val offsetMinutes: Long?
+) {
+    NONE("ללא תזכורת", "No reminder", null),
+    AT_TIME("בזמן שנקבע", "At due time", 0L),
+    MINUTES_10_BEFORE("10 דקות לפני", "10 min before", 10L),
+    MINUTES_30_BEFORE("30 דקות לפני", "30 min before", 30L),
+    HOUR_1_BEFORE("שעה לפני", "1 hour before", 60L);
+
+    val isEnabled: Boolean
+        get() = this != NONE
+
+    fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
+
+    fun getShortLabel(isHebrew: Boolean): String = getDisplayName(isHebrew)
+
+    companion object {
+        fun fromRaw(raw: String?): TaskReminderOffset {
+            if (raw.isNullOrBlank()) return NONE
+            return entries.find { it.name.equals(raw.trim(), ignoreCase = true) } ?: NONE
+        }
+    }
+}
+
 data class FamilyTask(
     val id: String = UUID.randomUUID().toString(),
     val title: String,
@@ -549,6 +575,8 @@ data class FamilyTask(
     val assignedToMemberId: String,
     val dateEpochDay: Long,
     val dueTimeFormatted: String = "16:00",
+    val hasDueTime: Boolean = false,
+    val reminderOffset: TaskReminderOffset = TaskReminderOffset.NONE,
     val isCompleted: Boolean = false,
     val priority: TaskPriority = TaskPriority.MEDIUM,
     val recurrence: TaskRecurrence = TaskRecurrence.ONCE,
@@ -573,6 +601,49 @@ data class FamilyTask(
      */
     val isFullyApprovedCompletion: Boolean
         get() = isCompleted && approvedByParent
+
+    /**
+     * True when this task has an explicit execution time, a non-NONE reminder offset, and is not completed.
+     */
+    val hasActiveReminder: Boolean
+        get() = hasDueTime && reminderOffset != TaskReminderOffset.NONE && !isCompleted
+
+    /**
+     * Versioned schedule signature used to distinguish an already-fired reminder
+     * from a newly updated time/date/offset for the same [id].
+     */
+    fun reminderScheduleSignature(): String {
+        val normalizedTime = if (hasDueTime) dueTimeFormatted.trim() else ""
+        return "$id|$dateEpochDay|$normalizedTime|${reminderOffset.name}"
+    }
+
+    /**
+     * Computes the exact epoch milliseconds of the task's due date + due time in [zoneId],
+     * or returns `null` if [hasDueTime] is false or [dueTimeFormatted] cannot be parsed as `HH:mm`.
+     */
+    fun computeDueEpochMillis(zoneId: java.time.ZoneId = java.time.ZoneId.systemDefault()): Long? {
+        if (!hasDueTime) return null
+        val parts = dueTimeFormatted.trim().split(":")
+        if (parts.size != 2) return null
+        val hour = parts[0].toIntOrNull() ?: return null
+        val minute = parts[1].toIntOrNull() ?: return null
+        if (hour !in 0..23 || minute !in 0..59) return null
+        val date = LocalDate.ofEpochDay(dateEpochDay)
+        val dateTime = date.atTime(hour, minute)
+        return dateTime.atZone(zoneId).toInstant().toEpochMilli()
+    }
+
+    /**
+     * Computes the epoch milliseconds when the task reminder should trigger in [zoneId],
+     * or returns `null` if [hasDueTime] is false, [reminderOffset] is [TaskReminderOffset.NONE],
+     * or the task is already completed.
+     */
+    fun computeReminderTriggerEpochMillis(zoneId: java.time.ZoneId = java.time.ZoneId.systemDefault()): Long? {
+        if (!hasDueTime || isCompleted) return null
+        val offsetMins = reminderOffset.offsetMinutes ?: return null
+        val dueMillis = computeDueEpochMillis(zoneId) ?: return null
+        return dueMillis - (offsetMins * 60_000L)
+    }
 
     /**
      * Converts UI FamilyTask to Room/Firestore core Task entity.

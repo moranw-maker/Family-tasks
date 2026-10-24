@@ -65,6 +65,7 @@ object FcmTokenManager {
     const val EVENT_TASK_APPROVED = "TASK_APPROVED"
     const val EVENT_TASK_REASSIGNED = "TASK_REASSIGNED"
     const val EVENT_ALARM_SYNC_REQUIRED = "ALARM_SYNC_REQUIRED"
+    const val EVENT_TASK_SYNC_REQUIRED = "TASK_SYNC_REQUIRED"
 
     private val fcmScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 

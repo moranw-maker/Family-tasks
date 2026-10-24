@@ -2305,4 +2305,127 @@ test("Alarm Cancellation Sync Root-Cause Fix: Create -> Child Ack (preserves upd
   );
 });
 
+test("Task Execution Time & Reminders: Preserves 4 notification events, dispatches silent TASK_SYNC_REQUIRED for create/time-change/complete/delete, and cancels previous assignee on reassignment", async () => {
+  const assert = require("node:assert");
+  const functionsIndex = require("./functions/index.js");
+  const {
+    classifyTaskNotificationEvent,
+    classifyTaskReminderSyncEvents,
+  } = functionsIndex;
 
+  assert.strictEqual(typeof classifyTaskNotificationEvent, "function");
+  assert.strictEqual(typeof classifyTaskReminderSyncEvents, "function");
+
+  const PARENT_UID = ALICE_UID;
+  const CHILD_1_UID = BOB_UID;
+  const CHILD_2_UID = "child_maya_789";
+  const taskId = "task_math_homework_1";
+
+  // 1. Create task with execution time & reminder (10 minutes before)
+  const createdTask = {
+    id: taskId,
+    familyId: "fam_velvet_1",
+    title: "שיעורי בית בחשבון",
+    assignedToMemberId: CHILD_1_UID,
+    assignedMemberId: CHILD_1_UID,
+    assignedUid: CHILD_1_UID,
+    dateEpochDay: 20500,
+    dueTimeFormatted: "17:30",
+    hasDueTime: true,
+    reminderOffset: "MINUTES_10_BEFORE",
+    isCompleted: false,
+    approvedByParent: false,
+    points: 20,
+    updatedByUid: PARENT_UID,
+  };
+
+  // Existing notification event #1 (TASK_ASSIGNED) is preserved
+  const assignNotif = classifyTaskNotificationEvent(null, createdTask, taskId);
+  assert.ok(assignNotif);
+  assert.strictEqual(assignNotif.eventType, "TASK_ASSIGNED");
+  assert.strictEqual(assignNotif.targetUid, CHILD_1_UID);
+
+  // Silent TASK_SYNC_REQUIRED event is generated for background reminder scheduling
+  const createSyncSpecs = classifyTaskReminderSyncEvents(null, createdTask, taskId);
+  assert.strictEqual(createSyncSpecs.length, 1);
+  assert.strictEqual(createSyncSpecs[0].eventType, "TASK_SYNC_REQUIRED");
+  assert.strictEqual(createSyncSpecs[0].action, "UPSERT");
+  assert.strictEqual(createSyncSpecs[0].targetUid, CHILD_1_UID);
+  assert.strictEqual(createSyncSpecs[0].hasDueTime, true);
+  assert.strictEqual(createSyncSpecs[0].reminderOffset, "MINUTES_10_BEFORE");
+
+  // 2. Changing execution time (17:30 -> 18:45) produces silent UPSERT sync WITHOUT duplicate TASK_ASSIGNED notification
+  const timeChangedTask = {
+    ...createdTask,
+    dueTimeFormatted: "18:45",
+    updatedByUid: PARENT_UID,
+  };
+  const timeChangeNotif = classifyTaskNotificationEvent(createdTask, timeChangedTask, taskId);
+  assert.strictEqual(timeChangeNotif, null, "Time change alone must not emit duplicate visible notification");
+
+  const timeChangeSyncSpecs = classifyTaskReminderSyncEvents(createdTask, timeChangedTask, taskId);
+  assert.strictEqual(timeChangeSyncSpecs.length, 1);
+  assert.strictEqual(timeChangeSyncSpecs[0].eventType, "TASK_SYNC_REQUIRED");
+  assert.strictEqual(timeChangeSyncSpecs[0].action, "UPSERT");
+  assert.strictEqual(timeChangeSyncSpecs[0].targetUid, CHILD_1_UID);
+  assert.strictEqual(timeChangeSyncSpecs[0].dueTimeFormatted, "18:45");
+
+  // 3. Reassigning task from CHILD_1_UID to CHILD_2_UID:
+  //    - Preserves TASK_REASSIGNED notification (#2)
+  //    - Sends CANCEL to previous assignee (CHILD_1_UID) so old reminder is cancelled on the previous device!
+  //    - Sends UPSERT to new assignee (CHILD_2_UID)
+  const reassignedTask = {
+    ...timeChangedTask,
+    assignedToMemberId: CHILD_2_UID,
+    assignedMemberId: CHILD_2_UID,
+    assignedUid: CHILD_2_UID,
+    updatedByUid: PARENT_UID,
+  };
+  const reassignNotif = classifyTaskNotificationEvent(timeChangedTask, reassignedTask, taskId);
+  assert.ok(reassignNotif);
+  assert.strictEqual(reassignNotif.eventType, "TASK_REASSIGNED");
+  assert.strictEqual(reassignNotif.targetUid, CHILD_2_UID);
+
+  const reassignSyncSpecs = classifyTaskReminderSyncEvents(timeChangedTask, reassignedTask, taskId);
+  assert.strictEqual(reassignSyncSpecs.length, 2);
+  const cancelPrevSpec = reassignSyncSpecs.find((s) => s.targetUid === CHILD_1_UID);
+  const upsertNewSpec = reassignSyncSpecs.find((s) => s.targetUid === CHILD_2_UID);
+  assert.ok(cancelPrevSpec, "Must emit CANCEL sync event for previous assignee");
+  assert.strictEqual(cancelPrevSpec.action, "CANCEL");
+  assert.ok(upsertNewSpec, "Must emit UPSERT sync event for new assignee");
+  assert.strictEqual(upsertNewSpec.action, "UPSERT");
+
+  // 4. Child completes task -> Preserves TASK_SUBMITTED_FOR_APPROVAL (#3) + emits COMPLETE sync to cancel local reminder
+  const completedTask = {
+    ...reassignedTask,
+    isCompleted: true,
+    completedByMemberId: CHILD_2_UID,
+    updatedByUid: CHILD_2_UID,
+  };
+  const submitNotif = classifyTaskNotificationEvent(reassignedTask, completedTask, taskId);
+  assert.ok(submitNotif);
+  assert.strictEqual(submitNotif.eventType, "TASK_SUBMITTED_FOR_APPROVAL");
+
+  const completeSyncSpecs = classifyTaskReminderSyncEvents(reassignedTask, completedTask, taskId);
+  assert.strictEqual(completeSyncSpecs.length, 1);
+  assert.strictEqual(completeSyncSpecs[0].action, "COMPLETE");
+  assert.strictEqual(completeSyncSpecs[0].targetUid, CHILD_2_UID);
+
+  // 5. Parent approves task -> Preserves TASK_APPROVED (#4)
+  const approvedTask = {
+    ...completedTask,
+    approvedByParent: true,
+    updatedByUid: PARENT_UID,
+  };
+  const approveNotif = classifyTaskNotificationEvent(completedTask, approvedTask, taskId);
+  assert.ok(approveNotif);
+  assert.strictEqual(approveNotif.eventType, "TASK_APPROVED");
+  assert.strictEqual(approveNotif.targetUid, CHILD_2_UID);
+
+  // 6. Parent deletes task -> Emits DELETE sync event to cancel local reminder on assignee's device
+  const deleteSyncSpecs = classifyTaskReminderSyncEvents(reassignedTask, null, taskId);
+  assert.strictEqual(deleteSyncSpecs.length, 1);
+  assert.strictEqual(deleteSyncSpecs[0].eventType, "TASK_SYNC_REQUIRED");
+  assert.strictEqual(deleteSyncSpecs[0].action, "DELETE");
+  assert.strictEqual(deleteSyncSpecs[0].targetUid, CHILD_2_UID);
+});

@@ -1,30 +1,44 @@
 package com.example.ui.dialogs
 
+import android.Manifest
+import android.app.DatePickerDialog
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.core.content.ContextCompat
+import com.example.R
 import com.example.model.*
 import com.example.ui.components.TimeFormatUtils
 import com.example.ui.components.TimePickerField
+import com.example.ui.components.VelvetCrystal3DAssetIcon
 import com.example.ui.theme.*
 import java.time.LocalDate
 
@@ -38,18 +52,30 @@ fun AddTaskDialog(
     onDismiss: () -> Unit,
     onSaveTask: (FamilyTask) -> Unit
 ) {
+    val context = LocalContext.current
     var title by remember { mutableStateOf(taskToEdit?.title ?: "") }
     var description by remember { mutableStateOf(taskToEdit?.description ?: "") }
     var selectedMemberId by remember { mutableStateOf(taskToEdit?.assignedToMemberId ?: (members.firstOrNull()?.id ?: "")) }
     var selectedCategory by remember { mutableStateOf(taskToEdit?.category ?: TaskCategory.CLEANING) }
     var selectedPriority by remember { mutableStateOf(taskToEdit?.priority ?: TaskPriority.MEDIUM) }
     var selectedRecurrence by remember { mutableStateOf(taskToEdit?.recurrence ?: TaskRecurrence.DAILY) }
+    var hasDueTime by remember { mutableStateOf(taskToEdit?.hasDueTime ?: false) }
     var dueTime by remember { mutableStateOf(TimeFormatUtils.normalize24HourString(taskToEdit?.dueTimeFormatted, "18:00")) }
+    var selectedReminderOffset by remember {
+        mutableStateOf(taskToEdit?.reminderOffset ?: TaskReminderOffset.NONE)
+    }
     var points by remember { mutableIntStateOf(taskToEdit?.points ?: 15) }
     var selectedTaskDate by remember {
         mutableStateOf(
             taskToEdit?.let { LocalDate.ofEpochDay(it.dateEpochDay) } ?: initialDate
         )
+    }
+    var notificationPermissionDeniedNotice by remember { mutableStateOf(false) }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        notificationPermissionDeniedNotice = !granted
     }
 
     val scrollState = rememberScrollState()
@@ -117,7 +143,7 @@ fun AddTaskDialog(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Gemini Smart Suggestions
+                // Smart Suggestions
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -130,7 +156,7 @@ fun AddTaskDialog(
                                 .clip(RoundedCornerShape(12.dp))
                                 .clickable {
                                     title = suggestion
-                                    description = if (isHebrew) "משימה מומלצת מ-Gemini לארגון הבית" else "Suggested task by Gemini"
+                                    description = if (isHebrew) "משימה מומלצת לארגון הבית" else "Suggested household task"
                                 }
                         ) {
                             Text(
@@ -161,7 +187,7 @@ fun AddTaskDialog(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Assign to Member (Select who does this task)
+                // Assign to Member
                 Text(
                     text = if (isHebrew) "למי מיועדת המשימה?" else "Assign To:",
                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
@@ -180,6 +206,7 @@ fun AddTaskDialog(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(16.dp))
                                 .clickable { selectedMemberId = member.id }
+                                .testTag("assign_member_chip_${member.id}")
                         ) {
                             Row(
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -217,7 +244,7 @@ fun AddTaskDialog(
                         Surface(
                             shape = RoundedCornerShape(14.dp),
                             color = if (isSelected) GoogleBlueLight else MaterialTheme.colorScheme.surfaceVariant,
-                            border = if (isSelected) androidx.compose.foundation.BorderStroke(1.5.dp, GoogleBlue) else null,
+                            border = if (isSelected) BorderStroke(1.5.dp, GoogleBlue) else null,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(14.dp))
                                 .clickable { selectedCategory = cat }
@@ -242,9 +269,53 @@ fun AddTaskDialog(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Date Quick Selection (preserves selectedTaskDate when changing time)
+                // Date Selection (Quick Chips + Calendar DatePicker button)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = if (isHebrew) "תאריך ביצוע:" else "Execution Date:",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                    )
+                    TextButton(
+                        onClick = {
+                            DatePickerDialog(
+                                context,
+                                { _, year, month, dayOfMonth ->
+                                    selectedTaskDate = LocalDate.of(year, month + 1, dayOfMonth)
+                                },
+                                selectedTaskDate.year,
+                                selectedTaskDate.monthValue - 1,
+                                selectedTaskDate.dayOfMonth
+                            ).show()
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        modifier = Modifier.testTag("task_pick_custom_date_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CalendarMonth,
+                            contentDescription = null,
+                            tint = GoogleBlue,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (isHebrew)
+                                "בחר תאריך (${selectedTaskDate.dayOfMonth}/${selectedTaskDate.monthValue})"
+                            else
+                                "Pick Date (${selectedTaskDate.dayOfMonth}/${selectedTaskDate.monthValue})",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = GoogleBlue
+                            )
+                        )
+                    }
+                }
+
                 val today = remember { LocalDate.now() }
-                val dateOptions = remember(initialDate, today, isHebrew) {
+                val dateOptions = remember(initialDate, today, selectedTaskDate, isHebrew) {
                     buildList {
                         add(today to (if (isHebrew) "היום" else "Today"))
                         add(today.plusDays(1) to (if (isHebrew) "מחר" else "Tomorrow"))
@@ -284,46 +355,156 @@ fun AddTaskDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                // Time & Points Row
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                // Optional Execution Time & Reminder Section (Velvet Crystal Card)
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                    border = BorderStroke(
+                        1.dp,
+                        if (hasDueTime) GoogleBlue.copy(alpha = 0.45f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("task_execution_time_section")
                 ) {
-                    TimePickerField(
-                        label = if (isHebrew) "שעת יעד" else "Due Time",
-                        time = dueTime,
-                        onTimeSelected = { dueTime = it },
-                        isHebrew = isHebrew,
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    // Points Chips
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (isHebrew) "נקודות פרס:" else "Reward Points:",
-                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            listOf(10, 15, 20).forEach { pt ->
-                                val isPtSelected = points == pt
-                                Surface(
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = if (isPtSelected) GoogleYellowDark else GoogleYellowLight,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .clickable { points = pt }
-                                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                VelvetCrystal3DAssetIcon(
+                                    drawableRes = R.drawable.ic_velvet_due_clock,
+                                    size = 24.dp
+                                )
+                                Column {
                                     Text(
-                                        text = "+$pt",
+                                        text = if (isHebrew) "הגדר שעת ביצוע ותזכורת" else "Set Execution Time & Reminder",
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    )
+                                    Text(
+                                        text = if (hasDueTime) {
+                                            if (isHebrew) "שעת יעד פעילה: $dueTime" else "Active due time: $dueTime"
+                                        } else {
+                                            if (isHebrew) "אופציונלי — ללא שעה ספציפית" else "Optional — no specific time"
+                                        },
                                         style = MaterialTheme.typography.labelSmall.copy(
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (isPtSelected) Color.White else GoogleYellowDark
-                                        ),
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = hasDueTime,
+                                onCheckedChange = { enabled ->
+                                    hasDueTime = enabled
+                                    if (!enabled) {
+                                        selectedReminderOffset = TaskReminderOffset.NONE
+                                    } else if (selectedReminderOffset == TaskReminderOffset.NONE) {
+                                        selectedReminderOffset = TaskReminderOffset.AT_TIME
+                                    }
+                                },
+                                modifier = Modifier.testTag("task_has_due_time_switch")
+                            )
+                        }
+
+                        AnimatedVisibility(visible = hasDueTime) {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                TimePickerField(
+                                    label = if (isHebrew) "שעת ביצוע" else "Execution Time",
+                                    time = dueTime,
+                                    onTimeSelected = { dueTime = it },
+                                    isHebrew = isHebrew,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("task_due_time_picker")
+                                )
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    VelvetCrystal3DAssetIcon(
+                                        drawableRes = R.drawable.ic_velvet_reminder_bell,
+                                        size = 18.dp
+                                    )
+                                    Text(
+                                        text = if (isHebrew) "תזכורת לפני המשימה:" else "Task Reminder:",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    )
+                                }
+
+                                LazyRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("task_reminder_offset_row")
+                                ) {
+                                    items(TaskReminderOffset.values()) { offset ->
+                                        val isSelected = selectedReminderOffset == offset
+                                        Surface(
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.surface,
+                                            border = BorderStroke(
+                                                1.dp,
+                                                if (isSelected) GoogleBlue else MaterialTheme.colorScheme.outlineVariant
+                                            ),
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .clickable {
+                                                    selectedReminderOffset = offset
+                                                    if (offset.isEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                                        val hasNotifPerm = ContextCompat.checkSelfPermission(
+                                                            context,
+                                                            Manifest.permission.POST_NOTIFICATIONS
+                                                        ) == PackageManager.PERMISSION_GRANTED
+                                                        if (!hasNotifPerm) {
+                                                            notificationPermissionLauncher.launch(
+                                                                Manifest.permission.POST_NOTIFICATIONS
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                .testTag("task_reminder_chip_${offset.name}")
+                                        ) {
+                                            Text(
+                                                text = offset.getShortLabel(isHebrew),
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                                    color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface
+                                                ),
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                if (notificationPermissionDeniedNotice) {
+                                    Text(
+                                        text = if (isHebrew)
+                                            "הרשאת התראות כבויה במכשיר זה — התזכורת תישמר ותופעל במכשיר המשויך אם ההרשאה פעילה בו."
+                                        else
+                                            "Notifications are disabled on this device — the reminder will still sync to the assigned member's device.",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = MaterialTheme.colorScheme.error,
+                                            fontSize = 11.sp
+                                        )
                                     )
                                 }
                             }
@@ -331,9 +512,53 @@ fun AddTaskDialog(
                     }
                 }
 
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Points Selection Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        VelvetCrystal3DAssetIcon(
+                            drawableRes = R.drawable.ic_velvet_points_star,
+                            size = 20.dp
+                        )
+                        Text(
+                            text = if (isHebrew) "נקודות פרס:" else "Reward Points:",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(10, 15, 20, 30).forEach { pt ->
+                            val isPtSelected = points == pt
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isPtSelected) GoogleYellowDark else GoogleYellowLight,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { points = pt }
+                            ) {
+                                Text(
+                                    text = "+$pt",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isPtSelected) Color.White else GoogleYellowDark
+                                    ),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Recurrence Selection (One-time, Daily, School Days, Weekly, Bi-weekly, Monthly)
+                // Recurrence Selection
                 Text(
                     text = if (isHebrew) "תדירות משימה חוזרת 🔁:" else "Recurrence 🔁:",
                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
@@ -370,7 +595,8 @@ fun AddTaskDialog(
 
                 Spacer(modifier = Modifier.height(20.dp))
 
-                // Submit Button
+                // Submit Button (Velvet Blue-Purple Gradient)
+                val submitShape = RoundedCornerShape(28.dp)
                 Button(
                     onClick = {
                         if (title.isNotBlank()) {
@@ -379,6 +605,11 @@ fun AddTaskDialog(
                                 dateEpochDay = selectedTaskDate.toEpochDay(),
                                 time24h = normalized24h
                             )
+                            val effectiveReminderOffset = if (hasDueTime) {
+                                selectedReminderOffset
+                            } else {
+                                TaskReminderOffset.NONE
+                            }
                             val taskResult = if (taskToEdit != null) {
                                 taskToEdit.copy(
                                     title = title.trim(),
@@ -387,6 +618,8 @@ fun AddTaskDialog(
                                     assignedToMemberId = selectedMemberId,
                                     dateEpochDay = preservedEpochDay,
                                     dueTimeFormatted = normalized24h,
+                                    hasDueTime = hasDueTime,
+                                    reminderOffset = effectiveReminderOffset,
                                     priority = selectedPriority,
                                     points = points,
                                     recurrence = selectedRecurrence
@@ -400,6 +633,8 @@ fun AddTaskDialog(
                                     assignedToMemberId = selectedMemberId,
                                     dateEpochDay = preservedEpochDay,
                                     dueTimeFormatted = normalized24h,
+                                    hasDueTime = hasDueTime,
+                                    reminderOffset = effectiveReminderOffset,
                                     priority = selectedPriority,
                                     points = points,
                                     recurrence = selectedRecurrence,
@@ -409,12 +644,19 @@ fun AddTaskDialog(
                             onSaveTask(taskResult)
                         }
                     },
-                    shape = RoundedCornerShape(28.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = VibrantActionBlue),
-                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 4.dp),
+                    shape = submitShape,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                    contentPadding = PaddingValues(0.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(52.dp)
+                        .shadow(6.dp, submitShape, spotColor = VibrantActionBlue.copy(alpha = 0.45f))
+                        .background(
+                            Brush.horizontalGradient(
+                                colors = listOf(Color(0xFF4F46E5), Color(0xFF2563EB), Color(0xFF6366F1))
+                            ),
+                            submitShape
+                        )
                         .testTag("save_task_btn")
                 ) {
                     Text(
@@ -424,6 +666,7 @@ fun AddTaskDialog(
                             if (isHebrew) "שמור ושבץ משימה" else "Save & Assign Chore"
                         },
                         fontWeight = FontWeight.Bold,
+                        color = Color.White,
                         fontSize = 15.sp
                     )
                 }
@@ -431,3 +674,4 @@ fun AddTaskDialog(
         }
     }
 }
+

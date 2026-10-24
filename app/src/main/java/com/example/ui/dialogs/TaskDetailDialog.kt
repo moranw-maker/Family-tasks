@@ -315,14 +315,26 @@ fun TaskDetailSheetContent(
 
                 DetailInfoRow(
                     icon = Icons.Default.Schedule,
-                    label = if (isHebrew) "מועד ושעה (24ש׳)" else "Date & Time (24h)",
-                    value = "$dateText • $normalizedTime24h"
+                    label = if (isHebrew) "מועד ביצוע" else "Execution Date & Time",
+                    value = if (task.hasDueTime) {
+                        "$dateText • $normalizedTime24h"
+                    } else {
+                        "$dateText • ${if (isHebrew) "ללא שעה קבועה ($normalizedTime24h)" else "Flexible ($normalizedTime24h)"}"
+                    }
                 )
+
+                if (task.hasDueTime && task.reminderOffset != TaskReminderOffset.NONE) {
+                    DetailInfoRow(
+                        icon = Icons.Default.NotificationsActive,
+                        label = if (isHebrew) "תזכורת מתוזמנת" else "Scheduled Reminder",
+                        value = task.reminderOffset.getDisplayName(isHebrew)
+                    )
+                }
 
                 DetailInfoRow(
                     icon = Icons.Default.Star,
                     label = if (isHebrew) "נקודות תגמול (לאחר אישור הורה)" else "Reward Points (upon approval)",
-                    value = "+${task.points} ⭐",
+                    value = "+${task.points}",
                     valueColor = PastelYellowDark
                 )
 

@@ -407,102 +407,114 @@ fun MonthCalendarView(
     }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val isCompactHeight = maxHeight < 640.dp
-        val maxLabelsPerCell = if (isCompactHeight) 2 else 3
-        val cellHeight = if (isCompactHeight) 56.dp else 64.dp
-        val gridHeight = cellHeight * rowCount + 6.dp
+        val isCompactHeight = maxHeight < 680.dp
+        val maxLabelsPerCell = if (isCompactHeight || rowCount >= 6) 2 else 3
+        val cellHeight = when {
+            rowCount >= 6 && isCompactHeight -> 52.dp
+            rowCount >= 6 -> 58.dp
+            isCompactHeight -> 56.dp
+            else -> 64.dp
+        }
+        val gridHeight = cellHeight * rowCount + 8.dp
+        val selectedDateTasks = tasksByEpochDay[selectedDate.toEpochDay()].orEmpty()
 
-        Column(modifier = Modifier.fillMaxSize()) {
-            // Upper Portion: Soft Glass Month Grid Card
-            FamilyGlassCard(
-                cornerRadius = 24.dp,
-                elevation = 3.dp,
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
-            ) {
-                // Weekday Header Strip
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceAround
-                ) {
-                    daysOfWeekLabels.forEach { label ->
-                        Text(
-                            text = label,
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.ExtraBold,
-                                color = glass.primaryAccent,
-                                fontSize = 11.sp
-                            ),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("calendar_month_scroll_container"),
+            contentPadding = PaddingValues(bottom = 112.dp)
+        ) {
+            item(key = "month_grid_and_selected_day_agenda") {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    // Upper Portion: Soft Glass Month Grid Card (dynamic height for 4, 5, or 6 week rows)
+                    FamilyGlassCard(
+                        cornerRadius = 24.dp,
+                        elevation = 3.dp,
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp)
+                    ) {
+                        // Weekday Header Strip
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceAround
+                        ) {
+                            daysOfWeekLabels.forEach { label ->
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = glass.primaryAccent,
+                                        fontSize = 11.sp
+                                    ),
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
 
-                // Month Cells Grid
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(7),
-                    userScrollEnabled = false,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(gridHeight)
-                        .testTag("calendar_month_grid")
-                ) {
-                    items(totalCells) { cellIndex ->
-                        val dayNumber = cellIndex - dayOfWeekIndex + 1
-                        if (dayNumber in 1..daysInMonth) {
-                            val date = displayMonth.atDay(dayNumber)
-                            val isSelected = date == selectedDate
-                            val isToday = date == today
-                            val dayTasks = tasksByEpochDay[date.toEpochDay()].orEmpty()
+                        // Month Cells Grid
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(7),
+                            userScrollEnabled = false,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(gridHeight)
+                                .testTag("calendar_month_grid")
+                        ) {
+                            items(totalCells) { cellIndex ->
+                                val dayNumber = cellIndex - dayOfWeekIndex + 1
+                                if (dayNumber in 1..daysInMonth) {
+                                    val date = displayMonth.atDay(dayNumber)
+                                    val isSelected = date == selectedDate
+                                    val isToday = date == today
+                                    val dayTasks = tasksByEpochDay[date.toEpochDay()].orEmpty()
 
-                            MonthDayCell(
-                                date = date,
-                                isSelected = isSelected,
-                                isToday = isToday,
-                                tasks = dayTasks,
-                                isHebrew = isHebrew,
-                                maxVisibleTasks = maxLabelsPerCell,
-                                cellHeight = cellHeight,
-                                onDateClick = { onDateSelect(date) },
-                                onTaskStripClick = { task ->
-                                    onDateSelect(date)
-                                    onTaskClick(task)
+                                    MonthDayCell(
+                                        date = date,
+                                        isSelected = isSelected,
+                                        isToday = isToday,
+                                        tasks = dayTasks,
+                                        isHebrew = isHebrew,
+                                        maxVisibleTasks = maxLabelsPerCell,
+                                        cellHeight = cellHeight,
+                                        onDateClick = { onDateSelect(date) },
+                                        onTaskStripClick = { task ->
+                                            onDateSelect(date)
+                                            onTaskClick(task)
+                                        }
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .height(cellHeight)
+                                            .padding(1.dp)
+                                    )
                                 }
-                            )
-                        } else {
-                            Box(
-                                modifier = Modifier
-                                    .height(cellHeight)
-                                    .padding(1.dp)
-                            )
+                            }
                         }
                     }
+
+                    // Lower Portion: Dedicated Selected-Day Agenda Section directly below calendar
+                    SelectedDayAgendaSection(
+                        selectedDate = selectedDate,
+                        today = today,
+                        tasks = selectedDateTasks,
+                        members = members,
+                        currentMember = currentMember,
+                        isHebrew = isHebrew,
+                        taskSyncStates = taskSyncStates,
+                        onTaskClick = onTaskClick,
+                        onToggleTask = onToggleTask,
+                        onApproveTask = onApproveTask,
+                        onAddNewTask = onAddNewTask,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             }
-
-            // Lower Portion: Dedicated Selected-Day Agenda Section directly below calendar
-            val selectedDateTasks = tasksByEpochDay[selectedDate.toEpochDay()].orEmpty()
-            SelectedDayAgendaSection(
-                selectedDate = selectedDate,
-                today = today,
-                tasks = selectedDateTasks,
-                members = members,
-                currentMember = currentMember,
-                isHebrew = isHebrew,
-                taskSyncStates = taskSyncStates,
-                onTaskClick = onTaskClick,
-                onToggleTask = onToggleTask,
-                onApproveTask = onApproveTask,
-                onAddNewTask = onAddNewTask,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            )
         }
     }
 }
@@ -763,12 +775,11 @@ private fun SelectedDayAgendaSection(
                 }
             }
         } else {
-            LazyColumn(
-                contentPadding = PaddingValues(bottom = 84.dp),
+            Column(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxWidth()
             ) {
-                items(tasks, key = { it.id }) { task ->
+                tasks.forEach { task ->
                     val assignedMember = members.find { it.id == task.assignedToMemberId }
                     val syncState = taskSyncStates[task.id] ?: when {
                         task.isCompleted && task.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED

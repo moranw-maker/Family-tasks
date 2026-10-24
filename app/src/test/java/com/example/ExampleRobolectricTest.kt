@@ -3119,9 +3119,196 @@ class ExampleRobolectricTest {
         com.example.notifications.FamilyAlarmScheduler.markAlarmDeletedAndCancel(context, alarmId)
         assertFalse(com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmId))
     }
+
+    @Test
+    fun `test task reminder scheduler schedules cancels on time change complete delete reassignment and deduplicates by versioned signature`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.notifications.TaskReminderScheduler.clearAllForTesting(context)
+
+        val childId = "m_kid1"
+        val siblingId = "m_kid2"
+        val futureDate = java.time.LocalDate.now().plusDays(1)
+        val taskId = "task_reminder_e2e_1"
+
+        val taskV1 = com.example.model.FamilyTask(
+            id = taskId,
+            title = "להכין תיק לבית הספר",
+            description = "ספרים ומחברות",
+            category = com.example.model.TaskCategory.HOMEWORK,
+            assignedToMemberId = childId,
+            dateEpochDay = futureDate.toEpochDay(),
+            dueTimeFormatted = "18:00",
+            hasDueTime = true,
+            reminderOffset = com.example.model.TaskReminderOffset.MINUTES_10_BEFORE,
+            points = 15,
+            isCompleted = false
+        )
+
+        // 1. Schedule V1 reminder for assigned child
+        val scheduledV1 = com.example.notifications.TaskReminderScheduler.scheduleOrUpdateTaskReminder(
+            context = context,
+            task = taskV1,
+            assigneeName = "רועי"
+        )
+        assertTrue("Task V1 with future execution time & reminder must be scheduled", scheduledV1)
+        assertTrue(
+            "PendingIntent for task must exist in AlarmManager",
+            com.example.notifications.TaskReminderScheduler.isTaskReminderPendingInAlarmManager(context, taskId)
+        )
+        assertEquals(
+            taskV1.reminderScheduleSignature(),
+            com.example.notifications.TaskReminderScheduler.getActiveScheduledSignature(context, taskId)
+        )
+
+        // 2. Simulate V1 reminder firing via TaskReminderReceiver -> records fired signature & prevents duplicate firing of same V1 signature
+        val fireIntentV1 = android.content.Intent(context, com.example.notifications.TaskReminderReceiver::class.java).apply {
+            action = com.example.notifications.TaskReminderScheduler.ACTION_TRIGGER_TASK_REMINDER
+            putExtra(com.example.notifications.TaskReminderScheduler.EXTRA_TASK_ID, taskId)
+            putExtra(com.example.notifications.TaskReminderScheduler.EXTRA_TASK_TITLE, taskV1.title)
+            putExtra(com.example.notifications.TaskReminderScheduler.EXTRA_TASK_DUE_TIME, taskV1.dueTimeFormatted)
+            putExtra(com.example.notifications.TaskReminderScheduler.EXTRA_ASSIGNEE_ID, childId)
+            putExtra(com.example.notifications.TaskReminderScheduler.EXTRA_ASSIGNEE_NAME, "רועי")
+            putExtra(com.example.notifications.TaskReminderScheduler.EXTRA_TASK_REMINDER_OFFSET, taskV1.reminderOffset.name)
+            putExtra(com.example.notifications.TaskReminderScheduler.EXTRA_SCHEDULE_SIGNATURE, taskV1.reminderScheduleSignature())
+        }
+        com.example.notifications.TaskReminderReceiver().onReceive(context, fireIntentV1)
+        assertTrue(
+            "V1 signature must be marked as fired after broadcast",
+            com.example.notifications.TaskReminderScheduler.isSignatureAlreadyFired(context, taskV1.reminderScheduleSignature())
+        )
+
+        // Attempting to re-schedule identical V1 signature must be skipped (no duplicate reminder for same version)
+        val rescheduledSameV1 = com.example.notifications.TaskReminderScheduler.scheduleOrUpdateTaskReminder(
+            context = context,
+            task = taskV1,
+            assigneeName = "רועי"
+        )
+        assertFalse("Already-fired identical V1 signature must not be re-scheduled", rescheduledSameV1)
+
+        // 3. Parent changes execution time from 18:00 to 19:30 (V2) -> new signature MUST cancel old PendingIntent and schedule freshly!
+        val taskV2 = taskV1.copy(dueTimeFormatted = "19:30")
+        assertNotEquals(taskV1.reminderScheduleSignature(), taskV2.reminderScheduleSignature())
+        assertFalse(
+            "New V2 signature must NOT be blocked by V1 having fired",
+            com.example.notifications.TaskReminderScheduler.isSignatureAlreadyFired(context, taskV2.reminderScheduleSignature())
+        )
+        val scheduledV2 = com.example.notifications.TaskReminderScheduler.scheduleOrUpdateTaskReminder(
+            context = context,
+            task = taskV2,
+            assigneeName = "רועי"
+        )
+        assertTrue("Task V2 with updated execution time must be scheduled", scheduledV2)
+        assertEquals(
+            taskV2.reminderScheduleSignature(),
+            com.example.notifications.TaskReminderScheduler.getActiveScheduledSignature(context, taskId)
+        )
+
+        // 4. Reassigning task to sibling (m_kid2) -> syncTaskRemindersForCurrentDevice on m_kid1 cancels local reminder!
+        val taskReassigned = taskV2.copy(assignedToMemberId = siblingId)
+        com.example.notifications.TaskReminderScheduler.syncTaskRemindersForCurrentDevice(
+            context = context,
+            tasks = listOf(taskReassigned),
+            currentMemberId = childId,
+            currentAuthUid = childId,
+            currentMemberName = "רועי"
+        )
+        assertFalse(
+            "Reassigning task to another member must cancel the local PendingIntent on previous assignee's device",
+            com.example.notifications.TaskReminderScheduler.isTaskReminderPendingInAlarmManager(context, taskId)
+        )
+
+        // 5. Re-assign back to childId, then mark task completed -> cancels local reminder
+        com.example.notifications.TaskReminderScheduler.syncTaskRemindersForCurrentDevice(
+            context = context,
+            tasks = listOf(taskV2),
+            currentMemberId = childId,
+            currentAuthUid = childId,
+            currentMemberName = "רועי"
+        )
+        assertTrue(com.example.notifications.TaskReminderScheduler.isTaskReminderPendingInAlarmManager(context, taskId))
+
+        val taskCompleted = taskV2.copy(isCompleted = true)
+        com.example.notifications.TaskReminderScheduler.scheduleOrUpdateTaskReminder(
+            context = context,
+            task = taskCompleted,
+            assigneeName = "רועי"
+        )
+        assertFalse(
+            "Completing task must cancel the scheduled reminder PendingIntent",
+            com.example.notifications.TaskReminderScheduler.isTaskReminderPendingInAlarmManager(context, taskId)
+        )
+    }
+
+    @Test
+    fun `test closed app silent TASK_SYNC_REQUIRED fcm reconciles task reminder without duplicate push notification`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.notifications.FcmTokenManager.clearAllDispatchedEventsForTesting()
+        com.example.notifications.TaskReminderScheduler.clearAllForTesting(context)
+
+        val childId = "m_kid1"
+        val parentId = "m_dad"
+        val taskId = "task_closed_app_fcm_1"
+        val futureEpochDay = java.time.LocalDate.now().plusDays(1).toEpochDay()
+
+        // 1. Closed-app FCM arrives with TASK_SYNC_REQUIRED (UPSERT)
+        val upsertPayload = mapOf(
+            "eventKey" to "task_sync:$taskId:UPSERT:$childId:1700050000",
+            "eventType" to com.example.notifications.FcmTokenManager.EVENT_TASK_SYNC_REQUIRED,
+            "action" to "UPSERT",
+            "familyId" to "fam_local_test",
+            "taskId" to taskId,
+            "targetUid" to childId,
+            "actorUid" to parentId,
+            "taskTitle" to "לסדר את השולחן",
+            "assignedToMemberId" to childId,
+            "dateEpochDay" to futureEpochDay.toString(),
+            "dueTimeFormatted" to "17:00",
+            "hasDueTime" to "true",
+            "reminderOffset" to "MINUTES_30_BEFORE",
+            "isCompleted" to "false",
+            "updatedAt" to "1700050000"
+        )
+
+        val syncCallbackActions = mutableListOf<String>()
+        val handledUpsert = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+            context = context,
+            data = upsertPayload,
+            signedInUidOverride = childId,
+            onTaskReminderReconcileRequested = { _, syncedTaskId, operation ->
+                syncCallbackActions.add("$syncedTaskId:$operation")
+            }
+        )
+        assertTrue("FamilyMessagingService must handle silent TASK_SYNC_REQUIRED (UPSERT)", handledUpsert)
+        assertEquals(listOf("$taskId:UPSERT"), syncCallbackActions)
+        assertTrue(
+            "Immediate payload handling must schedule the reminder in AlarmManager while app is closed",
+            com.example.notifications.TaskReminderScheduler.isTaskReminderPendingInAlarmManager(context, taskId)
+        )
+
+        // 2. Closed-app FCM arrives with TASK_SYNC_REQUIRED (DELETE) -> cancels scheduled reminder immediately
+        val deletePayload = mapOf(
+            "eventKey" to "task_sync:$taskId:DELETE:$childId:1700050099",
+            "eventType" to com.example.notifications.FcmTokenManager.EVENT_TASK_SYNC_REQUIRED,
+            "action" to "DELETE",
+            "familyId" to "fam_local_test",
+            "taskId" to taskId,
+            "targetUid" to childId,
+            "actorUid" to parentId,
+            "updatedAt" to "1700050099"
+        )
+        val handledDelete = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+            context = context,
+            data = deletePayload,
+            signedInUidOverride = childId,
+            onTaskReminderReconcileRequested = { _, syncedTaskId, operation ->
+                syncCallbackActions.add("$syncedTaskId:$operation")
+            }
+        )
+        assertTrue("FamilyMessagingService must handle silent TASK_SYNC_REQUIRED (DELETE)", handledDelete)
+        assertFalse(
+            "DELETE sync event must immediately cancel the scheduled task reminder in AlarmManager",
+            com.example.notifications.TaskReminderScheduler.isTaskReminderPendingInAlarmManager(context, taskId)
+        )
+    }
 }
-
-
-
-
 

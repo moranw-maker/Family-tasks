@@ -64,6 +64,16 @@ data class Task(
     @set:PropertyName("due_time")
     var dueTime: String = "18:00",
 
+    @ColumnInfo(name = "has_due_time")
+    @get:PropertyName("has_due_time")
+    @set:PropertyName("has_due_time")
+    var hasDueTime: Boolean = false,
+
+    @ColumnInfo(name = "reminder_offset")
+    @get:PropertyName("reminder_offset")
+    @set:PropertyName("reminder_offset")
+    var reminderOffset: String = "NONE",
+
     @ColumnInfo(name = "assigned_family_member")
     @get:PropertyName("assigned_family_member")
     @set:PropertyName("assigned_family_member")
@@ -169,6 +179,7 @@ data class Task(
      */
     @Exclude
     fun toFamilyTask(): FamilyTask {
+        val parsedOffset = TaskReminderOffset.fromRaw(reminderOffset)
         return FamilyTask(
             id = id,
             title = taskName,
@@ -177,6 +188,9 @@ data class Task(
             assignedToMemberId = assignedMemberId.ifEmpty { assignedFamilyMember },
             dateEpochDay = if (dueDateEpochDay != 0L) dueDateEpochDay else System.currentTimeMillis() / (1000 * 60 * 60 * 24),
             dueTimeFormatted = dueTime,
+            hasDueTime = hasDueTime,
+            reminderOffset = parsedOffset,
+             reminderEnabled = hasDueTime && parsedOffset != TaskReminderOffset.NONE,
             priority = try { TaskPriority.valueOf(priority) } catch (_: Exception) { TaskPriority.MEDIUM },
             points = points,
             recurrence = try { TaskRecurrence.valueOf(recurrence) } catch (_: Exception) { TaskRecurrence.DAILY },
@@ -207,6 +221,8 @@ data class Task(
                 dueDate = familyTask.dueTimeFormatted,
                 dueDateEpochDay = familyTask.dateEpochDay,
                 dueTime = familyTask.dueTimeFormatted,
+                hasDueTime = familyTask.hasDueTime,
+                reminderOffset = familyTask.reminderOffset.name,
                 assignedFamilyMember = assignedMemberName.ifEmpty { familyTask.assignedToMemberId },
                 assignedMemberId = familyTask.assignedToMemberId,
                 isCompleted = familyTask.isCompleted,

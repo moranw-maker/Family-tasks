@@ -31,6 +31,10 @@ object NotificationHelper {
     private const val CHANNEL_INVITATIONS_NAME = "הזמנות ועדכוני משפחה"
     private const val CHANNEL_INVITATIONS_DESC = "עדכונים על הצטרפות חברי משפחה"
 
+    const val CHANNEL_TASK_REMINDERS_ID = "family_task_scheduled_reminders"
+    private const val CHANNEL_TASK_REMINDERS_NAME = "תזכורות מועד ביצוע משימות"
+    private const val CHANNEL_TASK_REMINDERS_DESC = "תזכורות מתוזמנות מראש לביצוע משימות משפחתיות במועד שנקבע"
+
     fun createNotificationChannels(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
@@ -57,6 +61,56 @@ object NotificationHelper {
                 enableLights(true)
             }
             notificationManager.createNotificationChannel(inviteChannel)
+
+            val reminderChannel = NotificationChannel(
+                CHANNEL_TASK_REMINDERS_ID,
+                CHANNEL_TASK_REMINDERS_NAME,
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = CHANNEL_TASK_REMINDERS_DESC
+                enableVibration(true)
+                enableLights(true)
+            }
+            notificationManager.createNotificationChannel(reminderChannel)
+        }
+    }
+
+    /**
+     * Displays a scheduled task due-time reminder notification for the assigned family member.
+     */
+    fun showTaskScheduledReminderNotification(
+        context: Context,
+        taskId: String,
+        taskTitle: String,
+        dueTimeFormatted: String,
+        reminderOffsetLabelHe: String,
+        assigneeName: String = "",
+        points: Int = 0,
+        notificationId: Int
+    ) {
+        val namePrefix = if (assigneeName.isNotBlank()) "$assigneeName • " else ""
+        val title = "תזכורת למשימה: $taskTitle"
+        val pointsSuffix = if (points > 0) " • +$points נק'" else ""
+        val body = "${namePrefix}מועד ביצוע: $dueTimeFormatted ($reminderOffsetLabelHe)$pointsSuffix"
+
+        showPushNotification(
+            context = context,
+            channelId = CHANNEL_TASK_REMINDERS_ID,
+            title = title,
+            message = body,
+            bigText = body,
+            notificationId = notificationId,
+            taskId = taskId
+        )
+    }
+
+    /**
+     * Cancels any active OS notification for a task reminder when the task is completed,
+     * rescheduled, reassigned, or deleted.
+     */
+    fun cancelTaskReminderNotification(context: Context, notificationId: Int) {
+        runCatching {
+            NotificationManagerCompat.from(context).cancel(notificationId)
         }
     }
 
@@ -124,7 +178,7 @@ object NotificationHelper {
             .setContentText(message)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText ?: message))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setCategory(if (channelId == CHANNEL_TASK_REMINDERS_ID) NotificationCompat.CATEGORY_REMINDER else NotificationCompat.CATEGORY_MESSAGE)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .setDefaults(NotificationCompat.DEFAULT_ALL)

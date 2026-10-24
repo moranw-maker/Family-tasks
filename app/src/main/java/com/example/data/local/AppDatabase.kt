@@ -11,7 +11,7 @@ import com.example.model.Task
 
 @Database(
     entities = [Task::class, OfflineSyncQueueEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 @TypeConverters(RoomDateConverter::class)
@@ -50,6 +50,22 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Safe, non-destructive migration contract preserving user data across versions 2 -> 3.
+         * Adds optional due time flag (`has_due_time`) and reminder offset (`reminder_offset`)
+         * with backward-compatible defaults (`0` and `'NONE'`).
+         */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                runCatching {
+                    db.execSQL("ALTER TABLE `tasks` ADD COLUMN `has_due_time` INTEGER NOT NULL DEFAULT 0")
+                }
+                runCatching {
+                    db.execSQL("ALTER TABLE `tasks` ADD COLUMN `reminder_offset` TEXT NOT NULL DEFAULT 'NONE'")
+                }
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -57,7 +73,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "family_tasks_local.db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { INSTANCE = it }
             }

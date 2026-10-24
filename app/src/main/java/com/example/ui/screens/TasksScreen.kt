@@ -31,6 +31,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.R
 import com.example.model.*
 import com.example.ui.components.FamilyEmptyState
 import com.example.ui.components.FamilyGlassCard
@@ -40,6 +41,7 @@ import com.example.ui.components.FamilySectionHeader
 import com.example.ui.components.FamilyStatusChip
 import com.example.ui.components.SoftGlassScreenBackground
 import com.example.ui.components.TimeFormatUtils
+import com.example.ui.components.VelvetCrystal3DAssetIcon
 import com.example.ui.components.VelvetSearchContainer
 import com.example.ui.components.velvetNeumorphicSheen
 import com.example.ui.dialogs.TaskDetailDialog
@@ -93,7 +95,7 @@ private fun formatHebrewDashboardDate(date: LocalDate, isHebrew: Boolean): Strin
         8 -> "אוגוסט"
         9 -> "ספטמבר"
         10 -> "אוקטובר"
-        11 -> "נונובמבר".removePrefix("נו")
+        11 -> "נובמבר"
         12 -> "דצמבר"
         else -> ""
     }
@@ -139,37 +141,8 @@ fun TasksScreen(
     val completedThisMonth = remember(tasks) {
         tasks.count { it.isCompleted }
     }
-
     val todayActiveCount = remember(tasks, todayEpoch) {
         tasks.count { !it.isCompleted && it.dateEpochDay == todayEpoch }
-    }
-    val awaitingCompletionCount = remember(tasks) {
-        tasks.count { !it.isCompleted || !it.approvedByParent }
-    }
-    val upcomingEventsCount = remember(tasks, todayEpoch) {
-        tasks.count { !it.isCompleted && it.dateEpochDay >= todayEpoch }
-    }
-
-    val todaySchoolDay = remember(todayDate) {
-        SchoolDay.fromJavaDayOfWeek(todayDate.dayOfWeek)
-    }
-    val todayLessonsCount = remember(periods, todaySchoolDay, currentMember) {
-        if (todaySchoolDay == null) {
-            0
-        } else if (currentMember.isChild) {
-            periods.count { it.day == todaySchoolDay && it.childId == currentMember.id }
-        } else {
-            periods.count { it.day == todaySchoolDay }
-        }
-    }
-
-    val nextScheduledAlarm = remember(alarms, currentMember, members) {
-        alarms
-            .filter { alarm ->
-                alarm.isEnabled && alarm.isVisibleToMember(currentMember = currentMember, members = members)
-            }
-            .sortedBy { it.hour * 60 + it.minute }
-            .firstOrNull()
     }
 
     // Filter tasks based on member, status, date, and search query.
@@ -206,48 +179,36 @@ fun TasksScreen(
                 contentPadding = PaddingValues(
                     start = 16.dp,
                     end = 16.dp,
-                    top = 12.dp,
-                    bottom = innerPadding.calculateBottomPadding() + 92.dp
+                    top = 10.dp,
+                    bottom = innerPadding.calculateBottomPadding() + 96.dp
                 ),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier
                     .fillMaxSize()
                     .testTag("tasks_screen")
             ) {
-                // 1. Luxury Soft Neumorphism Hero Greeting + Current Date + Family Profile Banner
+                // 1. Compact Velvet Family Greeting & Non-Overlapping Ordered Avatars Row
                 item {
                     FamilyGlassCard(
-                        cornerRadius = 26.dp,
+                        cornerRadius = 24.dp,
                         isTintedBlue = true,
-                        elevation = 8.dp,
+                        elevation = 7.dp,
                         onClick = if (currentMember.isParent) onOpenFamilyAdmin else null,
-                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 16.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("our_family_banner_card")
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Row(
+                                modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                modifier = Modifier.weight(1f)
+                                horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                // Stacked 3D FamilyMemberAvatars
-                                Row(horizontalArrangement = Arrangement.spacedBy((-8).dp)) {
-                                    members.take(4).forEach { m ->
-                                        FamilyMemberAvatar(
-                                            member = m,
-                                            size = 38.dp,
-                                            isHighlighted = m.id == currentMember.id
-                                        )
-                                    }
-                                }
-
-                                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Column(
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
                                     Text(
                                         text = formatDashboardGreeting(currentMember.name, isHebrew),
                                         style = MaterialTheme.typography.titleMedium.copy(
@@ -262,62 +223,116 @@ fun TasksScreen(
                                             fontWeight = FontWeight.Bold
                                         )
                                     )
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    FamilyStatusChip(
-                                        emoji = "👨‍👩‍👧‍👦",
-                                        label = if (isHebrew)
-                                            "המשפחה שלנו • ${members.size} חברים פעילים"
-                                        else
-                                            "Our Family • ${members.size} active members",
-                                        containerColor = glass.cardBackground.copy(alpha = 0.88f),
-                                        contentColor = glass.textSecondary
-                                    )
+                                }
+
+                                if (currentMember.isParent) {
+                                    val manageShape = RoundedCornerShape(14.dp)
+                                    Surface(
+                                        shape = manageShape,
+                                        color = Color.Transparent,
+                                        border = BorderStroke(0.95.dp, glass.primaryAccent.copy(alpha = 0.35f)),
+                                        modifier = Modifier
+                                            .shadow(
+                                                elevation = 4.dp,
+                                                shape = manageShape,
+                                                spotColor = glass.primaryAccent.copy(alpha = 0.25f)
+                                            )
+                                            .clip(manageShape)
+                                            .background(
+                                                Brush.verticalGradient(
+                                                    colors = if (glass.isDark) {
+                                                        listOf(Color(0xFF243456), Color(0xFF18233C))
+                                                    } else {
+                                                        listOf(Color.White, Color(0xFFEEF4FE))
+                                                    }
+                                                ),
+                                                manageShape
+                                            )
+                                            .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 14.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Text(
+                                                text = if (isHebrew) "ניהול משפחה" else "Manage",
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    color = glass.primaryAccent
+                                                )
+                                            )
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
+                                                contentDescription = null,
+                                                tint = glass.primaryAccent,
+                                                modifier = Modifier.size(11.dp)
+                                            )
+                                        }
+                                    }
                                 }
                             }
 
-                            if (currentMember.isParent) {
-                                val manageShape = RoundedCornerShape(14.dp)
-                                Surface(
-                                    shape = manageShape,
-                                    color = Color.Transparent,
-                                    border = BorderStroke(0.95.dp, glass.primaryAccent.copy(alpha = 0.35f)),
-                                    modifier = Modifier
-                                        .shadow(
-                                            elevation = 4.dp,
-                                            shape = manageShape,
-                                            spotColor = glass.primaryAccent.copy(alpha = 0.25f)
-                                        )
-                                        .clip(manageShape)
-                                        .background(
-                                            Brush.verticalGradient(
-                                                colors = if (glass.isDark) {
-                                                    listOf(Color(0xFF243456), Color(0xFF18233C))
-                                                } else {
-                                                    listOf(Color.White, Color(0xFFEEF4FE))
-                                                }
-                                            ),
-                                            manageShape
-                                        )
-                                        .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 14.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            // Ordered Family Member Avatars Row (No overlap!)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                                    .testTag("family_avatars_ordered_row"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                members.forEach { m ->
+                                    val isCurrentOrFiltered = selectedMemberFilter == m.id ||
+                                        (selectedMemberFilter == null && m.id == currentMember.id)
+                                    Surface(
+                                        shape = RoundedCornerShape(16.dp),
+                                        color = if (isCurrentOrFiltered) {
+                                            glass.primaryAccent.copy(alpha = if (glass.isDark) 0.24f else 0.12f)
+                                        } else {
+                                            glass.cardBackground.copy(alpha = 0.72f)
+                                        },
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (isCurrentOrFiltered) glass.primaryAccent.copy(alpha = 0.55f)
+                                            else glass.cardBorder
+                                        ),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(16.dp))
+                                            .clickable {
+                                                onFilterChange(if (selectedMemberFilter == m.id) null else m.id)
+                                            }
                                     ) {
-                                        Text(
-                                            text = if (isHebrew) "ניהול" else "Manage",
-                                            style = MaterialTheme.typography.labelSmall.copy(
-                                                fontWeight = FontWeight.ExtraBold,
-                                                color = glass.primaryAccent
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            FamilyMemberAvatar(
+                                                member = m,
+                                                size = 30.dp,
+                                                isHighlighted = isCurrentOrFiltered
                                             )
-                                        )
-                                        Icon(
-                                            imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
-                                            contentDescription = null,
-                                            tint = glass.primaryAccent,
-                                            modifier = Modifier.size(11.dp)
-                                        )
+                                            Column {
+                                                Text(
+                                                    text = m.name,
+                                                    style = MaterialTheme.typography.labelSmall.copy(
+                                                        fontWeight = FontWeight.ExtraBold,
+                                                        color = glass.textPrimary
+                                                    ),
+                                                    maxLines = 1
+                                                )
+                                                Text(
+                                                    text = "${m.earnedPoints} ${if (isHebrew) "נק׳" else "pts"}",
+                                                    style = MaterialTheme.typography.labelSmall.copy(
+                                                        fontSize = 10.sp,
+                                                        color = glass.textSecondary,
+                                                        fontWeight = FontWeight.SemiBold
+                                                    ),
+                                                    maxLines = 1
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -325,318 +340,103 @@ fun TasksScreen(
                     }
                 }
 
-                // 2. Quick Screen Navigation Shortcuts Row ("לוח שנה", "מערכת שעות", "שעון מעורר")
+                // 2. Single Consolidated Velvet Summary Strip (Points + Completed/Today — No Duplicate Cards)
                 item {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        DashboardQuickShortcutChip(
-                            emoji = "📅",
-                            label = if (isHebrew) "לוח שנה" else "Calendar",
-                            onClick = { onNavigateToScreen(AppScreen.CALENDAR) },
-                            modifier = Modifier.testTag("quick_action_calendar")
-                        )
-                        DashboardQuickShortcutChip(
-                            emoji = "📚",
-                            label = if (isHebrew) "מערכת שעות" else "Timetable",
-                            onClick = { onNavigateToScreen(AppScreen.TIMETABLE) },
-                            modifier = Modifier.testTag("quick_action_timetable")
-                        )
-                        DashboardQuickShortcutChip(
-                            emoji = "⏰",
-                            label = if (isHebrew) "שעון מעורר" else "Alarms",
-                            onClick = { onNavigateToScreen(AppScreen.ALARMS) },
-                            modifier = Modifier.testTag("quick_action_alarms")
-                        )
-                    }
-                }
-
-                // 3. Luxury Soft Neumorphism Bento Dashboard Summary Cards (Points + Completed + Live Family Overview)
-                item {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            // Total Points Velvet Neumorphic Card
-                            FamilyGlassCard(
-                                cornerRadius = 22.dp,
-                                accentColor = GoogleYellow,
-                                elevation = 7.dp,
-                                onClick = onOpenRewards,
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .heightIn(min = 84.dp)
-                                    .testTag("stat_card_points")
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Column(verticalArrangement = Arrangement.Center) {
-                                        Text(
-                                            text = "$totalPoints",
-                                            style = MaterialTheme.typography.headlineSmall.copy(
-                                                fontWeight = FontWeight.ExtraBold,
-                                                color = if (glass.isDark) glass.warningText else PastelYellowDark
-                                            )
-                                        )
-                                        Text(
-                                            text = if (isHebrew) "נקודות לפרסים" else "Reward Points",
-                                            style = MaterialTheme.typography.labelSmall.copy(
-                                                color = if (glass.isDark) glass.textSecondary else PastelYellowDark.copy(alpha = 0.85f),
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                        )
-                                    }
-                                    val trophyShape = RoundedCornerShape(14.dp)
-                                    Surface(
-                                        shape = trophyShape,
-                                        color = Color.Transparent,
-                                        border = BorderStroke(1.dp, (if (glass.isDark) glass.warningText else PastelYellowAccent).copy(alpha = 0.40f)),
-                                        modifier = Modifier
-                                            .size(42.dp)
-                                            .shadow(
-                                                elevation = 4.dp,
-                                                shape = trophyShape,
-                                                spotColor = GoogleYellow.copy(alpha = 0.35f)
-                                            )
-                                            .background(
-                                                Brush.verticalGradient(
-                                                    colors = if (glass.isDark) {
-                                                        listOf(
-                                                            glass.warningText.copy(alpha = 0.32f),
-                                                            glass.warningText.copy(alpha = 0.16f)
-                                                        )
-                                                    } else {
-                                                        listOf(
-                                                            Color.White,
-                                                            PastelYellowBorder.copy(alpha = 0.55f)
-                                                        )
-                                                    }
-                                                ),
-                                                trophyShape
-                                            )
-                                            .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 14.dp, accentColor = GoogleYellow)
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Icon(
-                                                imageVector = Icons.Default.EmojiEvents,
-                                                contentDescription = null,
-                                                tint = if (glass.isDark) glass.warningText else PastelYellowDark,
-                                                modifier = Modifier.size(21.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Completed Chores Velvet Neumorphic Card
-                            FamilyGlassCard(
-                                cornerRadius = 22.dp,
-                                accentColor = GoogleGreen,
-                                elevation = 7.dp,
-                                onClick = { filterTab = 3 },
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .heightIn(min = 84.dp)
-                                    .testTag("stat_card_completed")
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Column(verticalArrangement = Arrangement.Center) {
-                                        Text(
-                                            text = "$completedThisMonth",
-                                            style = MaterialTheme.typography.headlineSmall.copy(
-                                                fontWeight = FontWeight.ExtraBold,
-                                                color = if (glass.isDark) glass.successText else PastelGreenDark
-                                            )
-                                        )
-                                        Text(
-                                            text = if (isHebrew) "הושלמו החודש" else "Done This Month",
-                                            style = MaterialTheme.typography.labelSmall.copy(
-                                                color = if (glass.isDark) glass.textSecondary else PastelGreenDark.copy(alpha = 0.85f),
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                        )
-                                    }
-                                    val doneShape = RoundedCornerShape(14.dp)
-                                    Surface(
-                                        shape = doneShape,
-                                        color = Color.Transparent,
-                                        border = BorderStroke(1.dp, (if (glass.isDark) glass.successText else PastelGreenAccent).copy(alpha = 0.40f)),
-                                        modifier = Modifier
-                                            .size(42.dp)
-                                            .shadow(
-                                                elevation = 4.dp,
-                                                shape = doneShape,
-                                                spotColor = GoogleGreen.copy(alpha = 0.35f)
-                                            )
-                                            .background(
-                                                Brush.verticalGradient(
-                                                    colors = if (glass.isDark) {
-                                                        listOf(
-                                                            glass.successText.copy(alpha = 0.32f),
-                                                            glass.successText.copy(alpha = 0.16f)
-                                                        )
-                                                    } else {
-                                                        listOf(
-                                                            Color.White,
-                                                            PastelGreenBorder.copy(alpha = 0.55f)
-                                                        )
-                                                    }
-                                                ),
-                                                doneShape
-                                            )
-                                            .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 14.dp, accentColor = GoogleGreen)
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Icon(
-                                                imageVector = Icons.Default.TaskAlt,
-                                                contentDescription = null,
-                                                tint = if (glass.isDark) glass.successText else PastelGreenDark,
-                                                modifier = Modifier.size(21.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Compact 4-Mini-Metric Overview Strip (Today's Tasks, Next Alarm, School Lessons, Upcoming Events)
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            MiniOverviewMetricCard(
-                                emoji = "📋",
-                                valueText = "$todayActiveCount / $awaitingCompletionCount",
-                                label = if (isHebrew) "היום / ממתינות" else "Today / Open",
-                                onClick = { filterTab = 1 },
-                                modifier = Modifier.weight(1f)
-                            )
-                            MiniOverviewMetricCard(
-                                emoji = "⏰",
-                                valueText = nextScheduledAlarm?.formattedTime24h ?: (if (isHebrew) "אין פעיל" else "None"),
-                                label = if (isHebrew) "השעון הבא" else "Next Alarm",
-                                onClick = { onNavigateToScreen(AppScreen.ALARMS) },
-                                modifier = Modifier.weight(1f)
-                            )
-                            MiniOverviewMetricCard(
-                                emoji = "🏫",
-                                valueText = if (todayLessonsCount > 0) "$todayLessonsCount" else "—",
-                                label = if (isHebrew) "שיעורים היום" else "Lessons Today",
-                                onClick = { onNavigateToScreen(AppScreen.TIMETABLE) },
-                                modifier = Modifier.weight(1f)
-                            )
-                            MiniOverviewMetricCard(
-                                emoji = "📅",
-                                valueText = "$upcomingEventsCount",
-                                label = if (isHebrew) "בלוח השנה" else "In Calendar",
-                                onClick = { onNavigateToScreen(AppScreen.CALENDAR) },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-                }
-
-                // 4. Velvet Neumorphic Points Leader Card
-                item {
-                    FamilyGlassCard(
-                        cornerRadius = 20.dp,
-                        accentColor = SoftLavender,
-                        elevation = 6.dp,
-                        onClick = onOpenRewards,
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("achievement_champion_card")
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                        // Total Points & Leader Card
+                        FamilyGlassCard(
+                            cornerRadius = 20.dp,
+                            accentColor = GoogleYellow,
+                            elevation = 6.dp,
+                            onClick = onOpenRewards,
+                            contentPadding = PaddingValues(horizontal = 13.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("stat_card_points")
                         ) {
                             Row(
+                                modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                modifier = Modifier.weight(1f)
+                                horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                val crownShape = RoundedCornerShape(12.dp)
-                                Surface(
-                                    shape = crownShape,
-                                    color = Color.Transparent,
-                                    border = BorderStroke(1.dp, SoftLavender.copy(alpha = 0.42f)),
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .shadow(
-                                            elevation = 4.dp,
-                                            shape = crownShape,
-                                            spotColor = SoftLavender.copy(alpha = 0.35f)
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "$totalPoints",
+                                        style = MaterialTheme.typography.titleLarge.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (glass.isDark) glass.warningText else PastelYellowDark
                                         )
-                                        .background(
-                                            Brush.verticalGradient(
-                                                colors = if (glass.isDark) {
-                                                    listOf(
-                                                        SoftLavender.copy(alpha = 0.36f),
-                                                        SoftLavender.copy(alpha = 0.18f)
-                                                    )
-                                                } else {
-                                                    listOf(
-                                                        Color.White,
-                                                        SoftLavender.copy(alpha = 0.22f)
-                                                    )
-                                                }
-                                            ),
-                                            crownShape
-                                        )
-                                        .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 12.dp, accentColor = SoftLavender)
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Icon(
-                                            imageVector = Icons.Default.WorkspacePremium,
-                                            contentDescription = null,
-                                            tint = if (glass.isDark) Color(0xFFDDD6FE) else PastelPurpleDark,
-                                            modifier = Modifier.size(19.dp)
-                                        )
-                                    }
+                                    )
+                                    Text(
+                                        text = if (isHebrew)
+                                            "נקודות • מוביל: ${topChampion.name}"
+                                        else
+                                            "Points • Top: ${topChampion.name}",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = glass.textSecondary,
+                                            fontWeight = FontWeight.Bold
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
-                                Text(
-                                    text = if (isHebrew) "מוביל הנקודות:" else "Points Leader:",
-                                    style = MaterialTheme.typography.labelLarge.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (glass.isDark) Color(0xFFDDD6FE) else PastelPurpleDark
-                                    )
-                                )
-                                Text(
-                                    text = "${topChampion.avatarEmoji} ${topChampion.name}",
-                                    style = MaterialTheme.typography.labelLarge.copy(
-                                        color = glass.textPrimary,
-                                        fontWeight = FontWeight.ExtraBold
-                                    )
+                                VelvetCrystal3DAssetIcon(
+                                    drawableRes = R.drawable.ic_velvet_points_star,
+                                    size = 34.dp
                                 )
                             }
+                        }
 
-                            FamilyStatusChip(
-                                emoji = "⭐",
-                                label = "${topChampion.earnedPoints} ${if (isHebrew) "נק׳" else "pts"}",
-                                containerColor = SoftLavender.copy(alpha = if (glass.isDark) 0.35f else 0.18f),
-                                contentColor = if (glass.isDark) Color(0xFFF5F3FF) else PastelPurpleDark
-                            )
+                        // Completed & Today's Active Tasks Card
+                        FamilyGlassCard(
+                            cornerRadius = 20.dp,
+                            accentColor = GoogleGreen,
+                            elevation = 6.dp,
+                            onClick = { filterTab = if (filterTab == 3) 0 else 3 },
+                            contentPadding = PaddingValues(horizontal = 13.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("stat_card_completed")
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "$completedThisMonth",
+                                        style = MaterialTheme.typography.titleLarge.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (glass.isDark) glass.successText else PastelGreenDark
+                                        )
+                                    )
+                                    Text(
+                                        text = if (isHebrew)
+                                            "הושלמו • $todayActiveCount להיום"
+                                        else
+                                            "Done • $todayActiveCount today",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = glass.textSecondary,
+                                            fontWeight = FontWeight.Bold
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                VelvetCrystal3DAssetIcon(
+                                    drawableRes = R.drawable.ic_velvet_check_badge,
+                                    size = 34.dp
+                                )
+                            }
                         }
                     }
                 }
 
-                // 5. Role-Appropriate Velvet Section Header + Primary Button
+                // 3. Prominent Velvet Header + Luxury "Add Task" Button with Blue-Purple Gradient & 3D Icon
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -645,36 +445,76 @@ fun TasksScreen(
                     ) {
                         FamilySectionHeader(
                             title = if (isHebrew) "משימות המשפחה" else "Family Tasks",
-                            subtitle = if (isHebrew) "מעקב ביצועים ואישור משימות בזמן אמת" else "Real-time family chore tracking",
+                            subtitle = if (isHebrew) "מעקב ביצועים ותזכורות בזמן אמת" else "Real-time tasks & reminders",
                             modifier = Modifier.weight(1f)
                         )
 
                         if (currentMember.isParent) {
                             Spacer(modifier = Modifier.width(8.dp))
-                            FamilyPrimaryButton(
-                                text = if (isHebrew) "הוסף משימה" else "Add Task",
-                                leadingIcon = Icons.Default.Add,
-                                onClick = onAddNewTask,
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp),
-                                modifier = Modifier.testTag("add_task_primary_button")
+                            val addBtnShape = RoundedCornerShape(18.dp)
+                            val addBtnBrush = Brush.horizontalGradient(
+                                colors = if (glass.isDark) {
+                                    listOf(Color(0xFF6366F1), Color(0xFF3B82F6), Color(0xFF7C3AED))
+                                } else {
+                                    listOf(Color(0xFF4F46E5), Color(0xFF2563EB), Color(0xFF6D28D9))
+                                }
                             )
+                            Surface(
+                                shape = addBtnShape,
+                                color = Color.Transparent,
+                                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.42f)),
+                                modifier = Modifier
+                                    .shadow(
+                                        elevation = 8.dp,
+                                        shape = addBtnShape,
+                                        ambientColor = Color(0xFF4F46E5).copy(alpha = 0.40f),
+                                        spotColor = Color(0xFF6D28D9).copy(alpha = 0.55f)
+                                    )
+                                    .clip(addBtnShape)
+                                    .background(addBtnBrush, addBtnShape)
+                                    .clickable(onClick = onAddNewTask)
+                                    .testTag("add_task_primary_button")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    VelvetCrystal3DAssetIcon(
+                                        drawableRes = R.drawable.ic_velvet_add_plus,
+                                        size = 22.dp
+                                    )
+                                    Text(
+                                        text = if (isHebrew) "הוסף משימה" else "Add Task",
+                                        style = MaterialTheme.typography.labelLarge.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = Color.White
+                                        )
+                                    )
+                                }
+                            }
                         }
                     }
                 }
 
-                // 6. Luxury Soft Neumorphism Filter Tabs, Recessed Search Bar & Member Chips
+                // 4. Velvet Edition Filter Tabs, Search Bar & Member Filter Chips
                 item {
                     FamilyGlassCard(
-                        cornerRadius = 24.dp,
+                        cornerRadius = 22.dp,
                         elevation = 6.dp,
-                        contentPadding = PaddingValues(13.dp),
+                        contentPadding = PaddingValues(12.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
+                                VelvetCrystal3DAssetIcon(
+                                    drawableRes = R.drawable.ic_velvet_filter,
+                                    size = 22.dp
+                                )
                                 FilterPillChip(
                                     label = if (isHebrew) "הכל" else "All",
                                     isSelected = filterTab == 0,
@@ -756,24 +596,20 @@ fun TasksScreen(
                                         shape = chipShape,
                                         color = Color.Transparent,
                                         border = BorderStroke(
-                                            0.9.dp,
-                                            if (isAllSelected) glass.primaryAccent else glass.cardBorder
+                                            1.dp,
+                                            if (isAllSelected) Color.White.copy(alpha = 0.45f) else glass.cardBorder
                                         ),
                                         modifier = Modifier
                                             .shadow(
-                                                elevation = if (isAllSelected) 4.dp else 2.dp,
+                                                elevation = if (isAllSelected) 5.dp else 2.dp,
                                                 shape = chipShape,
-                                                spotColor = if (isAllSelected) glass.primaryAccent.copy(alpha = 0.35f) else Color.Black.copy(alpha = 0.15f)
+                                                spotColor = if (isAllSelected) Color(0xFF4F46E5).copy(alpha = 0.45f) else Color.Black.copy(alpha = 0.15f)
                                             )
                                             .clip(chipShape)
                                             .background(
-                                                Brush.verticalGradient(
+                                                Brush.horizontalGradient(
                                                     colors = if (isAllSelected) {
-                                                        if (glass.isDark) {
-                                                            listOf(Color(0xFF60A5FA), Color(0xFF3B82F6))
-                                                        } else {
-                                                            listOf(Color(0xFF3B82F6), Color(0xFF2563EB))
-                                                        }
+                                                        listOf(Color(0xFF4F46E5), Color(0xFF2563EB), Color(0xFF6D28D9))
                                                     } else if (glass.isDark) {
                                                         listOf(Color(0xFF1F2B44), Color(0xFF151F32))
                                                     } else {
@@ -808,23 +644,19 @@ fun TasksScreen(
                                         color = Color.Transparent,
                                         border = BorderStroke(
                                             if (isSelected) 1.3.dp else 0.9.dp,
-                                            if (isSelected) glass.primaryAccent else glass.cardBorder
+                                            if (isSelected) Color.White.copy(alpha = 0.45f) else glass.cardBorder
                                         ),
                                         modifier = Modifier
                                             .shadow(
-                                                elevation = if (isSelected) 4.dp else 2.dp,
+                                                elevation = if (isSelected) 5.dp else 2.dp,
                                                 shape = chipShape,
-                                                spotColor = if (isSelected) glass.primaryAccent.copy(alpha = 0.30f) else Color.Black.copy(alpha = 0.15f)
+                                                spotColor = if (isSelected) Color(0xFF4F46E5).copy(alpha = 0.40f) else Color.Black.copy(alpha = 0.15f)
                                             )
                                             .clip(chipShape)
                                             .background(
-                                                Brush.verticalGradient(
+                                                Brush.horizontalGradient(
                                                     colors = if (isSelected) {
-                                                        if (glass.isDark) {
-                                                            listOf(Color(0xFF263B6A), Color(0xFF1B2B4E))
-                                                        } else {
-                                                            listOf(Color.White, Color(0xFFDFEBFE))
-                                                        }
+                                                        listOf(Color(0xFF4F46E5), Color(0xFF2563EB), Color(0xFF6D28D9))
                                                     } else if (glass.isDark) {
                                                         listOf(Color(0xFF1F2B44), Color(0xFF151F32))
                                                     } else {
@@ -850,7 +682,7 @@ fun TasksScreen(
                                                 text = m.name,
                                                 style = MaterialTheme.typography.labelMedium.copy(
                                                     fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
-                                                    color = if (isSelected) glass.primaryAccent else glass.textPrimary
+                                                    color = if (isSelected) Color.White else glass.textPrimary
                                                 )
                                             )
                                         }
@@ -861,7 +693,7 @@ fun TasksScreen(
                     }
                 }
 
-                // 7. Error Banner when a task write or approval fails
+                // 5. Error Banner when a task write or approval fails
                 if (!taskOperationError.isNullOrBlank()) {
                     item {
                         FamilyGlassCard(
@@ -920,7 +752,7 @@ fun TasksScreen(
                     }
                 }
 
-                // 8. Tasks List
+                // 6. Tasks List (Presented Early on Screen)
                 if (filteredTasks.isEmpty()) {
                     item {
                         FamilyEmptyState(
@@ -990,156 +822,6 @@ fun TasksScreen(
 }
 
 @Composable
-private fun DashboardQuickShortcutChip(
-    emoji: String,
-    label: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    isPrimary: Boolean = false
-) {
-    val glass = LocalSoftGlassColors.current
-    val chipShape = RoundedCornerShape(16.dp)
-    val surfaceGradient = Brush.verticalGradient(
-        colors = if (isPrimary) {
-            listOf(Color(0xFF3B82F6), Color(0xFF2563EB))
-        } else if (glass.isDark) {
-            listOf(Color(0xFF22304C), Color(0xFF162035))
-        } else {
-            listOf(Color.White, Color(0xFFF0F5FE))
-        }
-    )
-
-    Surface(
-        shape = chipShape,
-        color = Color.Transparent,
-        border = BorderStroke(
-            0.95.dp,
-            Brush.verticalGradient(
-                colors = if (glass.isDark) {
-                    listOf(glass.primaryAccent.copy(alpha = 0.42f), glass.cardBorder)
-                } else {
-                    listOf(Color.White, glass.primaryAccent.copy(alpha = 0.26f))
-                }
-            )
-        ),
-        modifier = modifier
-            .shadow(
-                elevation = 5.dp,
-                shape = chipShape,
-                ambientColor = if (glass.isDark) Color.Black.copy(alpha = 0.7f) else Color(0xFF1E3A8A).copy(alpha = 0.14f),
-                spotColor = if (glass.isDark) Color.Black.copy(alpha = 0.8f) else Color(0xFF1E3A8A).copy(alpha = 0.22f)
-            )
-            .clip(chipShape)
-            .background(surfaceGradient, chipShape)
-            .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 16.dp)
-            .clickable(onClick = onClick)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 13.dp, vertical = 9.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Surface(
-                shape = RoundedCornerShape(9.dp),
-                color = if (isPrimary) {
-                    Color.White.copy(alpha = 0.22f)
-                } else {
-                    glass.primaryAccentSoftBg
-                },
-                border = BorderStroke(0.7.dp, glass.primaryAccent.copy(alpha = 0.25f)),
-                modifier = Modifier.size(26.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text(text = emoji, fontSize = 13.sp)
-                }
-            }
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium.copy(
-                    fontWeight = FontWeight.ExtraBold,
-                    color = if (isPrimary) {
-                        Color.White
-                    } else {
-                        glass.textPrimary
-                    }
-                )
-            )
-        }
-    }
-}
-
-@Composable
-private fun MiniOverviewMetricCard(
-    emoji: String,
-    valueText: String,
-    label: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val glass = LocalSoftGlassColors.current
-    FamilyGlassCard(
-        cornerRadius = 18.dp,
-        elevation = 5.dp,
-        onClick = onClick,
-        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp),
-        modifier = modifier
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            val iconShape = RoundedCornerShape(10.dp)
-            Surface(
-                shape = iconShape,
-                color = Color.Transparent,
-                border = BorderStroke(0.8.dp, glass.primaryAccent.copy(alpha = 0.28f)),
-                modifier = Modifier
-                    .size(30.dp)
-                    .shadow(
-                        elevation = 2.dp,
-                        shape = iconShape,
-                        spotColor = glass.primaryAccent.copy(alpha = 0.22f)
-                    )
-                    .background(
-                        Brush.verticalGradient(
-                            colors = if (glass.isDark) {
-                                listOf(Color(0xFF253759), glass.primaryAccentSoftBg)
-                            } else {
-                                listOf(Color.White, glass.primaryAccentSoftBg)
-                            }
-                        ),
-                        iconShape
-                    )
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text(text = emoji, fontSize = 14.sp)
-                }
-            }
-            Spacer(modifier = Modifier.height(5.dp))
-            Text(
-                text = valueText,
-                style = MaterialTheme.typography.labelLarge.copy(
-                    fontWeight = FontWeight.ExtraBold,
-                    color = glass.textPrimary
-                ),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall.copy(
-                    color = glass.textSecondary,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Medium
-                ),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-    }
-}
-
-@Composable
 private fun TaskItemCardModern(
     task: FamilyTask,
     assignedMember: FamilyMember?,
@@ -1186,6 +868,15 @@ private fun TaskItemCardModern(
 
     val normalizedTime = remember(task.dueTimeFormatted) {
         TimeFormatUtils.normalize24HourString(task.dueTimeFormatted)
+    }
+    val taskDateFormatted = remember(task.dateEpochDay, isHebrew) {
+        val date = LocalDate.ofEpochDay(task.dateEpochDay)
+        val today = LocalDate.now()
+        when (date) {
+            today -> if (isHebrew) "היום" else "Today"
+            today.plusDays(1) -> if (isHebrew) "מחר" else "Tomorrow"
+            else -> "${date.dayOfMonth}/${date.monthValue}"
+        }
     }
 
     FamilyGlassCard(
@@ -1303,6 +994,7 @@ private fun TaskItemCardModern(
                     isFailed -> if (isHebrew) "שגיאה בשמירה • שוחזר" else "Save failed"
                     isPendingApproval -> if (isHebrew) "נשמר • ממתין לאישור הורה" else "Pending approval"
                     isFullyApproved -> if (isHebrew) "נשמר • הושלם ואושר ✓" else "Saved & Approved ✓"
+                    task.hasDueTime -> "$taskDateFormatted • $normalizedTime"
                     else -> normalizedTime
                 }
                 val statusTag = when {
@@ -1341,12 +1033,59 @@ private fun TaskItemCardModern(
                     )
 
                     // Status / Due Time Chip
-                    FamilyStatusChip(
-                        label = statusLabel,
-                        containerColor = statusBg,
-                        contentColor = statusColor,
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = statusBg,
                         modifier = Modifier.testTag(statusTag)
-                    )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            if (task.hasDueTime && !task.isCompleted) {
+                                VelvetCrystal3DAssetIcon(
+                                    drawableRes = R.drawable.ic_velvet_due_clock,
+                                    size = 14.dp
+                                )
+                            }
+                            Text(
+                                text = statusLabel,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = statusColor
+                                )
+                            )
+                        }
+                    }
+
+                    // Active Reminder Badge (with 3D Velvet Bell Icon)
+                    if (task.hasDueTime && task.reminderOffset.isEnabled && !task.isCompleted) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = SoftLavender.copy(alpha = if (glass.isDark) 0.28f else 0.16f),
+                            border = BorderStroke(0.8.dp, SoftLavender.copy(alpha = 0.45f)),
+                            modifier = Modifier.testTag("task_reminder_badge_${task.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                VelvetCrystal3DAssetIcon(
+                                    drawableRes = R.drawable.ic_velvet_reminder_bell,
+                                    size = 14.dp
+                                )
+                                Text(
+                                    text = task.reminderOffset.getShortLabel(isHebrew),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (glass.isDark) Color(0xFFDDD6FE) else PastelPurpleDark
+                                    )
+                                )
+                            }
+                        }
+                    }
 
                     // Recurrence Chip
                     if (task.recurrence.isRecurring) {
@@ -1533,12 +1272,12 @@ private fun RowScope.FilterPillChip(
 ) {
     val glass = LocalSoftGlassColors.current
     val pillShape = RoundedCornerShape(14.dp)
-    val pillBrush = Brush.verticalGradient(
+    val pillBrush = Brush.horizontalGradient(
         colors = if (isSelected) {
             if (glass.isDark) {
-                listOf(Color(0xFF60A5FA), Color(0xFF3B82F6), Color(0xFF4F46E5))
+                listOf(Color(0xFF6366F1), Color(0xFF3B82F6), Color(0xFF7C3AED))
             } else {
-                listOf(Color(0xFF3B82F6), Color(0xFF2563EB), Color(0xFF1D4ED8))
+                listOf(Color(0xFF4F46E5), Color(0xFF2563EB), Color(0xFF6D28D9))
             }
         } else if (glass.isDark) {
             listOf(Color(0xFF1D2840), Color(0xFF141D30))
@@ -1551,16 +1290,16 @@ private fun RowScope.FilterPillChip(
         shape = pillShape,
         color = Color.Transparent,
         border = BorderStroke(
-            0.9.dp,
-            if (isSelected) Color.White.copy(alpha = 0.45f) else glass.cardBorder
+            0.95.dp,
+            if (isSelected) Color.White.copy(alpha = 0.48f) else glass.cardBorder
         ),
         modifier = Modifier
             .weight(1f)
             .shadow(
-                elevation = if (isSelected) 5.dp else 2.dp,
+                elevation = if (isSelected) 6.dp else 2.dp,
                 shape = pillShape,
-                ambientColor = if (isSelected) glass.primaryAccent.copy(alpha = 0.35f) else Color.Black.copy(alpha = 0.12f),
-                spotColor = if (isSelected) glass.primaryAccent.copy(alpha = 0.45f) else Color.Black.copy(alpha = 0.18f)
+                ambientColor = if (isSelected) Color(0xFF4F46E5).copy(alpha = 0.38f) else Color.Black.copy(alpha = 0.12f),
+                spotColor = if (isSelected) Color(0xFF6D28D9).copy(alpha = 0.48f) else Color.Black.copy(alpha = 0.18f)
             )
             .clip(pillShape)
             .background(pillBrush, pillShape)
@@ -1585,7 +1324,6 @@ private fun RowScope.FilterPillChip(
     }
 }
 
-
 @Composable
 fun TaskCardItem(
     task: FamilyTask,
@@ -1609,3 +1347,4 @@ fun TaskCardItem(
         onCardClick = onEdit
     )
 }
+

@@ -122,7 +122,7 @@ class RoomMigrationTest {
             context,
             AppDatabase::class.java,
             dbName
-        ).addMigrations(AppDatabase.MIGRATION_1_2).build()
+        ).addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3).build()
 
         kotlinx.coroutines.runBlocking {
             val taskFromRoom = roomDb.taskDao().getTaskById("task_v1_legacy_101")
@@ -131,6 +131,8 @@ class RoomMigrationTest {
             assertEquals(25, taskFromRoom?.points)
             assertEquals("", taskFromRoom?.familyId)
             assertEquals(false, taskFromRoom?.approvedByParent)
+            assertEquals(false, taskFromRoom?.hasDueTime)
+            assertEquals("NONE", taskFromRoom?.reminderOffset)
         }
         roomDb.close()
 

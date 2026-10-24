@@ -102,12 +102,21 @@
         </receiver>
 
         <receiver
+            android:name=".notifications.TaskReminderReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.example.familytasks.ACTION_TRIGGER_TASK_REMINDER" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
             android:name=".notifications.FamilyAlarmBootReceiver"
             android:directBootAware="true"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.USER_UNLOCKED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="android.intent.action.TIME_SET" />

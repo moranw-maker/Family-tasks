@@ -103,7 +103,8 @@ class FamilyMessagingService : FirebaseMessagingService() {
             notificationBody: String? = null,
             scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
             signedInUidOverride: String? = null,
-            onAlarmReconcileRequested: ((familyId: String, alarmId: String, action: String) -> Unit)? = null
+            onAlarmReconcileRequested: ((familyId: String, alarmId: String, action: String) -> Unit)? = null,
+            onTaskReminderReconcileRequested: ((familyId: String, taskId: String, operation: String) -> Unit)? = null
         ): Boolean {
             val appCtx = context.applicationContext ?: context
             val eventType = data["eventType"] ?: data["type"] ?: FcmTokenManager.EVENT_TASK_ASSIGNED
@@ -111,6 +112,7 @@ class FamilyMessagingService : FirebaseMessagingService() {
             val taskId = data["taskId"].orEmpty()
             val alarmId = data["alarmId"].orEmpty()
             val alarmAction = data["action"].orEmpty()
+            val taskOperation = data["operation"].orEmpty().ifBlank { alarmAction }
             val targetUid = data["targetUid"].orEmpty()
             val targetRole = data["targetRole"].orEmpty()
             val actorUid = data["actorUid"].orEmpty()
@@ -130,7 +132,9 @@ class FamilyMessagingService : FirebaseMessagingService() {
             if (!signedInUid.isNullOrBlank()) {
                 val isAlarmDelete = eventType == FcmTokenManager.EVENT_ALARM_SYNC_REQUIRED &&
                     alarmAction.equals("DELETE", ignoreCase = true)
-                if (actorUid.isNotBlank() && actorUid == signedInUid && !isAlarmDelete) {
+                val isTaskSyncDelete = eventType == FcmTokenManager.EVENT_TASK_SYNC_REQUIRED &&
+                    taskOperation.equals("DELETE", ignoreCase = true)
+                if (actorUid.isNotBlank() && actorUid == signedInUid && !isAlarmDelete && !isTaskSyncDelete) {
                     // Sender must not process their own push event
                     return false
                 }
@@ -171,6 +175,74 @@ class FamilyMessagingService : FirebaseMessagingService() {
                     FamilyAlarmCloudSyncWorker.markSyncEventCompleted(appCtx, eventKey)
                 }
                 return true
+            }
+
+            // Handle silent data-only task reminder synchronization (create/edit/time-change/reassign/complete/delete)
+            // without showing any duplicate OS notification.
+            if (eventType == FcmTokenManager.EVENT_TASK_SYNC_REQUIRED) {
+                val normalizedOp = taskOperation.uppercase()
+                if (taskId.isNotBlank()) {
+                    when (normalizedOp) {
+                        "DELETE", "CANCEL", "COMPLETE" -> {
+                            TaskReminderScheduler.cancelReminderForTask(
+                                context = appCtx,
+                                taskId = taskId,
+                                clearActiveNotification = true
+                            )
+                        }
+                        "UPSERT", "CREATE", "UPDATE" -> {
+                            val epochDay = data["dateEpochDay"]?.toLongOrNull()
+                            val dueTime = data["dueTimeFormatted"].orEmpty()
+                            val hasDueTime = data["hasDueTime"]?.toBooleanStrictOrNull() ?: false
+                            val offset = com.example.model.TaskReminderOffset.fromRaw(data["reminderOffset"])
+                            val isCompleted = data["isCompleted"]?.toBooleanStrictOrNull() ?: false
+                            val assignedTo = data["assignedToMemberId"].orEmpty().ifBlank { targetUid }
+                            if (epochDay != null && dueTime.isNotBlank()) {
+                                val payloadTask = com.example.model.FamilyTask(
+                                    id = taskId,
+                                    title = data["taskTitle"].orEmpty().ifBlank { "משימה משפחתית" },
+                                    assignedToMemberId = assignedTo,
+                                    dateEpochDay = epochDay,
+                                    dueTimeFormatted = dueTime,
+                                    hasDueTime = hasDueTime,
+                                    reminderOffset = offset,
+                                    isCompleted = isCompleted
+                                )
+                                TaskReminderScheduler.scheduleOrUpdateTaskReminder(
+                                    context = appCtx,
+                                    task = payloadTask
+                                )
+                            }
+                        }
+                    }
+                }
+                TaskReminderSyncWorker.enqueueTaskReminderSync(
+                    context = appCtx,
+                    hintFamilyId = familyId,
+                    hintTaskId = taskId,
+                    hintOperation = taskOperation,
+                    reason = "fcm_task_sync:${taskOperation.ifBlank { "UPSERT" }}"
+                )
+                onTaskReminderReconcileRequested?.invoke(familyId, taskId, taskOperation)
+                return true
+            }
+
+            // For task assignment / reassignment / approval events, also trigger background reminder sync
+            // so any attached execution-time reminder is scheduled or cancelled even when the app is closed.
+            if (
+                eventType == FcmTokenManager.EVENT_TASK_ASSIGNED ||
+                eventType == FcmTokenManager.EVENT_TASK_REASSIGNED ||
+                eventType == FcmTokenManager.EVENT_TASK_APPROVED ||
+                eventType == FcmTokenManager.EVENT_TASK_SUBMITTED_FOR_APPROVAL
+            ) {
+                TaskReminderSyncWorker.enqueueTaskReminderSync(
+                    context = appCtx,
+                    hintFamilyId = familyId,
+                    hintTaskId = taskId,
+                    hintOperation = "UPSERT",
+                    reason = "fcm_event:$eventType"
+                )
+                onTaskReminderReconcileRequested?.invoke(familyId, taskId, "UPSERT")
             }
 
             // Deduplicate task notification events by eventKey so FCM + Firestore snapshot never shows twice

@@ -1622,6 +1622,7 @@ class FamilyRepository(
                                 }
                             }
                             _taskSyncStates.value = initialSyncMap
+                            resyncTaskRemindersForActiveMember()
                         }
                     }
 
@@ -2993,6 +2994,12 @@ class FamilyRepository(
         val dueTime = (data["dueTimeFormatted"] as? String)
             ?: (data["due_time"] as? String)
             ?: "17:00"
+        val hasDueTime = (data["hasDueTime"] as? Boolean)
+            ?: (data["has_due_time"] as? Boolean)
+            ?: false
+        val reminderOffsetRaw = (data["reminderOffset"] as? String)
+            ?: (data["reminder_offset"] as? String)
+        val parsedReminderOffset = com.example.model.TaskReminderOffset.fromRaw(reminderOffsetRaw)
         val resolvedFamilyId = (data["familyId"] as? String)?.takeIf { it.isNotBlank() }
             ?: (data["family_id"] as? String)?.takeIf { it.isNotBlank() }
             ?: fallbackFamilyId
@@ -3009,6 +3016,9 @@ class FamilyRepository(
             assignedToMemberId = resolvedAssignedId,
             dateEpochDay = epochDay,
             dueTimeFormatted = dueTime,
+            hasDueTime = hasDueTime,
+            reminderOffset = parsedReminderOffset,
+            reminderEnabled = hasDueTime && parsedReminderOffset != com.example.model.TaskReminderOffset.NONE,
             isCompleted = completed,
             priority = runCatching { TaskPriority.valueOf(priorityStr) }.getOrDefault(TaskPriority.MEDIUM),
             recurrence = runCatching { TaskRecurrence.valueOf(recurrenceStr) }.getOrDefault(TaskRecurrence.ONCE),
@@ -3291,6 +3301,7 @@ class FamilyRepository(
                         }
                         _taskSyncStates.value = updatedSyncStates
                         _tasks.value = remoteTasks
+                        resyncTaskRemindersForActiveMember()
                         repoScope.launch {
                             runCatching {
                                 taskDao?.upsertTasks(remoteTasks.map { it.toCoreTask(familyId) })
@@ -3883,6 +3894,11 @@ class FamilyRepository(
             "priority" to task.priority.name,
             "recurrence" to task.recurrence.name,
             "dueTimeFormatted" to task.dueTimeFormatted,
+            "due_time" to task.dueTimeFormatted,
+            "hasDueTime" to task.hasDueTime,
+            "has_due_time" to task.hasDueTime,
+            "reminderOffset" to task.reminderOffset.name,
+            "reminder_offset" to task.reminderOffset.name,
             "updatedAt" to nowMillis
         )
     }
@@ -4844,6 +4860,7 @@ class FamilyRepository(
         }
         _taskSyncStates.value = _taskSyncStates.value + (taskId to finalSyncState)
         _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
+        resyncTaskRemindersForActiveMember()
 
         repoScope.launch {
             runCatching {
@@ -5272,6 +5289,7 @@ class FamilyRepository(
         val finalApprovedTask = outcome.approvedTask
         _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVED_APPROVED)
         _tasks.value = _tasks.value.map { if (it.id == taskId) finalApprovedTask else it }
+        resyncTaskRemindersForActiveMember()
 
         if (outcome.updatedBalance != null && finalApprovedTask.assignedToMemberId.isNotBlank()) {
             val newBal = outcome.updatedBalance
@@ -5334,6 +5352,22 @@ class FamilyRepository(
     }
 
     /**
+     * Synchronizes all local `AlarmManager` task due-time reminders for the active member on this device.
+     */
+    fun resyncTaskRemindersForActiveMember() {
+        val ctx = appContext ?: return
+        val current = _currentMember.value
+        val authUid = authProvider()?.currentUser?.uid.orEmpty()
+        com.example.notifications.TaskReminderScheduler.syncTaskRemindersForCurrentDevice(
+            context = ctx,
+            tasks = _tasks.value,
+            currentMemberId = current.id,
+            currentAuthUid = authUid,
+            currentMemberName = current.name
+        )
+    }
+
+    /**
      * V1.6 Requirement 1: Only a PARENT can create tasks.
      */
     fun addTask(task: FamilyTask): Boolean {
@@ -5342,6 +5376,7 @@ class FamilyRepository(
             return false
         }
         _tasks.value = listOf(task) + _tasks.value
+        resyncTaskRemindersForActiveMember()
         val assignee = _members.value.find { it.id == task.assignedToMemberId }
         if (assignee != null) {
             pushAlert(
@@ -5365,6 +5400,7 @@ class FamilyRepository(
             return false
         }
         _tasks.value = _tasks.value.map { if (it.id == updatedTask.id) updatedTask else it }
+        resyncTaskRemindersForActiveMember()
         pushTaskToFirestoreOrQueue(updatedTask, isDelete = false)
         return true
     }
@@ -5379,6 +5415,10 @@ class FamilyRepository(
         }
         val target = _tasks.value.find { it.id == taskId }
         _tasks.value = _tasks.value.filterNot { it.id == taskId }
+        appContext?.let { ctx ->
+            com.example.notifications.TaskReminderScheduler.cancelReminderForTask(ctx, taskId, clearActiveNotification = true)
+        }
+        resyncTaskRemindersForActiveMember()
         if (target != null) {
             pushTaskToFirestoreOrQueue(target, isDelete = true)
         }

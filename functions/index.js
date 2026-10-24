@@ -265,6 +265,227 @@ async function dispatchToRecipientTokens(db, familyId, taskId, eventSpec, recipi
   }
 }
 
+/**
+ * Classifies a Firestore task write under /families/{familyId}/tasks/{taskId} into zero, one, or two
+ * silent data-only FCM synchronization events (`TASK_SYNC_REQUIRED`) so the assigned member's device
+ * (and previous assignee's device on reassignment) can schedule, update, or cancel local AlarmManager
+ * task reminders even when the app is closed.
+ *
+ * Actions:
+ * - UPSERT: Task created or updated with active execution time + reminder (`hasDueTime == true` and `reminderOffset != "NONE"`).
+ * - CANCEL: Task reminder disabled, or task reassigned away from previous assignee (`beforeAssignee`).
+ * - COMPLETE: Task marked completed (`isCompleted == true`).
+ * - DELETE: Task document deleted (`afterData == null`).
+ */
+function classifyTaskReminderSyncEvents(beforeData, afterData, taskId) {
+  if (!beforeData && !afterData) return [];
+
+  const extractAssignee = (d) =>
+    d ? String(d.assignedToMemberId || d.assignedMemberId || d.assignedUid || "").trim() : "";
+  const isReminderActive = (d) => {
+    if (!d) return false;
+    const hasDueTime = Boolean(d.hasDueTime);
+    const offset = String(d.reminderOffset || "NONE").trim().toUpperCase();
+    const completed = Boolean(d.isCompleted);
+    return hasDueTime && offset !== "NONE" && offset !== "" && !completed;
+  };
+
+  // Case 1: Hard deletion of task document (afterData is null)
+  if (beforeData && !afterData) {
+    const beforeAssignee = extractAssignee(beforeData);
+    if (!beforeAssignee) return [];
+    const rawActor = String(beforeData.updatedByUid || beforeData.createdByUid || "").trim();
+    const actorUid = rawActor && rawActor !== beforeAssignee ? rawActor : "";
+    const stamp = String(Date.now());
+    return [
+      {
+        eventType: "TASK_SYNC_REQUIRED",
+        action: "DELETE",
+        eventKey: `task_sync_del:${taskId}:${beforeAssignee}:${stamp}`,
+        targetMode: "SINGLE_MEMBER",
+        targetUid: beforeAssignee,
+        actorUid,
+        taskId: String(taskId),
+        updatedAt: stamp
+      }
+    ];
+  }
+
+  const beforeAssignee = extractAssignee(beforeData);
+  const afterAssignee = extractAssignee(afterData);
+  const beforeActive = isReminderActive(beforeData);
+  const afterActive = isReminderActive(afterData);
+  const beforeCompleted = beforeData ? Boolean(beforeData.isCompleted) : false;
+  const afterCompleted = Boolean(afterData.isCompleted);
+  const actorUid = String(afterData.updatedByUid || afterData.createdByUid || "").trim();
+  const stamp = String(afterData.updatedAt || afterData.completedAtMillis || Date.now());
+  const events = [];
+
+  // If reassigned from beforeAssignee to another member, cancel reminder on beforeAssignee's device
+  if (beforeData && beforeAssignee && beforeAssignee !== afterAssignee && (beforeActive || Boolean(beforeData.hasDueTime))) {
+    events.push({
+      eventType: "TASK_SYNC_REQUIRED",
+      action: "CANCEL",
+      eventKey: `task_sync_reassign_cancel:${taskId}:${beforeAssignee}:${stamp}`,
+      targetMode: "SINGLE_MEMBER",
+      targetUid: beforeAssignee,
+      actorUid: actorUid !== beforeAssignee ? actorUid : "",
+      taskId: String(taskId),
+      updatedAt: stamp
+    });
+  }
+
+  if (!afterAssignee) {
+    return events;
+  }
+
+  // Case 2: Task newly marked completed -> cancel any scheduled reminder on assignee's device
+  if (!beforeCompleted && afterCompleted && (beforeActive || afterData.hasDueTime)) {
+    events.push({
+      eventType: "TASK_SYNC_REQUIRED",
+      action: "COMPLETE",
+      eventKey: `task_sync_complete:${taskId}:${afterAssignee}:${stamp}`,
+      targetMode: "SINGLE_MEMBER",
+      targetUid: afterAssignee,
+      actorUid: actorUid !== afterAssignee ? actorUid : "",
+      taskId: String(taskId),
+      isCompleted: true,
+      updatedAt: stamp
+    });
+    return events;
+  }
+
+  // Case 3: Reminder was active on same assignee, and is now disabled (hasDueTime=false or reminderOffset=NONE)
+  if (beforeData && beforeAssignee === afterAssignee && beforeActive && !afterActive && !afterCompleted) {
+    events.push({
+      eventType: "TASK_SYNC_REQUIRED",
+      action: "CANCEL",
+      eventKey: `task_sync_cancel:${taskId}:${afterAssignee}:${stamp}`,
+      targetMode: "SINGLE_MEMBER",
+      targetUid: afterAssignee,
+      actorUid: actorUid !== afterAssignee ? actorUid : "",
+      taskId: String(taskId),
+      hasDueTime: Boolean(afterData.hasDueTime),
+      reminderOffset: String(afterData.reminderOffset || "NONE"),
+      updatedAt: stamp
+    });
+    return events;
+  }
+
+  // Case 4: Active reminder created, reassigned to afterAssignee, or schedule/time/offset/title changed
+  if (afterActive) {
+    const scheduleChanged =
+      !beforeData ||
+      beforeAssignee !== afterAssignee ||
+      !beforeActive ||
+      Number(beforeData.dateEpochDay) !== Number(afterData.dateEpochDay) ||
+      String(beforeData.dueTimeFormatted || "") !== String(afterData.dueTimeFormatted || "") ||
+      Boolean(beforeData.hasDueTime) !== Boolean(afterData.hasDueTime) ||
+      String(beforeData.reminderOffset || "NONE") !== String(afterData.reminderOffset || "NONE") ||
+      String(beforeData.title || "") !== String(afterData.title || "");
+
+    if (scheduleChanged) {
+      events.push({
+        eventType: "TASK_SYNC_REQUIRED",
+        action: "UPSERT",
+        eventKey: `task_sync_upsert:${taskId}:${afterAssignee}:${ afterData.dateEpochDay || 0 }:${ afterData.dueTimeFormatted || "" }:${ afterData.reminderOffset || "NONE" }:${stamp}`,
+        targetMode: "SINGLE_MEMBER",
+        targetUid: afterAssignee,
+        actorUid,
+        taskId: String(taskId),
+        taskTitle: String(afterData.title || ""),
+        assignedToMemberId: afterAssignee,
+        dateEpochDay: Number(afterData.dateEpochDay || 0),
+        dueTimeFormatted: String(afterData.dueTimeFormatted || "18:00"),
+        hasDueTime: Boolean(afterData.hasDueTime),
+        reminderOffset: String(afterData.reminderOffset || "NONE"),
+        isCompleted: false,
+        updatedAt: stamp
+      });
+    }
+  }
+
+  return events;
+}
+
+/**
+ * Dispatches a silent, data-only high-priority FCM message (`TASK_SYNC_REQUIRED`) so the target
+ * device reconciles its local `TaskReminderScheduler` in the background without showing a duplicate
+ * push notification.
+ */
+async function dispatchTaskReminderSyncDataMessage(db, familyId, taskId, syncSpec, recipientUids) {
+  for (const recipientUid of recipientUids) {
+    const tokensSnap = await db
+      .collection("users")
+      .doc(recipientUid)
+      .collection("fcm_tokens")
+      .get();
+
+    if (tokensSnap.empty) continue;
+
+    const tokenRecords = [];
+    tokensSnap.forEach((doc) => {
+      const data = doc.data() || {};
+      if (data.token && typeof data.token === "string" && data.isActive !== false) {
+        tokenRecords.push({ docId: doc.id, token: data.token });
+      }
+    });
+
+    if (tokenRecords.length === 0) continue;
+
+    const message = {
+      tokens: tokenRecords.map((r) => r.token),
+      data: {
+        eventKey: `${syncSpec.eventKey}:${recipientUid}`,
+        eventType: "TASK_SYNC_REQUIRED",
+        action: String(syncSpec.action || "UPSERT"),
+        familyId: String(familyId),
+        taskId: String(taskId),
+        targetUid: String(recipientUid),
+        actorUid: String(syncSpec.actorUid || ""),
+        taskTitle: String(syncSpec.taskTitle || ""),
+        assignedToMemberId: String(syncSpec.assignedToMemberId || recipientUid),
+        dateEpochDay: String(syncSpec.dateEpochDay || 0),
+        dueTimeFormatted: String(syncSpec.dueTimeFormatted || "18:00"),
+        hasDueTime: String(Boolean(syncSpec.hasDueTime)),
+        reminderOffset: String(syncSpec.reminderOffset || "NONE"),
+        isCompleted: String(Boolean(syncSpec.isCompleted)),
+        updatedAt: String(syncSpec.updatedAt || Date.now())
+      },
+      android: {
+        priority: "high"
+      }
+    };
+
+    const response = await getMessaging().sendEachForMulticast(message);
+
+    const cleanupPromises = [];
+    response.responses.forEach((resp, idx) => {
+      if (!resp.success && resp.error) {
+        const errCode = resp.error.code || "";
+        if (
+          errCode === "messaging/registration-token-not-registered" ||
+          errCode === "messaging/invalid-registration-token" ||
+          errCode === "messaging/invalid-argument"
+        ) {
+          const invalidTokenDocId = tokenRecords[idx].docId;
+          cleanupPromises.push(
+            db
+              .collection("users")
+              .doc(recipientUid)
+              .collection("fcm_tokens")
+              .doc(invalidTokenDocId)
+              .delete()
+          );
+        }
+      }
+    });
+    if (cleanupPromises.length > 0) {
+      await Promise.allSettled(cleanupPromises);
+    }
+  }
+}
+
 exports.onFamilyTaskWritten = onDocumentWritten(
   {
     document: "families/{familyId}/tasks/{taskId}",
@@ -280,39 +501,76 @@ exports.onFamilyTaskWritten = onDocumentWritten(
       : null;
 
     const eventSpec = classifyTaskNotificationEvent(beforeData, afterData, taskId);
-    if (!eventSpec) return;
+    const reminderSyncSpecs = classifyTaskReminderSyncEvents(beforeData, afterData, taskId);
+    if (!eventSpec && reminderSyncSpecs.length === 0) return;
 
     const db = getNamedDb();
 
-    // Server-side idempotency guard: prevent duplicate dispatch on retries
-    const safeDispatchId = eventSpec.eventKey.replace(/[^a-zA-Z0-9_:-]/g, "_");
-    const dispatchRef = db
-      .collection("families")
-      .doc(familyId)
-      .collection("notification_dispatches")
-      .doc(safeDispatchId);
+    // 1. Existing visible push notification flow (4 core events)
+    if (eventSpec) {
+      const safeDispatchId = eventSpec.eventKey.replace(/[^a-zA-Z0-9_:-]/g, "_");
+      const dispatchRef = db
+        .collection("families")
+        .doc(familyId)
+        .collection("notification_dispatches")
+        .doc(safeDispatchId);
 
-    const alreadyDispatched = await db.runTransaction(async (tx) => {
-      const snap = await tx.get(dispatchRef);
-      if (snap.exists) return true;
-      tx.set(dispatchRef, {
-        eventKey: eventSpec.eventKey,
-        eventType: eventSpec.eventType,
-        taskId,
-        createdAt: Date.now()
+      const alreadyDispatched = await db.runTransaction(async (tx) => {
+        const snap = await tx.get(dispatchRef);
+        if (snap.exists) return true;
+        tx.set(dispatchRef, {
+          eventKey: eventSpec.eventKey,
+          eventType: eventSpec.eventType,
+          taskId,
+          createdAt: Date.now()
+        });
+        return false;
       });
-      return false;
-    });
 
-    if (alreadyDispatched) {
-      logger.info("Skipping duplicate notification dispatch", { eventKey: eventSpec.eventKey });
-      return;
+      if (!alreadyDispatched) {
+        const recipientUids = await resolveVerifiedRecipientUids(db, familyId, eventSpec);
+        if (recipientUids.length > 0) {
+          await dispatchToRecipientTokens(db, familyId, taskId, eventSpec, recipientUids);
+        }
+      } else {
+        logger.info("Skipping duplicate notification dispatch", { eventKey: eventSpec.eventKey });
+      }
     }
 
-    const recipientUids = await resolveVerifiedRecipientUids(db, familyId, eventSpec);
-    if (recipientUids.length === 0) return;
+    // 2. Silent data-only task reminder background synchronization flow (TASK_SYNC_REQUIRED)
+    for (const syncSpec of reminderSyncSpecs) {
+      const safeSyncId = syncSpec.eventKey.replace(/[^a-zA-Z0-9_:-]/g, "_");
+      const syncDispatchRef = db
+        .collection("families")
+        .doc(familyId)
+        .collection("notification_dispatches")
+        .doc(safeSyncId);
 
-    await dispatchToRecipientTokens(db, familyId, taskId, eventSpec, recipientUids);
+      const syncAlreadyDispatched = await db.runTransaction(async (tx) => {
+        const snap = await tx.get(syncDispatchRef);
+        if (snap.exists) return true;
+        tx.set(syncDispatchRef, {
+          eventKey: syncSpec.eventKey,
+          eventType: syncSpec.eventType,
+          action: syncSpec.action,
+          taskId,
+          targetUid: syncSpec.targetUid,
+          createdAt: Date.now()
+        });
+        return false;
+      });
+
+      if (!syncAlreadyDispatched) {
+        const syncRecipients = await resolveVerifiedRecipientUids(db, familyId, {
+          ...syncSpec,
+          // Allow DELETE / CANCEL / COMPLETE to reach target device even if actorUid matches
+          action: syncSpec.action === "CANCEL" || syncSpec.action === "COMPLETE" ? "DELETE" : syncSpec.action
+        });
+        if (syncRecipients.length > 0) {
+          await dispatchTaskReminderSyncDataMessage(db, familyId, taskId, syncSpec, syncRecipients);
+        }
+      }
+    }
   }
 );
 
@@ -575,6 +833,7 @@ exports.onFamilyAlarmFirestoreWritten = onDocumentWritten(
 );
 
 exports.classifyTaskNotificationEvent = classifyTaskNotificationEvent;
+exports.classifyTaskReminderSyncEvents = classifyTaskReminderSyncEvents;
 exports.classifyAlarmSyncEvent = classifyAlarmSyncEvent;
 exports.resolveVerifiedRecipientUids = resolveVerifiedRecipientUids;
 

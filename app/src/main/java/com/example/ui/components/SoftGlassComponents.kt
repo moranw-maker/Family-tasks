@@ -1235,7 +1235,7 @@ fun FamilyBottomNavigation(
                 .navigationBarsPadding()
         ) {
             val isCompactWidth = maxWidth < 380.dp || items.size >= 6
-            val iconSize = if (isCompactWidth) 20.dp else 22.dp
+            val iconSize = if (isCompactWidth) 24.dp else 26.dp
             val labelFontSize = if (isCompactWidth) 10.sp else 11.sp
 
             Row(
@@ -1310,11 +1310,11 @@ fun FamilyBottomNavigation(
                             .defaultMinSize(minWidth = 44.dp, minHeight = 48.dp)
                             .testTag(item.testTag)
                     ) {
-                        Icon(
-                            imageVector = if (isSelected) item.selectedIcon else item.unselectedIcon,
+                        VelvetCrystalNavIcon(
+                            screen = item.screen,
                             contentDescription = item.label,
-                            tint = contentColor,
-                            modifier = Modifier.size(iconSize)
+                            isSelected = isSelected,
+                            size = iconSize
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
