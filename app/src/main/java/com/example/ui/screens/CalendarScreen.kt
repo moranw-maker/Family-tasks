@@ -76,16 +76,12 @@ fun CalendarScreen(
         }
     }
 
-    Scaffold(
-        containerColor = Color.Transparent
-    ) { innerPadding ->
-        SoftGlassScreenBackground(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .testTag("calendar_screen")
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
+    SoftGlassScreenBackground(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("calendar_screen")
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
                 // Soft Glass Top Calendar Header Card: Month Navigation + View Mode Selector + Today Shortcut
                 FamilyGlassCard(
                     cornerRadius = 22.dp,
@@ -298,7 +294,6 @@ fun CalendarScreen(
                 }
             }
         }
-    }
 
     selectedTaskForSheet?.let { activeTask ->
         val latestTask = tasks.find { it.id == activeTask.id } ?: activeTask
@@ -410,23 +405,25 @@ fun MonthCalendarView(
         val isCompactHeight = maxHeight < 680.dp
         val maxLabelsPerCell = if (isCompactHeight || rowCount >= 6) 2 else 3
         val cellHeight = when {
-            rowCount >= 6 && isCompactHeight -> 52.dp
-            rowCount >= 6 -> 58.dp
-            isCompactHeight -> 56.dp
-            else -> 64.dp
+            rowCount >= 6 && isCompactHeight -> 48.dp
+            rowCount >= 6 -> 54.dp
+            isCompactHeight -> 52.dp
+            else -> 60.dp
         }
-        val gridHeight = cellHeight * rowCount + 8.dp
+        val weekRows = remember(totalCells) {
+            (0 until totalCells).chunked(7)
+        }
         val selectedDateTasks = tasksByEpochDay[selectedDate.toEpochDay()].orEmpty()
 
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .testTag("calendar_month_scroll_container"),
-            contentPadding = PaddingValues(bottom = 112.dp)
+            contentPadding = PaddingValues(bottom = 128.dp)
         ) {
             item(key = "month_grid_and_selected_day_agenda") {
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    // Upper Portion: Soft Glass Month Grid Card (dynamic height for 4, 5, or 6 week rows)
+                    // Upper Portion: Soft Glass Month Grid Card (natural unclipped height for 4, 5, or 6 week rows)
                     FamilyGlassCard(
                         cornerRadius = 24.dp,
                         elevation = 3.dp,
@@ -456,43 +453,53 @@ fun MonthCalendarView(
                             }
                         }
 
-                        // Month Cells Grid
-                        LazyVerticalGrid(
-                            columns = GridCells.Fixed(7),
-                            userScrollEnabled = false,
+                        // Unclipped Month Cells Grid: 5 or 6 week rows measured naturally
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(gridHeight)
-                                .testTag("calendar_month_grid")
+                                .testTag("calendar_month_grid"),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            items(totalCells) { cellIndex ->
-                                val dayNumber = cellIndex - dayOfWeekIndex + 1
-                                if (dayNumber in 1..daysInMonth) {
-                                    val date = displayMonth.atDay(dayNumber)
-                                    val isSelected = date == selectedDate
-                                    val isToday = date == today
-                                    val dayTasks = tasksByEpochDay[date.toEpochDay()].orEmpty()
+                            weekRows.forEachIndexed { weekIndex, weekIndices ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("calendar_week_row_$weekIndex"),
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    weekIndices.forEach { cellIndex ->
+                                        val dayNumber = cellIndex - dayOfWeekIndex + 1
+                                        Box(modifier = Modifier.weight(1f)) {
+                                            if (dayNumber in 1..daysInMonth) {
+                                                val date = displayMonth.atDay(dayNumber)
+                                                val isSelected = date == selectedDate
+                                                val isToday = date == today
+                                                val dayTasks = tasksByEpochDay[date.toEpochDay()].orEmpty()
 
-                                    MonthDayCell(
-                                        date = date,
-                                        isSelected = isSelected,
-                                        isToday = isToday,
-                                        tasks = dayTasks,
-                                        isHebrew = isHebrew,
-                                        maxVisibleTasks = maxLabelsPerCell,
-                                        cellHeight = cellHeight,
-                                        onDateClick = { onDateSelect(date) },
-                                        onTaskStripClick = { task ->
-                                            onDateSelect(date)
-                                            onTaskClick(task)
+                                                MonthDayCell(
+                                                    date = date,
+                                                    isSelected = isSelected,
+                                                    isToday = isToday,
+                                                    tasks = dayTasks,
+                                                    isHebrew = isHebrew,
+                                                    maxVisibleTasks = maxLabelsPerCell,
+                                                    cellHeight = cellHeight,
+                                                    onDateClick = { onDateSelect(date) },
+                                                    onTaskStripClick = { task ->
+                                                        onDateSelect(date)
+                                                        onTaskClick(task)
+                                                    }
+                                                )
+                                            } else {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .defaultMinSize(minHeight = cellHeight)
+                                                        .padding(1.dp)
+                                                )
+                                            }
                                         }
-                                    )
-                                } else {
-                                    Box(
-                                        modifier = Modifier
-                                            .height(cellHeight)
-                                            .padding(1.dp)
-                                    )
+                                    }
                                 }
                             }
                         }
@@ -548,15 +555,16 @@ fun MonthDayCell(
         color = cellBgColor,
         border = BorderStroke(if (isSelected) 1.6.dp else 0.8.dp, cellBorderColor),
         modifier = Modifier
-            .padding(1.5.dp)
-            .height(cellHeight)
+            .fillMaxWidth()
+            .padding(0.5.dp)
+            .defaultMinSize(minHeight = cellHeight)
             .clip(RoundedCornerShape(12.dp))
             .clickable { onDateClick() }
             .testTag("calendar_day_cell_${date}")
     ) {
         Column(
             modifier = Modifier
-                .fillMaxSize()
+                .fillMaxWidth()
                 .padding(horizontal = 2.dp, vertical = 2.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -1002,87 +1010,94 @@ fun WeekCalendarView(
             .sortedBy { TimeFormatUtils.toMinutesSinceMidnight(it.dueTimeFormatted) }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        FamilyGlassCard(
-            cornerRadius = 22.dp,
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceAround
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("calendar_week_scroll_container"),
+        contentPadding = PaddingValues(bottom = 128.dp)
+    ) {
+        item(key = "week_days_strip") {
+            FamilyGlassCard(
+                cornerRadius = 22.dp,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
             ) {
-                weekDays.forEach { date ->
-                    val isSelected = date == selectedDate
-                    val isToday = date == today
-                    val locale = if (isHebrew) Locale.forLanguageTag("he") else Locale.ENGLISH
-                    val dayLetter = date.dayOfWeek.getDisplayName(TextStyle.NARROW, locale)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceAround
+                ) {
+                    weekDays.forEach { date ->
+                        val isSelected = date == selectedDate
+                        val isToday = date == today
+                        val locale = if (isHebrew) Locale.forLanguageTag("he") else Locale.ENGLISH
+                        val dayLetter = date.dayOfWeek.getDisplayName(TextStyle.NARROW, locale)
 
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = when {
-                            isSelected -> glass.primaryAccent
-                            isToday -> glass.primaryAccentSoftBg
-                            else -> glass.screenBackground
-                        },
-                        border = BorderStroke(
-                            1.dp,
-                            if (isSelected) glass.primaryAccent else glass.cardBorder
-                        ),
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(2.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .clickable { onDateSelect(date) }
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(vertical = 8.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = when {
+                                isSelected -> glass.primaryAccent
+                                isToday -> glass.primaryAccentSoftBg
+                                else -> glass.screenBackground
+                            },
+                            border = BorderStroke(
+                                1.dp,
+                                if (isSelected) glass.primaryAccent else glass.cardBorder
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(2.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { onDateSelect(date) }
                         ) {
-                            Text(
-                                text = dayLetter,
-                                fontSize = 11.sp,
-                                color = if (isSelected) {
-                                    if (glass.isDark) Color(0xFF0B1120) else Color.White
-                                } else {
-                                    glass.textSecondary
-                                }
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = date.dayOfMonth.toString(),
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = if (isSelected) {
-                                    if (glass.isDark) Color(0xFF0B1120) else Color.White
-                                } else {
-                                    glass.textPrimary
-                                }
-                            )
+                            Column(
+                                modifier = Modifier.padding(vertical = 8.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = dayLetter,
+                                    fontSize = 11.sp,
+                                    color = if (isSelected) {
+                                        if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                    } else {
+                                        glass.textSecondary
+                                    }
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = date.dayOfMonth.toString(),
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (isSelected) {
+                                        if (glass.isDark) Color(0xFF0B1120) else Color.White
+                                    } else {
+                                        glass.textPrimary
+                                    }
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-        SelectedDayAgendaSection(
-            selectedDate = selectedDate,
-            today = today,
-            tasks = sortedDayTasks,
-            members = members,
-            currentMember = currentMember,
-            isHebrew = isHebrew,
-            taskSyncStates = taskSyncStates,
-            onTaskClick = onTaskClick,
-            onToggleTask = onToggleTask,
-            onApproveTask = onApproveTask,
-            onAddNewTask = onAddNewTask,
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-        )
+        item(key = "week_selected_day_agenda") {
+            SelectedDayAgendaSection(
+                selectedDate = selectedDate,
+                today = today,
+                tasks = sortedDayTasks,
+                members = members,
+                currentMember = currentMember,
+                isHebrew = isHebrew,
+                taskSyncStates = taskSyncStates,
+                onTaskClick = onTaskClick,
+                onToggleTask = onToggleTask,
+                onApproveTask = onApproveTask,
+                onAddNewTask = onAddNewTask,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
     }
 }
 

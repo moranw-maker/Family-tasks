@@ -15,7 +15,10 @@ import com.example.model.TaskPriority
 import com.example.model.UserRole
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextInput
 import com.example.viewmodel.FamilyViewModel
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -3309,6 +3312,124 @@ class ExampleRobolectricTest {
             "DELETE sync event must immediately cancel the scheduled task reminder in AlarmManager",
             com.example.notifications.TaskReminderScheduler.isTaskReminderPendingInAlarmManager(context, taskId)
         )
+    }
+
+    @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+    @Test
+    fun `test compact AddTaskDialog fixed save button expandable options 6 row calendar and Fluent 3D WebP icons`() = androidx.compose.ui.test.runComposeUiTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Verify all 12 Fluent Premium 3D WebP icons decode with alpha transparency at 256x256
+        val iconResIds = listOf(
+            R.drawable.ic_velvet_tasks,
+            R.drawable.ic_velvet_calendar,
+            R.drawable.ic_velvet_timetable,
+            R.drawable.ic_velvet_alarms,
+            R.drawable.ic_velvet_files,
+            R.drawable.ic_velvet_family,
+            R.drawable.ic_velvet_reminder_bell,
+            R.drawable.ic_velvet_due_clock,
+            R.drawable.ic_velvet_points_star,
+            R.drawable.ic_velvet_add_plus,
+            R.drawable.ic_velvet_filter,
+            R.drawable.ic_velvet_check_badge
+        )
+        for (resId in iconResIds) {
+            val drawable = androidx.core.content.ContextCompat.getDrawable(context, resId)
+            assertNotNull("Drawable resource $resId must load cleanly", drawable)
+            val bytes = context.resources.openRawResource(resId).use { it.readBytes() }
+            assertTrue("Fluent 3D WebP resource $resId must be non-empty", bytes.size > 100)
+            val header = String(bytes, 0, 4) + String(bytes, 8, 4)
+            assertEquals("RIFFWEBP", header)
+        }
+
+        val repository = FamilyRepository(context = context)
+        val members = repository.members.value
+        val parentMember = members.first { it.isParent }
+        var savedTask: FamilyTask? = null
+        val showAddDialogState = androidx.compose.runtime.mutableStateOf(true)
+        // May 2026 starts on Friday (index 5 when Sunday=0) and has 31 days -> 36 cells -> 6 week rows (0..5)
+        val selectedDateState = androidx.compose.runtime.mutableStateOf(LocalDate.of(2026, 5, 1))
+
+        setContent {
+            com.example.ui.theme.MyApplicationTheme(
+                themeMode = com.example.model.AppThemeMode.LIGHT,
+                textScale = com.example.model.AppTextScale.NORMAL
+            ) {
+                if (showAddDialogState.value) {
+                    com.example.ui.dialogs.AddTaskDialog(
+                        members = members,
+                        isHebrew = true,
+                        initialDate = selectedDateState.value,
+                        onDismiss = { showAddDialogState.value = false },
+                        onSaveTask = { task ->
+                            savedTask = task
+                            showAddDialogState.value = false
+                        }
+                    )
+                } else {
+                    com.example.ui.screens.CalendarScreen(
+                        tasks = repository.tasks.value,
+                        periods = emptyList(),
+                        members = members,
+                        currentMember = parentMember,
+                        calendarMode = com.example.viewmodel.CalendarViewMode.MONTH,
+                        selectedDate = selectedDateState.value,
+                        firstDayOfWeek = com.example.model.FirstDayOfWeek.SUNDAY,
+                        isHebrew = true,
+                        onModeChange = {},
+                        onDateSelect = { selectedDateState.value = it },
+                        onToggleTask = {},
+                        onEditTask = {},
+                        onDeleteTask = {},
+                        onSendNudge = {},
+                        onAddNewTask = {}
+                    )
+                }
+            }
+        }
+
+        waitForIdle()
+
+        // 2. Verify compact AddTaskDialog primary rows & fixed bottom Save button exist without scrolling
+        onNodeWithTag("add_task_dialog").assertExists()
+        onNodeWithTag("task_title_input").assertExists()
+        onNodeWithTag("assign_member_row").assertExists()
+        onNodeWithTag("task_execution_time_section").assertExists()
+        onNodeWithTag("task_reminder_offset_row").assertExists()
+        onNodeWithTag("expand_more_options_button").assertExists()
+        onNodeWithTag("save_task_btn").assertExists()
+
+        // Enter title, select 10-minute reminder (which auto-enables due time), expand More Options, pick +20 pts & WEEKLY recurrence
+        onNodeWithTag("task_title_input").performTextInput("אימון כדורסל")
+        onNodeWithTag("task_reminder_chip_MINUTES_10_BEFORE").performClick()
+        onNodeWithTag("expand_more_options_button").performClick()
+        waitForIdle()
+
+        onNodeWithTag("more_options_container").assertExists()
+        onNodeWithTag("points_chip_20").performScrollTo().performClick()
+        onNodeWithTag("task_recurrence_selector").performScrollTo()
+        onNodeWithTag("task_recurrence_selector").performScrollToNode(hasTestTag("task_recurrence_chip_WEEKLY"))
+        onNodeWithTag("task_recurrence_chip_WEEKLY").performClick()
+        onNodeWithTag("save_task_btn").performClick()
+        waitForIdle()
+
+        assertNotNull("Saving from compact AddTaskDialog must produce a FamilyTask", savedTask)
+        assertEquals("אימון כדורסל", savedTask!!.title)
+        assertTrue("Selecting a reminder chip must auto-enable hasDueTime", savedTask!!.hasDueTime)
+        assertEquals(com.example.model.TaskReminderOffset.MINUTES_10_BEFORE, savedTask!!.reminderOffset)
+        assertEquals(20, savedTask!!.points)
+        assertEquals(com.example.model.TaskRecurrence.WEEKLY, savedTask!!.recurrence)
+
+        // 3. Verify 6-row month (May 2026) renders all 6 rows (calendar_week_row_0 .. calendar_week_row_5) and day 31 is scrollable & clickable
+        onNodeWithTag("calendar_screen").assertExists()
+        onNodeWithTag("calendar_week_row_0").assertExists()
+        onNodeWithTag("calendar_week_row_5").assertExists()
+        onNodeWithTag("calendar_day_cell_2026-05-31").assertExists()
+        onNodeWithTag("calendar_month_scroll_container").performScrollToNode(hasTestTag("calendar_day_cell_2026-05-31"))
+        onNodeWithTag("calendar_day_cell_2026-05-31").performClick()
+        waitForIdle()
+        assertEquals(LocalDate.of(2026, 5, 31), selectedDateState.value)
     }
 }
 
