@@ -211,16 +211,18 @@ object TaskReminderSyncWorker {
         val epochDay = ((data["dateEpochDay"] as? Number)?.toLong())
             ?: ((data["due_date_epoch_day"] as? Number)?.toLong()?.takeIf { it != 0L })
             ?: (System.currentTimeMillis() / 86_400_000L)
-        val dueTime = (data["dueTimeFormatted"] as? String)
-            ?: (data["due_time"] as? String)
+        val dueTime = (data["dueTimeFormatted"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["due_time"] as? String)?.takeIf { it.isNotBlank() }
             ?: "16:00"
-        val hasDueTime = (data["hasDueTime"] as? Boolean)
-            ?: (data["has_due_time"] as? Boolean)
-            ?: false
         val reminderOffsetRaw = (data["reminderOffset"] as? String)
             ?: (data["reminder_offset"] as? String)
             ?: TaskReminderOffset.NONE.name
         val parsedOffset = TaskReminderOffset.fromRaw(reminderOffsetRaw)
+        val explicitHasDueTime = (data["hasDueTime"] as? Boolean)
+            ?: (data["has_due_time"] as? Boolean)
+            ?: (data["hasDueTime"] as? String)?.toBooleanStrictOrNull()
+            ?: (data["has_due_time"] as? String)?.toBooleanStrictOrNull()
+        val hasDueTime = (explicitHasDueTime ?: false) || parsedOffset != TaskReminderOffset.NONE
         val completed = (data["isCompleted"] as? Boolean)
             ?: (data["is_completed"] as? Boolean)
             ?: false

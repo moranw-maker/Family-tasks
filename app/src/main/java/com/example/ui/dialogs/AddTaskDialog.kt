@@ -65,28 +65,42 @@ fun AddTaskDialog(
     onSaveTask: (FamilyTask) -> Unit
 ) {
     val context = LocalContext.current
-    var title by remember { mutableStateOf(taskToEdit?.title ?: "") }
-    var description by remember { mutableStateOf(taskToEdit?.description ?: "") }
-    var selectedMemberId by remember {
+    val editKey = remember(
+        taskToEdit?.id,
+        taskToEdit?.updatedAtMillis,
+        taskToEdit?.hasDueTime,
+        taskToEdit?.reminderOffset,
+        taskToEdit?.dueTimeFormatted,
+        taskToEdit?.dateEpochDay
+    ) {
+        "${taskToEdit?.id ?: "new"}_${taskToEdit?.updatedAtMillis ?: 0L}_${taskToEdit?.hasDueTime}_${taskToEdit?.reminderOffset}_${taskToEdit?.dueTimeFormatted}_${taskToEdit?.dateEpochDay}"
+    }
+    var title by remember(editKey) { mutableStateOf(taskToEdit?.title ?: "") }
+    var description by remember(editKey) { mutableStateOf(taskToEdit?.description ?: "") }
+    var selectedMemberId by remember(editKey) {
         mutableStateOf(taskToEdit?.assignedToMemberId ?: (members.firstOrNull()?.id ?: ""))
     }
-    var selectedCategory by remember { mutableStateOf(taskToEdit?.category ?: TaskCategory.CLEANING) }
-    var selectedPriority by remember { mutableStateOf(taskToEdit?.priority ?: TaskPriority.MEDIUM) }
-    var selectedRecurrence by remember { mutableStateOf(taskToEdit?.recurrence ?: TaskRecurrence.DAILY) }
-    var hasDueTime by remember { mutableStateOf(taskToEdit?.hasDueTime ?: false) }
-    var dueTime by remember {
+    var selectedCategory by remember(editKey) { mutableStateOf(taskToEdit?.category ?: TaskCategory.CLEANING) }
+    var selectedPriority by remember(editKey) { mutableStateOf(taskToEdit?.priority ?: TaskPriority.MEDIUM) }
+    var selectedRecurrence by remember(editKey) { mutableStateOf(taskToEdit?.recurrence ?: TaskRecurrence.DAILY) }
+    var hasDueTime by remember(editKey) {
+        mutableStateOf(
+            taskToEdit?.let { it.hasDueTime || it.reminderOffset != TaskReminderOffset.NONE } ?: false
+        )
+    }
+    var dueTime by remember(editKey) {
         mutableStateOf(TimeFormatUtils.normalize24HourString(taskToEdit?.dueTimeFormatted, "18:00"))
     }
-    var selectedReminderOffset by remember {
+    var selectedReminderOffset by remember(editKey) {
         mutableStateOf(taskToEdit?.reminderOffset ?: TaskReminderOffset.NONE)
     }
-    var points by remember { mutableIntStateOf(taskToEdit?.points ?: 15) }
-    var selectedTaskDate by remember {
+    var points by remember(editKey) { mutableIntStateOf(taskToEdit?.points ?: 15) }
+    var selectedTaskDate by remember(editKey) {
         mutableStateOf(
             taskToEdit?.let { LocalDate.ofEpochDay(it.dateEpochDay) } ?: initialDate
         )
     }
-    var showMoreOptions by remember {
+    var showMoreOptions by remember(editKey) {
         mutableStateOf(taskToEdit != null && taskToEdit.description.isNotBlank())
     }
     var showTimePickerDialog by remember { mutableStateOf(false) }
@@ -867,11 +881,14 @@ fun AddTaskDialog(
                                         dateEpochDay = selectedTaskDate.toEpochDay(),
                                         time24h = normalized24h
                                     )
-                                    val effectiveReminderOffset = if (hasDueTime) {
+                                    val effectiveHasDueTime = hasDueTime || selectedReminderOffset != TaskReminderOffset.NONE
+                                    val effectiveReminderOffset = if (effectiveHasDueTime) {
                                         selectedReminderOffset
                                     } else {
                                         TaskReminderOffset.NONE
                                     }
+                                    val effectiveReminderEnabled = effectiveHasDueTime && effectiveReminderOffset != TaskReminderOffset.NONE
+                                    val nowMillis = System.currentTimeMillis()
                                     val taskResult = if (taskToEdit != null) {
                                         taskToEdit.copy(
                                             title = title.trim(),
@@ -880,27 +897,32 @@ fun AddTaskDialog(
                                             assignedToMemberId = selectedMemberId,
                                             dateEpochDay = preservedEpochDay,
                                             dueTimeFormatted = normalized24h,
-                                            hasDueTime = hasDueTime,
+                                            hasDueTime = effectiveHasDueTime,
                                             reminderOffset = effectiveReminderOffset,
+                                            reminderEnabled = effectiveReminderEnabled,
                                             priority = selectedPriority,
                                             points = points,
-                                            recurrence = selectedRecurrence
+                                            recurrence = selectedRecurrence,
+                                            updatedAtMillis = nowMillis
                                         )
                                     } else {
                                         FamilyTask(
-                                            id = "task_${System.currentTimeMillis()}",
+                                            id = "task_$nowMillis",
                                             title = title.trim(),
                                             description = description.trim(),
                                             category = selectedCategory,
                                             assignedToMemberId = selectedMemberId,
                                             dateEpochDay = preservedEpochDay,
                                             dueTimeFormatted = normalized24h,
-                                            hasDueTime = hasDueTime,
+                                            hasDueTime = effectiveHasDueTime,
                                             reminderOffset = effectiveReminderOffset,
+                                            reminderEnabled = effectiveReminderEnabled,
                                             priority = selectedPriority,
                                             points = points,
                                             recurrence = selectedRecurrence,
-                                            isCompleted = false
+                                            isCompleted = false,
+                                            createdAtMillis = nowMillis,
+                                            updatedAtMillis = nowMillis
                                         )
                                     }
                                     onSaveTask(taskResult)
@@ -945,9 +967,10 @@ fun AddTaskDialog(
             isHebrew = isHebrew,
             onDismiss = { showTimePickerDialog = false },
             onConfirm = { chosenTime ->
+                val wasDueTimeEnabled = hasDueTime
                 dueTime = TimeFormatUtils.normalize24HourString(chosenTime, dueTime)
                 hasDueTime = true
-                if (selectedReminderOffset == TaskReminderOffset.NONE) {
+                if (!wasDueTimeEnabled && selectedReminderOffset == TaskReminderOffset.NONE) {
                     selectedReminderOffset = TaskReminderOffset.AT_TIME
                 }
                 showTimePickerDialog = false

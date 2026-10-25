@@ -132,10 +132,9 @@ class FamilyMessagingService : FirebaseMessagingService() {
             if (!signedInUid.isNullOrBlank()) {
                 val isAlarmDelete = eventType == FcmTokenManager.EVENT_ALARM_SYNC_REQUIRED &&
                     alarmAction.equals("DELETE", ignoreCase = true)
-                val isTaskSyncDelete = eventType == FcmTokenManager.EVENT_TASK_SYNC_REQUIRED &&
-                    taskOperation.equals("DELETE", ignoreCase = true)
-                if (actorUid.isNotBlank() && actorUid == signedInUid && !isAlarmDelete && !isTaskSyncDelete) {
-                    // Sender must not process their own push event
+                val isTaskSyncEvent = eventType == FcmTokenManager.EVENT_TASK_SYNC_REQUIRED
+                if (actorUid.isNotBlank() && actorUid == signedInUid && !isAlarmDelete && !isTaskSyncEvent) {
+                    // Sender must not process their own visible push banner event
                     return false
                 }
                 if (targetUid.isNotBlank() && targetUid != signedInUid) {
@@ -193,8 +192,9 @@ class FamilyMessagingService : FirebaseMessagingService() {
                         "UPSERT", "CREATE", "UPDATE" -> {
                             val epochDay = data["dateEpochDay"]?.toLongOrNull()
                             val dueTime = data["dueTimeFormatted"].orEmpty()
-                            val hasDueTime = data["hasDueTime"]?.toBooleanStrictOrNull() ?: false
                             val offset = com.example.model.TaskReminderOffset.fromRaw(data["reminderOffset"])
+                            val hasDueTime = (data["hasDueTime"]?.toBooleanStrictOrNull() ?: false) ||
+                                offset != com.example.model.TaskReminderOffset.NONE
                             val isCompleted = data["isCompleted"]?.toBooleanStrictOrNull() ?: false
                             val assignedTo = data["assignedToMemberId"].orEmpty().ifBlank { targetUid }
                             if (epochDay != null && dueTime.isNotBlank()) {
@@ -206,6 +206,7 @@ class FamilyMessagingService : FirebaseMessagingService() {
                                     dueTimeFormatted = dueTime,
                                     hasDueTime = hasDueTime,
                                     reminderOffset = offset,
+                                    reminderEnabled = hasDueTime && offset != com.example.model.TaskReminderOffset.NONE,
                                     isCompleted = isCompleted
                                 )
                                 TaskReminderScheduler.scheduleOrUpdateTaskReminder(

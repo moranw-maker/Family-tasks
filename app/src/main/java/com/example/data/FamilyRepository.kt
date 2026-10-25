@@ -83,6 +83,16 @@ class FamilyRepository(
             ?: context
             ?: runCatching { com.google.firebase.FirebaseApp.getInstance().applicationContext }.getOrNull()
 
+    private val effectiveTaskDao: TaskDao?
+        get() = taskDao ?: dynamicAppContext?.let {
+            runCatching { AppDatabase.getInstance(it).taskDao() }.getOrNull()
+        }
+
+    private val effectiveOfflineSyncDao: OfflineSyncDao?
+        get() = offlineSyncDao ?: dynamicAppContext?.let {
+            runCatching { AppDatabase.getInstance(it).offlineSyncDao() }.getOrNull()
+        }
+
     fun attachApplicationContext(ctx: Context) {
         val appCtx = ctx.applicationContext ?: ctx
         val wasNull = dynamicAppContext == null && context == null
@@ -108,7 +118,11 @@ class FamilyRepository(
         if (wasNull || persistedAlarms.isNotEmpty() || _familyAlarms.value.isNotEmpty()) {
             resyncAlarmsForActiveMember()
         }
+        if (wasNull || _tasks.value.isNotEmpty()) {
+            resyncTaskRemindersForActiveMember()
+        }
         if (wasNull) {
+            seedLocalRoomIfNeeded()
             com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestoreAsync(
                 context = appCtx,
                 reason = "app_startup"
@@ -853,7 +867,7 @@ class FamilyRepository(
     }
 
     private fun seedLocalRoomIfNeeded() {
-        val dao = taskDao ?: return
+        val dao = effectiveTaskDao ?: return
         repoScope.launch {
             runCatching {
                 val existing = dao.getAllTasksOnce()
@@ -2821,6 +2835,8 @@ class FamilyRepository(
         )
 
         attachFirestoreRealtimeListeners(invite.familyId)
+        resyncAlarmsForActiveMember()
+        resyncTaskRemindersForActiveMember()
 
         val activeState = FamilyMembershipState.ActiveMember(
             familyId = invite.familyId,
@@ -2991,15 +3007,18 @@ class FamilyRepository(
         val categoryStr = (data["category"] as? String) ?: TaskCategory.OTHER.name
         val priorityStr = (data["priority"] as? String) ?: TaskPriority.MEDIUM.name
         val recurrenceStr = (data["recurrence"] as? String) ?: TaskRecurrence.ONCE.name
-        val dueTime = (data["dueTimeFormatted"] as? String)
-            ?: (data["due_time"] as? String)
+        val dueTime = (data["dueTimeFormatted"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["due_time"] as? String)?.takeIf { it.isNotBlank() }
             ?: "17:00"
-        val hasDueTime = (data["hasDueTime"] as? Boolean)
-            ?: (data["has_due_time"] as? Boolean)
-            ?: false
         val reminderOffsetRaw = (data["reminderOffset"] as? String)
             ?: (data["reminder_offset"] as? String)
         val parsedReminderOffset = com.example.model.TaskReminderOffset.fromRaw(reminderOffsetRaw)
+        val explicitHasDueTime = (data["hasDueTime"] as? Boolean)
+            ?: (data["has_due_time"] as? Boolean)
+            ?: (data["hasDueTime"] as? String)?.toBooleanStrictOrNull()
+            ?: (data["has_due_time"] as? String)?.toBooleanStrictOrNull()
+        val hasDueTime = (explicitHasDueTime ?: false) ||
+            parsedReminderOffset != com.example.model.TaskReminderOffset.NONE
         val resolvedFamilyId = (data["familyId"] as? String)?.takeIf { it.isNotBlank() }
             ?: (data["family_id"] as? String)?.takeIf { it.isNotBlank() }
             ?: fallbackFamilyId
@@ -3304,7 +3323,7 @@ class FamilyRepository(
                         resyncTaskRemindersForActiveMember()
                         repoScope.launch {
                             runCatching {
-                                taskDao?.upsertTasks(remoteTasks.map { it.toCoreTask(familyId) })
+                                effectiveTaskDao?.upsertTasks(remoteTasks.map { it.toCoreTask(familyId) })
                             }
                         }
                     }
@@ -3444,6 +3463,9 @@ class FamilyRepository(
                             }
                             if (previousMemberId != updatedSelf.id || previousRole != updatedSelf.role || _familyAlarms.value.isNotEmpty()) {
                                 resyncAlarmsForActiveMember()
+                            }
+                            if (previousMemberId != updatedSelf.id || _tasks.value.isNotEmpty()) {
+                                resyncTaskRemindersForActiveMember()
                             }
                         }
                         _cloudFamilyGroup.value = _cloudFamilyGroup.value.copy(
@@ -3855,14 +3877,24 @@ class FamilyRepository(
     }
 
     private suspend fun flushOfflineSyncQueue(familyId: String) {
-        val syncDao = offlineSyncDao ?: return
+        val syncDao = effectiveOfflineSyncDao ?: return
         val db = firestoreProvider() ?: return
         runCatching {
             val pending = syncDao.getPendingActions()
             for (item in pending) {
+                val targetFamId = item.familyId.ifBlank { familyId }
                 if (item.actionType == "DELETE_TASK") {
-                    db.collection("families").document(familyId)
+                    db.collection("families").document(targetFamId)
                         .collection("tasks").document(item.taskId).delete().await()
+                } else if (item.actionType == "UPSERT_TASK") {
+                    val taskToSync = _tasks.value.find { it.id == item.taskId }
+                        ?: effectiveTaskDao?.getTaskById(item.taskId)?.toFamilyTask()
+                    if (taskToSync != null && _currentMember.value.isParent) {
+                        val payload = buildFullTaskFirestoreMap(taskToSync, targetFamId)
+                        db.collection("families").document(targetFamId)
+                            .collection("tasks").document(item.taskId)
+                            .set(payload, SetOptions.merge()).await()
+                    }
                 }
                 syncDao.removeActionById(item.id)
             }
@@ -3874,9 +3906,13 @@ class FamilyRepository(
         familyId: String,
         nowMillis: Long = System.currentTimeMillis()
     ): Map<String, Any?> {
+        val effectiveHasDueTime = task.hasDueTime || task.reminderOffset != TaskReminderOffset.NONE
+        val effectiveReminderOffset = if (effectiveHasDueTime) task.reminderOffset else TaskReminderOffset.NONE
+        val actorUid = authProvider()?.currentUser?.uid?.takeIf { it.isNotBlank() } ?: _currentMember.value.id
         return mapOf(
             "id" to task.id,
             "familyId" to familyId,
+            "userId" to actorUid,
             "title" to task.title,
             "description" to task.description,
             "assignedUid" to task.assignedToMemberId,
@@ -3895,10 +3931,11 @@ class FamilyRepository(
             "recurrence" to task.recurrence.name,
             "dueTimeFormatted" to task.dueTimeFormatted,
             "due_time" to task.dueTimeFormatted,
-            "hasDueTime" to task.hasDueTime,
-            "has_due_time" to task.hasDueTime,
-            "reminderOffset" to task.reminderOffset.name,
-            "reminder_offset" to task.reminderOffset.name,
+            "hasDueTime" to effectiveHasDueTime,
+            "has_due_time" to effectiveHasDueTime,
+            "reminderOffset" to effectiveReminderOffset.name,
+            "reminder_offset" to effectiveReminderOffset.name,
+            "reminderEnabled" to (effectiveHasDueTime && effectiveReminderOffset != TaskReminderOffset.NONE),
             "updatedAt" to nowMillis
         )
     }
@@ -3910,9 +3947,9 @@ class FamilyRepository(
         repoScope.launch {
             runCatching {
                 if (isDelete) {
-                    taskDao?.deleteTaskById(task.id)
+                    effectiveTaskDao?.deleteTaskById(task.id)
                 } else {
-                    taskDao?.upsertTask(coreTask)
+                    effectiveTaskDao?.upsertTask(coreTask)
                 }
             }
 
@@ -3972,12 +4009,12 @@ class FamilyRepository(
                     )
                     lastClassifiedTaskFailure = classified
                     _taskOperationError.value = classified.messageHe
-                    offlineSyncDao?.enqueueAction(
+                    effectiveOfflineSyncDao?.enqueueAction(
                         OfflineSyncQueueEntity(
                             taskId = task.id,
                             familyId = familyId,
                             actionType = if (isDelete) "DELETE_TASK" else "UPSERT_TASK",
-                            payloadJson = "${task.title}|${task.points}|${task.isCompleted}"
+                            payloadJson = "${task.title}|${task.points}|${task.isCompleted}|${task.dateEpochDay}|${task.dueTimeFormatted}|${task.hasDueTime}|${task.reminderOffset.name}"
                         )
                     )
                 }
@@ -4337,6 +4374,7 @@ class FamilyRepository(
         _currentMember.value = member
         refreshVisibleFamilyAlarms()
         resyncAlarmsForActiveMember()
+        resyncTaskRemindersForActiveMember()
     }
 
     /**
@@ -4864,7 +4902,7 @@ class FamilyRepository(
 
         repoScope.launch {
             runCatching {
-                taskDao?.upsertTask(updatedTask.toCoreTask(resolvedFamilyId))
+                effectiveTaskDao?.upsertTask(updatedTask.toCoreTask(resolvedFamilyId))
             }
         }
 
@@ -5317,7 +5355,7 @@ class FamilyRepository(
 
         repoScope.launch {
             runCatching {
-                taskDao?.upsertTask(finalApprovedTask.toCoreTask(resolvedFamilyId))
+                effectiveTaskDao?.upsertTask(finalApprovedTask.toCoreTask(resolvedFamilyId))
             }
         }
 
@@ -5358,12 +5396,23 @@ class FamilyRepository(
         val ctx = appContext ?: return
         val current = _currentMember.value
         val authUid = authProvider()?.currentUser?.uid.orEmpty()
+        val isVerifiedActiveMember = _membershipState.value is FamilyMembershipState.ActiveMember
+        val effectiveMemberId = if (!isVerifiedActiveMember && authUid.isNotBlank() && current.id == "m_dad") {
+            authUid
+        } else {
+            current.id
+        }
+        val effectiveMemberName = if (!isVerifiedActiveMember && authUid.isNotBlank() && current.id == "m_dad") {
+            _googleUserDisplayName.value
+        } else {
+            current.name
+        }
         com.example.notifications.TaskReminderScheduler.syncTaskRemindersForCurrentDevice(
             context = ctx,
             tasks = _tasks.value,
-            currentMemberId = current.id,
+            currentMemberId = effectiveMemberId,
             currentAuthUid = authUid,
-            currentMemberName = current.name
+            currentMemberName = effectiveMemberName
         )
     }
 
@@ -7885,6 +7934,8 @@ class FamilyRepository(
     suspend fun createTaskInCloud(task: FamilyTask): Result<String> {
         val db = firestoreProvider() ?: return Result.failure(IllegalStateException("Firestore unavailable"))
         val uid = authProvider()?.currentUser?.uid ?: return Result.failure(SecurityException("Not authenticated"))
+        val effectiveHasDueTime = task.hasDueTime || task.reminderOffset != TaskReminderOffset.NONE
+        val effectiveReminderOffset = if (effectiveHasDueTime) task.reminderOffset else TaskReminderOffset.NONE
         return try {
             val payload = hashMapOf<String, Any?>(
                 "id" to task.id,
@@ -7895,9 +7946,16 @@ class FamilyRepository(
                 "category" to task.category.name,
                 "assignedUid" to task.assignedToMemberId,
                 "assignedToMemberId" to task.assignedToMemberId,
+                "assignedMemberId" to task.assignedToMemberId,
                 "dateEpochDay" to task.dateEpochDay,
                 "dueDate" to (task.dateEpochDay * 86_400_000L),
                 "dueTimeFormatted" to task.dueTimeFormatted,
+                "due_time" to task.dueTimeFormatted,
+                "hasDueTime" to effectiveHasDueTime,
+                "has_due_time" to effectiveHasDueTime,
+                "reminderOffset" to effectiveReminderOffset.name,
+                "reminder_offset" to effectiveReminderOffset.name,
+                "reminderEnabled" to (effectiveHasDueTime && effectiveReminderOffset != TaskReminderOffset.NONE),
                 "isCompleted" to task.isCompleted,
                 "priority" to task.priority.name,
                 "recurrence" to task.recurrence.name,
@@ -7940,6 +7998,11 @@ class FamilyRepository(
                 val prioStr = doc.getString("priority") ?: TaskPriority.MEDIUM.name
                 val catStr = doc.getString("category") ?: TaskCategory.OTHER.name
                 val recStr = doc.getString("recurrence") ?: TaskRecurrence.ONCE.name
+                val dueTime = doc.getString("dueTimeFormatted") ?: doc.getString("due_time") ?: "16:00"
+                val offsetRaw = doc.getString("reminderOffset") ?: doc.getString("reminder_offset")
+                val parsedOffset = TaskReminderOffset.fromRaw(offsetRaw)
+                val hasDueTime = (doc.getBoolean("hasDueTime") ?: doc.getBoolean("has_due_time") ?: false) ||
+                    parsedOffset != TaskReminderOffset.NONE
                 FamilyTask(
                     id = doc.id,
                     familyId = doc.getString("familyId") ?: familyId,
@@ -7948,7 +8011,10 @@ class FamilyRepository(
                     category = runCatching { TaskCategory.valueOf(catStr) }.getOrDefault(TaskCategory.OTHER),
                     assignedToMemberId = assigned,
                     dateEpochDay = epochDay,
-                    dueTimeFormatted = doc.getString("dueTimeFormatted") ?: "16:00",
+                    dueTimeFormatted = dueTime,
+                    hasDueTime = hasDueTime,
+                    reminderOffset = parsedOffset,
+                    reminderEnabled = hasDueTime && parsedOffset != TaskReminderOffset.NONE,
                     isCompleted = doc.getBoolean("isCompleted") ?: false,
                     priority = runCatching { TaskPriority.valueOf(prioStr) }.getOrDefault(TaskPriority.MEDIUM),
                     recurrence = runCatching { TaskRecurrence.valueOf(recStr) }.getOrDefault(TaskRecurrence.ONCE),
@@ -7968,6 +8034,8 @@ class FamilyRepository(
         val db = firestoreProvider() ?: return Result.failure(IllegalStateException("Firestore unavailable"))
         val uid = authProvider()?.currentUser?.uid ?: return Result.failure(SecurityException("Not authenticated"))
         val path = if (task.familyId.isNotBlank()) "families/${task.familyId}/tasks/${task.id}" else "tasks/${task.id}"
+        val effectiveHasDueTime = task.hasDueTime || task.reminderOffset != TaskReminderOffset.NONE
+        val effectiveReminderOffset = if (effectiveHasDueTime) task.reminderOffset else TaskReminderOffset.NONE
         return try {
             if (task.familyId.isNotBlank()) {
                 val familyRef = db.collection("families").document(task.familyId)
@@ -8013,6 +8081,13 @@ class FamilyRepository(
                             "assignedMemberId" to task.assignedToMemberId,
                             "dateEpochDay" to task.dateEpochDay,
                             "dueDate" to (task.dateEpochDay * 86_400_000L),
+                            "dueTimeFormatted" to task.dueTimeFormatted,
+                            "due_time" to task.dueTimeFormatted,
+                            "hasDueTime" to effectiveHasDueTime,
+                            "has_due_time" to effectiveHasDueTime,
+                            "reminderOffset" to effectiveReminderOffset.name,
+                            "reminder_offset" to effectiveReminderOffset.name,
+                            "reminderEnabled" to (effectiveHasDueTime && effectiveReminderOffset != TaskReminderOffset.NONE),
                             "isCompleted" to task.isCompleted,
                             "priority" to task.priority.name,
                             "recurrence" to task.recurrence.name,
@@ -8029,6 +8104,12 @@ class FamilyRepository(
                 db.collection("tasks").document(task.id).update(
                     mapOf(
                         "title" to task.title,
+                        "dueTimeFormatted" to task.dueTimeFormatted,
+                        "due_time" to task.dueTimeFormatted,
+                        "hasDueTime" to effectiveHasDueTime,
+                        "has_due_time" to effectiveHasDueTime,
+                        "reminderOffset" to effectiveReminderOffset.name,
+                        "reminder_offset" to effectiveReminderOffset.name,
                         "isCompleted" to task.isCompleted,
                         "points" to task.points,
                         "pointsValue" to task.points

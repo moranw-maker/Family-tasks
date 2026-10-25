@@ -284,7 +284,10 @@ class FamilyViewModel(
             _snackbarMessage.value = "רק הורים יכולים ליצור או לערוך משימות משפחתיות 🔒"
             return
         }
-        _taskToEdit.value = task
+        val authoritativeTask = task?.let { requested ->
+            tasks.value.find { it.id == requested.id } ?: requested
+        }
+        _taskToEdit.value = authoritativeTask
         _showAddTaskDialog.value = true
     }
 
@@ -742,6 +745,10 @@ class FamilyViewModel(
         repository.clearTaskOperationError()
     }
 
+    fun resyncTaskRemindersForActiveMember() {
+        repository.resyncTaskRemindersForActiveMember()
+    }
+
     fun saveTask(
         id: String?,
         title: String,
@@ -752,12 +759,18 @@ class FamilyViewModel(
         dueTimeFormatted: String,
         priority: TaskPriority,
         recurrence: TaskRecurrence,
-        points: Int
+        points: Int,
+        hasDueTime: Boolean = false,
+        reminderOffset: TaskReminderOffset = TaskReminderOffset.NONE
     ) {
         if (!currentMember.value.isParent) {
             _snackbarMessage.value = "רק הורים יכולים ליצור או לערוך משימות 🔒"
             return
         }
+        val effectiveHasDueTime = hasDueTime || reminderOffset != TaskReminderOffset.NONE
+        val effectiveReminderOffset = if (effectiveHasDueTime) reminderOffset else TaskReminderOffset.NONE
+        val effectiveReminderEnabled = effectiveHasDueTime && effectiveReminderOffset != TaskReminderOffset.NONE
+        val nowMillis = System.currentTimeMillis()
         if (id == null) {
             val newTask = FamilyTask(
                 title = title,
@@ -766,9 +779,14 @@ class FamilyViewModel(
                 assignedToMemberId = assignedToMemberId,
                 dateEpochDay = dateEpochDay,
                 dueTimeFormatted = dueTimeFormatted,
+                hasDueTime = effectiveHasDueTime,
+                reminderOffset = effectiveReminderOffset,
+                reminderEnabled = effectiveReminderEnabled,
                 priority = priority,
                 recurrence = recurrence,
-                points = points
+                points = points,
+                createdAtMillis = nowMillis,
+                updatedAtMillis = nowMillis
             )
             repository.addTask(newTask)
             _snackbarMessage.value = "משימה חדשה נוספה וסונכרנה ליומן Google ✓"
@@ -783,9 +801,13 @@ class FamilyViewModel(
                         assignedToMemberId = assignedToMemberId,
                         dateEpochDay = dateEpochDay,
                         dueTimeFormatted = dueTimeFormatted,
+                        hasDueTime = effectiveHasDueTime,
+                        reminderOffset = effectiveReminderOffset,
+                        reminderEnabled = effectiveReminderEnabled,
                         priority = priority,
                         recurrence = recurrence,
-                        points = points
+                        points = points,
+                        updatedAtMillis = nowMillis
                     )
                 )
                 _snackbarMessage.value = "המשימה עודכנה בהצלחה ✓"

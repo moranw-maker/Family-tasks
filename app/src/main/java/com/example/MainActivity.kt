@@ -68,6 +68,7 @@ fun FamilyTasksApp(
                 fullScreenPermissionRefreshTick++
                 com.example.notifications.FamilyAlarmScheduler.restoreAlarmsOnBoot(context)
                 viewModel.resyncAlarmsForActiveMember()
+                viewModel.resyncTaskRemindersForActiveMember()
                 com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestoreAsync(
                     context = context,
                     reason = "foreground_resume"
@@ -678,7 +679,9 @@ fun FamilyTasksApp(
                                     dueTimeFormatted = taskResult.dueTimeFormatted,
                                     priority = taskResult.priority,
                                     recurrence = taskResult.recurrence,
-                                    points = taskResult.points
+                                    points = taskResult.points,
+                                    hasDueTime = taskResult.hasDueTime,
+                                    reminderOffset = taskResult.reminderOffset
                                 )
                             }
                         )

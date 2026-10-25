@@ -172,12 +172,16 @@ object TaskReminderScheduler {
 
         if (isCredentialProtectedStorageAvailable(context)) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val prevActiveSig = prefs.getString(KEY_ACTIVE_SIGNATURE_PREFIX + cleanId, null)
             val currentIds = prefs.getStringSet(KEY_SCHEDULED_TASK_IDS, emptySet())?.toMutableSet() ?: mutableSetOf()
             val wasTracked = currentIds.remove(cleanId)
-            prefs.edit()
+            val editor = prefs.edit()
                 .putStringSet(KEY_SCHEDULED_TASK_IDS, currentIds)
                 .remove(KEY_ACTIVE_SIGNATURE_PREFIX + cleanId)
-                .apply()
+            if (clearActiveNotification && !prevActiveSig.isNullOrBlank()) {
+                editor.remove(KEY_FIRED_SIGNATURE_PREFIX + prevActiveSig)
+            }
+            editor.apply()
             if (wasTracked) cancelledExisting = true
         }
 
@@ -224,9 +228,13 @@ object TaskReminderScheduler {
         }
 
         val triggerAtMillis = task.computeReminderTriggerEpochMillis(zoneId) ?: return false
+        val dueAtMillis = task.computeDueEpochMillis(zoneId) ?: triggerAtMillis
 
         // Do not schedule reminders whose trigger time is more than 60 seconds in the past
-        if (triggerAtMillis < nowMillis - 60_000L) {
+        // UNLESS the task's execution time (dueAtMillis) is still upcoming or within a 5-minute
+        // grace window (e.g., user selected "10 min before" for a task due in 5 minutes, or saved
+        // an AT_TIME task near the end of the current minute).
+        if (triggerAtMillis < nowMillis - 60_000L && dueAtMillis < nowMillis - 5 * 60_000L) {
             return false
         }
 
@@ -317,9 +325,18 @@ object TaskReminderScheduler {
         if (!isCredentialProtectedStorageAvailable(context)) return
 
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val resolvedMemberId = currentMemberId.ifBlank { prefs.getString(KEY_CACHED_MEMBER_ID, "").orEmpty() }
-        val resolvedAuthUid = currentAuthUid.ifBlank { prefs.getString(KEY_CACHED_AUTH_UID, "").orEmpty() }
-        val resolvedMemberName = currentMemberName.ifBlank { prefs.getString(KEY_CACHED_MEMBER_NAME, "").orEmpty() }
+        val cachedMemberId = prefs.getString(KEY_CACHED_MEMBER_ID, "").orEmpty()
+        val cachedAuthUid = prefs.getString(KEY_CACHED_AUTH_UID, "").orEmpty()
+        val cachedMemberName = prefs.getString(KEY_CACHED_MEMBER_NAME, "").orEmpty()
+
+        val resolvedAuthUid = currentAuthUid.ifBlank { cachedAuthUid }
+        val resolvedMemberId = when {
+            currentMemberId.isNotBlank() && !(currentMemberId == currentAuthUid && cachedMemberId.isNotBlank() && cachedMemberId != "m_dad") ->
+                currentMemberId
+            cachedMemberId.isNotBlank() -> cachedMemberId
+            else -> resolvedAuthUid
+        }
+        val resolvedMemberName = currentMemberName.ifBlank { cachedMemberName }
 
         if (resolvedMemberId.isNotBlank() || resolvedAuthUid.isNotBlank()) {
             prefs.edit()
@@ -333,7 +350,9 @@ object TaskReminderScheduler {
             val assigned = task.assignedToMemberId.trim()
             assigned.isNotEmpty() && (
                 (resolvedMemberId.isNotBlank() && assigned == resolvedMemberId) ||
-                    (resolvedAuthUid.isNotBlank() && assigned == resolvedAuthUid)
+                    (resolvedAuthUid.isNotBlank() && assigned == resolvedAuthUid) ||
+                    (currentMemberId.isNotBlank() && assigned == currentMemberId) ||
+                    (resolvedMemberName.isNotBlank() && assigned.equals(resolvedMemberName, ignoreCase = true))
                 )
         }
 

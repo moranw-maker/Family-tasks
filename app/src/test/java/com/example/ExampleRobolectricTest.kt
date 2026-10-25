@@ -3431,5 +3431,240 @@ class ExampleRobolectricTest {
         waitForIdle()
         assertEquals(LocalDate.of(2026, 5, 31), selectedDateState.value)
     }
+
+    @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+    @Test
+    fun `test full task reminder pipeline create save reopen edit modify cancel cross device sync and legacy compatibility`() = androidx.compose.ui.test.runComposeUiTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        if (com.google.firebase.FirebaseApp.getApps(context).isEmpty()) {
+            com.google.firebase.FirebaseApp.initializeApp(
+                context,
+                com.google.firebase.FirebaseOptions.Builder()
+                    .setProjectId("test-project")
+                    .setApplicationId("1:1234567890:android:abcdef")
+                    .setApiKey("fake-api-key-for-test")
+                    .build()
+            )
+        }
+        com.example.notifications.TaskReminderScheduler.clearAllForTesting(context)
+
+        val parentRepository = FamilyRepository(
+            context = context,
+            firestoreProvider = { null },
+            authProvider = { null }
+        )
+        val viewModel = com.example.viewmodel.FamilyViewModel(repository = parentRepository)
+        viewModel.attachApplicationContext(context)
+
+        val childMember = parentRepository.members.value.first { !it.isParent }
+        val tomorrowEpochDay = LocalDate.now().plusDays(1).toEpochDay()
+        val showDialogState = androidx.compose.runtime.mutableStateOf(false)
+        val taskToEditState = androidx.compose.runtime.mutableStateOf<com.example.model.FamilyTask?>(null)
+
+        setContent {
+            com.example.ui.theme.MyApplicationTheme(
+                themeMode = com.example.model.AppThemeMode.LIGHT,
+                textScale = com.example.model.AppTextScale.NORMAL
+            ) {
+                if (showDialogState.value) {
+                    com.example.ui.dialogs.AddTaskDialog(
+                        members = parentRepository.members.value,
+                        isHebrew = true,
+                        taskToEdit = taskToEditState.value,
+                        initialDate = LocalDate.ofEpochDay(tomorrowEpochDay),
+                        onDismiss = {
+                            viewModel.closeAddTaskDialog()
+                            showDialogState.value = false
+                            taskToEditState.value = null
+                        },
+                        onSaveTask = { taskResult ->
+                            val currentEditing = taskToEditState.value
+                            viewModel.saveTask(
+                                id = if (currentEditing != null) taskResult.id else null,
+                                title = taskResult.title,
+                                description = taskResult.description,
+                                category = taskResult.category,
+                                assignedToMemberId = taskResult.assignedToMemberId,
+                                dateEpochDay = taskResult.dateEpochDay,
+                                dueTimeFormatted = taskResult.dueTimeFormatted,
+                                priority = taskResult.priority,
+                                recurrence = taskResult.recurrence,
+                                points = taskResult.points,
+                                hasDueTime = taskResult.hasDueTime,
+                                reminderOffset = taskResult.reminderOffset
+                            )
+                            showDialogState.value = false
+                            taskToEditState.value = null
+                        }
+                    )
+                }
+            }
+        }
+
+        // 1. Create a task with a reminder at execution time (AT_TIME) assigned to a family member
+        viewModel.openAddTaskDialog(null)
+        taskToEditState.value = viewModel.taskToEdit.value
+        showDialogState.value = viewModel.showAddTaskDialog.value
+        waitForIdle()
+
+        onNodeWithTag("task_title_input").performTextInput("הכנת שיעורי בית במדעים")
+        onNodeWithTag("assign_member_chip_${childMember.id}").performClick()
+        onNodeWithTag("task_reminder_chip_AT_TIME").performClick()
+        onNodeWithTag("save_task_btn").performClick()
+        waitForIdle()
+
+        val createdTask = viewModel.tasks.value.find { it.title == "הכנת שיעורי בית במדעים" }
+        assertNotNull("Created task must exist in ViewModel/Repository", createdTask)
+        assertEquals(childMember.id, createdTask!!.assignedToMemberId)
+        assertTrue("Created task must persist hasDueTime = true", createdTask.hasDueTime)
+        assertEquals(
+            "Created task must persist reminderOffset = AT_TIME and NOT reset to NONE",
+            com.example.model.TaskReminderOffset.AT_TIME,
+            createdTask.reminderOffset
+        )
+        assertTrue("Created task must have hasActiveReminder = true", createdTask.hasActiveReminder)
+
+        // 2 & 3. Reopen the saved task for editing and verify reminderOffset does NOT reset to NONE
+        viewModel.openAddTaskDialog(createdTask)
+        taskToEditState.value = viewModel.taskToEdit.value
+        showDialogState.value = viewModel.showAddTaskDialog.value
+        waitForIdle()
+
+        assertNotNull("taskToEdit in ViewModel must be populated", viewModel.taskToEdit.value)
+        assertTrue("taskToEdit.hasDueTime must remain true when reopened", viewModel.taskToEdit.value!!.hasDueTime)
+        assertEquals(
+            "taskToEdit.reminderOffset must remain AT_TIME when reopened (never NONE)",
+            com.example.model.TaskReminderOffset.AT_TIME,
+            viewModel.taskToEdit.value!!.reminderOffset
+        )
+
+        // 4. Modify the existing reminder in the Edit dialog (AT_TIME -> MINUTES_30_BEFORE) and save
+        onNodeWithTag("task_reminder_chip_MINUTES_30_BEFORE").performClick()
+        onNodeWithTag("save_task_btn").performClick()
+        waitForIdle()
+
+        val updatedTask = viewModel.tasks.value.find { it.id == createdTask.id }
+        assertNotNull(updatedTask)
+        assertTrue("Updated task must preserve hasDueTime = true", updatedTask!!.hasDueTime)
+        assertEquals(
+            "Updated task must persist modified reminderOffset = MINUTES_30_BEFORE",
+            com.example.model.TaskReminderOffset.MINUTES_30_BEFORE,
+            updatedTask.reminderOffset
+        )
+
+        // 6 & 7. Sync task with reminder between two devices (Parent -> Firestore map / Room -> Child device)
+        // and verify scheduling on the assigned family member's device (including background FCM when app is closed)
+        val firestoreDataMap = mapOf<String, Any?>(
+            "id" to updatedTask.id,
+            "familyId" to updatedTask.familyId.ifBlank { "fam_sync_test" },
+            "title" to updatedTask.title,
+            "description" to updatedTask.description,
+            "assignedUid" to updatedTask.assignedToMemberId,
+            "assignedToMemberId" to updatedTask.assignedToMemberId,
+            "dateEpochDay" to updatedTask.dateEpochDay,
+            "dueTimeFormatted" to updatedTask.dueTimeFormatted,
+            "hasDueTime" to updatedTask.hasDueTime,
+            "reminderOffset" to updatedTask.reminderOffset.name,
+            "isCompleted" to false,
+            "points" to updatedTask.points
+        )
+        val syncedTaskOnChildDevice = com.example.notifications.TaskReminderSyncWorker.parseFirestoreTaskForReminderSync(
+            docId = updatedTask.id,
+            data = firestoreDataMap,
+            fallbackFamilyId = "fam_sync_test"
+        )
+        assertNotNull("Child device must parse synced task from Firestore", syncedTaskOnChildDevice)
+        assertTrue("Synced task on child device must preserve hasDueTime = true", syncedTaskOnChildDevice!!.hasDueTime)
+        assertEquals(
+            "Synced task on child device must preserve reminderOffset = MINUTES_30_BEFORE",
+            com.example.model.TaskReminderOffset.MINUTES_30_BEFORE,
+            syncedTaskOnChildDevice.reminderOffset
+        )
+
+        // Verify Room round-trip on child device also preserves hasDueTime and reminderOffset
+        val roomEntity = syncedTaskOnChildDevice.toCoreTask("fam_sync_test")
+        val restoredFromRoom = roomEntity.toFamilyTask()
+        assertTrue("Room round-trip must preserve hasDueTime = true", restoredFromRoom.hasDueTime)
+        assertEquals(
+            "Room round-trip must preserve reminderOffset = MINUTES_30_BEFORE",
+            com.example.model.TaskReminderOffset.MINUTES_30_BEFORE,
+            restoredFromRoom.reminderOffset
+        )
+
+        // Schedule on child's device via syncTaskRemindersForCurrentDevice
+        com.example.notifications.TaskReminderScheduler.syncTaskRemindersForCurrentDevice(
+            context = context,
+            tasks = listOf(syncedTaskOnChildDevice),
+            currentMemberId = childMember.id,
+            currentAuthUid = childMember.id,
+            currentMemberName = childMember.name
+        )
+        assertTrue(
+            "Reminder MUST be scheduled in AlarmManager on the assigned child's device",
+            com.example.notifications.TaskReminderScheduler.isTaskReminderPendingInAlarmManager(context, updatedTask.id)
+        )
+        assertEquals(
+            updatedTask.reminderScheduleSignature(),
+            com.example.notifications.TaskReminderScheduler.getActiveScheduledSignature(context, updatedTask.id)
+        )
+
+        // 5. Cancel the existing reminder in Edit dialog (select NONE "ללא תזכורת") and save
+        viewModel.openAddTaskDialog(updatedTask)
+        taskToEditState.value = viewModel.taskToEdit.value
+        showDialogState.value = viewModel.showAddTaskDialog.value
+        waitForIdle()
+        onNodeWithTag("task_reminder_chip_NONE").performClick()
+        onNodeWithTag("save_task_btn").performClick()
+        waitForIdle()
+
+        val cancelledTask = viewModel.tasks.value.find { it.id == createdTask.id }
+        assertNotNull(cancelledTask)
+        assertEquals(
+            "Selecting 'ללא תזכורת' must save reminderOffset = NONE",
+            com.example.model.TaskReminderOffset.NONE,
+            cancelledTask!!.reminderOffset
+        )
+        assertFalse("Cancelled reminder task must have hasActiveReminder = false", cancelledTask.hasActiveReminder)
+
+        // Sync the cancellation to the child's device and verify AlarmManager PendingIntent is cancelled
+        com.example.notifications.TaskReminderScheduler.syncTaskRemindersForCurrentDevice(
+            context = context,
+            tasks = listOf(cancelledTask),
+            currentMemberId = childMember.id,
+            currentAuthUid = childMember.id,
+            currentMemberName = childMember.name
+        )
+        assertFalse(
+            "Cancelling reminder must remove the scheduled PendingIntent on the child's device",
+            com.example.notifications.TaskReminderScheduler.isTaskReminderPendingInAlarmManager(context, updatedTask.id)
+        )
+
+        // 8. Verify backward compatibility for legacy tasks without reminders (missing hasDueTime / reminderOffset fields)
+        val legacyFirestoreMap = mapOf<String, Any?>(
+            "id" to "legacy_task_001",
+            "title" to "משימה ישנה ללא שדות תזכורת",
+            "assignedToMemberId" to childMember.id,
+            "dateEpochDay" to tomorrowEpochDay,
+            "dueTimeFormatted" to "17:00",
+            "isCompleted" to false,
+            "points" to 10
+        )
+        val parsedLegacyTask = com.example.notifications.TaskReminderSyncWorker.parseFirestoreTaskForReminderSync(
+            docId = "legacy_task_001",
+            data = legacyFirestoreMap,
+            fallbackFamilyId = "fam_sync_test"
+        )
+        assertNotNull("Legacy task without reminder fields must parse cleanly", parsedLegacyTask)
+        assertFalse("Legacy task must default to hasDueTime = false", parsedLegacyTask!!.hasDueTime)
+        assertEquals(
+            "Legacy task must default to reminderOffset = NONE",
+            com.example.model.TaskReminderOffset.NONE,
+            parsedLegacyTask.reminderOffset
+        )
+        assertFalse("Legacy task must not schedule an active reminder", parsedLegacyTask.hasActiveReminder)
+
+        com.example.notifications.TaskReminderScheduler.clearAllForTesting(context)
+    }
 }
+
 
