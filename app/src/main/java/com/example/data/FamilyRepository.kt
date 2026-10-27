@@ -3194,7 +3194,8 @@ class FamilyRepository(
                                                 title = title,
                                                 message = body,
                                                 eventKey = assignKey,
-                                                taskId = remoteTask.id
+                                                taskId = remoteTask.id,
+                                                eventType = FcmTokenManager.EVENT_TASK_ASSIGNED
                                             )
                                         }
                                     }
@@ -3220,7 +3221,8 @@ class FamilyRepository(
                                                 title = title,
                                                 message = body,
                                                 eventKey = reassignKey,
-                                                taskId = remoteTask.id
+                                                taskId = remoteTask.id,
+                                                eventType = FcmTokenManager.EVENT_TASK_REASSIGNED
                                             )
                                         }
                                     }
@@ -3251,7 +3253,8 @@ class FamilyRepository(
                                                             title = title,
                                                             message = body,
                                                             eventKey = approveKey,
-                                                            taskId = remoteTask.id
+                                                            taskId = remoteTask.id,
+                                                            eventType = FcmTokenManager.EVENT_TASK_APPROVED
                                                         )
                                                     }
                                                 }
@@ -3276,7 +3279,8 @@ class FamilyRepository(
                                                             title = title,
                                                             message = body,
                                                             eventKey = submitKey,
-                                                            taskId = remoteTask.id
+                                                            taskId = remoteTask.id,
+                                                            eventType = FcmTokenManager.EVENT_TASK_SUBMITTED_FOR_APPROVAL
                                                         )
                                                     }
                                                 }
@@ -3304,7 +3308,8 @@ class FamilyRepository(
                                                     title = title,
                                                     message = body,
                                                     eventKey = approveKey,
-                                                    taskId = remoteTask.id
+                                                    taskId = remoteTask.id,
+                                                    eventType = FcmTokenManager.EVENT_TASK_APPROVED
                                                 )
                                             }
                                         }

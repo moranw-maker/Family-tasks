@@ -2593,14 +2593,17 @@ fun FamilyAlarmRingtonePickerScreen(
     val verifiedAllLibrarySounds = remember(context) {
         com.example.notifications.FamilySoundManager.getVerifiedLibrarySounds(context)
     }
-    val initialLibraryItem = remember(initialSoundType, verifiedAllLibrarySounds) {
-        verifiedAllLibrarySounds.find { it.id == initialSoundType }
+    val normalizedInitialSoundType = remember(initialSoundType) {
+        initialSoundType.removePrefix(com.example.notifications.FamilySoundManager.SOUND_PREFIX_LIBRARY)
+    }
+    val initialLibraryItem = remember(normalizedInitialSoundType, verifiedAllLibrarySounds) {
+        verifiedAllLibrarySounds.find { it.id == normalizedInitialSoundType }
     }
 
     var selectedLibraryCategory by remember {
         mutableStateOf(
             initialLibraryItem?.category
-                ?: com.example.notifications.SoundLibraryCategory.VELVET_PREMIUM
+                ?: com.example.notifications.SoundLibraryCategory.FAMILYTASKS_SIGNATURE
         )
     }
 
@@ -2622,14 +2625,14 @@ fun FamilyAlarmRingtonePickerScreen(
     var selectedTab by remember {
         mutableStateOf(
             when {
-                initialSoundType == AlarmAudioController.SOUND_CUSTOM_URI &&
+                normalizedInitialSoundType == AlarmAudioController.SOUND_CUSTOM_URI &&
                     initialCustomSoundUri.isNotBlank() &&
                     systemAlarmRingtones.none { it.uriString == initialCustomSoundUri } &&
                     additionalRingtones.none { it.uriString == initialCustomSoundUri } ->
                     RingtonePickerTab.CUSTOM_SOUND
-                initialSoundType == AlarmAudioController.SOUND_SYSTEM_RINGTONE ||
-                    initialSoundType == AlarmAudioController.SOUND_SYSTEM_NOTIFICATION ||
-                    (initialSoundType == AlarmAudioController.SOUND_CUSTOM_URI &&
+                normalizedInitialSoundType == AlarmAudioController.SOUND_SYSTEM_RINGTONE ||
+                    normalizedInitialSoundType == AlarmAudioController.SOUND_SYSTEM_NOTIFICATION ||
+                    (normalizedInitialSoundType == AlarmAudioController.SOUND_CUSTOM_URI &&
                         additionalRingtones.any { it.uriString == initialCustomSoundUri }) ->
                     RingtonePickerTab.ADDITIONAL_SOUNDS
                 else -> RingtonePickerTab.SYSTEM_ALARMS
@@ -2637,7 +2640,7 @@ fun FamilyAlarmRingtonePickerScreen(
         )
     }
 
-    var selectedSoundType by remember { mutableStateOf(initialSoundType) }
+    var selectedSoundType by remember { mutableStateOf(normalizedInitialSoundType) }
     var selectedCustomUri by remember { mutableStateOf(initialCustomSoundUri) }
     var selectedCustomTitle by remember { mutableStateOf(initialCustomSoundTitle) }
     var volumePercent by remember { mutableFloatStateOf(initialVolumePercent.coerceIn(10, 100).toFloat()) }

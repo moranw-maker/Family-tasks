@@ -513,11 +513,12 @@ fun SettingsScreen(
                     icon = Icons.Default.MusicNote,
                     iconTint = glass.primaryAccent
                 ) {
+                    val categoryCount = com.example.notifications.SoundLibraryCategory.entries.size
                     Text(
                         text = if (isHebrew) {
-                            "בחרו צליל ברירת מחדל נפרד לכל סוג התראה ושעון מעורר מתוך $verifiedSoundCount צלילים ב-7 קטגוריות, צלילי מערכת או קובץ אישי:"
+                            "בחרו צליל ברירת מחדל נפרד לכל סוג התראה ושעון מעורר מתוך $verifiedSoundCount צלילים ב-$categoryCount קטגוריות (כולל צליל החתימה 🔷 FamilyTasks Signature Pulse), צלילי מערכת או קובץ אישי:"
                         } else {
-                            "Configure a dedicated default sound for each alarm and notification type from $verifiedSoundCount sounds across 7 categories, system tones, or custom audio files:"
+                            "Configure a dedicated default sound for each alarm and notification type from $verifiedSoundCount sounds across $categoryCount categories (including 🔷 FamilyTasks Signature Pulse), system tones, or custom audio files:"
                         },
                         style = MaterialTheme.typography.bodySmall.copy(
                             color = glass.textSecondary
@@ -542,12 +543,15 @@ fun SettingsScreen(
                                     isHebrew = isHebrew
                                 )
                             }
+                            val cleanCurrentId = currentCfg.soundId.removePrefix(com.example.notifications.FamilySoundManager.SOUND_PREFIX_LIBRARY)
+                            val cleanActiveId = previewState.activeSoundType.removePrefix(com.example.notifications.FamilySoundManager.SOUND_PREFIX_LIBRARY)
                             val isPlayingThis = previewState.isPlaying && (
                                 (currentCfg.soundId == com.example.notifications.AlarmAudioController.SOUND_CUSTOM_URI &&
                                     previewState.activeCustomUri == currentCfg.customUri &&
                                     currentCfg.customUri.isNotBlank()) ||
                                     (currentCfg.soundId != com.example.notifications.AlarmAudioController.SOUND_CUSTOM_URI &&
-                                        previewState.activeSoundType == currentCfg.soundId)
+                                        cleanActiveId.isNotBlank() &&
+                                        cleanActiveId == cleanCurrentId)
                                 )
 
                             Surface(

@@ -3673,18 +3673,19 @@ class ExampleRobolectricTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         com.example.notifications.FamilySoundManager.clearAllSoundPrefsForTesting(context)
 
-        // 1. Verify all 48 real .wav audio files across all 7 categories exist in res/raw and pass verification
+        // 1. Verify all 49 real .wav audio files (1 Signature Pulse + 48 Velvet sounds) across all 8 categories exist in res/raw
         val allVerifiedSounds = com.example.notifications.FamilySoundManager.getVerifiedLibrarySounds(context)
         assertEquals(
-            "All 48 real .wav sounds across the 7 categories must exist in res/raw and pass verification",
-            48,
+            "All 49 real .wav sounds across the 8 categories must exist in res/raw and pass verification",
+            49,
             allVerifiedSounds.size
         )
         com.example.notifications.SoundLibraryCategory.entries.forEach { category ->
             val catSounds = com.example.notifications.FamilySoundManager.getVerifiedLibrarySounds(context, category)
+            val minExpected = if (category == com.example.notifications.SoundLibraryCategory.FAMILYTASKS_SIGNATURE) 1 else 6
             assertTrue(
-                "Category ${category.name} must have at least 6 verified real audio files",
-                catSounds.size >= 6
+                "Category ${category.name} must have at least $minExpected verified real audio file(s)",
+                catSounds.size >= minExpected
             )
             catSounds.forEach { item ->
                 assertTrue(
@@ -4033,6 +4034,354 @@ class ExampleRobolectricTest {
             "Task reminder and regular notifications must post to NotificationManager",
             shadowNotificationManager.allNotifications.size >= 5
         )
+    }
+
+    @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+    @Test
+    fun `test familytasks signature pulse integration default task_created sound preference preservation channel settings and deduplication`() = androidx.compose.ui.test.runComposeUiTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val shadowNotificationManager = org.robolectric.Shadows.shadowOf(notificationManager)
+
+        // Grant POST_NOTIFICATIONS on Android 13+
+        org.robolectric.Shadows.shadowOf(context as android.app.Application).grantPermissions(
+            android.Manifest.permission.POST_NOTIFICATIONS
+        )
+
+        // Clean state to simulate a fresh installation / profile with no prior sound preference
+        com.example.notifications.FamilySoundManager.clearAllSoundPrefsForTesting(context)
+        com.example.util.NotificationHelper.clearChannelPrefsForTesting(context)
+        com.example.notifications.FcmTokenManager.clearAllDispatchedEventsForTesting()
+        notificationManager.cancelAll()
+
+        // =========================================================================
+        // 1. Verify the attached WAV file exists in res/raw/sound_familytasks_signature_pulse.wav and is valid
+        // =========================================================================
+        val sigResId = com.example.R.raw.sound_familytasks_signature_pulse
+        assertTrue(
+            "R.raw.sound_familytasks_signature_pulse must exist and be a valid non-empty WAV resource",
+            com.example.notifications.FamilySoundManager.isRawSoundResourceValid(context, sigResId)
+        )
+        val rawBytes = context.resources.openRawResource(sigResId).use { it.readBytes() }
+        assertEquals(
+            "Attached Signature Pulse WAV file must match exact original byte size (63984 bytes)",
+            63984,
+            rawBytes.size
+        )
+        assertEquals("RIFF", String(rawBytes.sliceArray(0 until 4), Charsets.US_ASCII))
+        assertEquals("WAVE", String(rawBytes.sliceArray(8 until 12), Charsets.US_ASCII))
+
+        // =========================================================================
+        // 2. Verify Signature Pulse is registered in FamilyTasks Signature category with 🔷 and exact ID/title
+        // =========================================================================
+        val sigCategorySounds = com.example.notifications.FamilySoundManager.getVerifiedLibrarySounds(
+            context,
+            com.example.notifications.SoundLibraryCategory.FAMILYTASKS_SIGNATURE
+        )
+        assertEquals(1, sigCategorySounds.size)
+        val sigItem = sigCategorySounds.first()
+        assertEquals("familytasks_signature_pulse", sigItem.id)
+        assertEquals("FamilyTasks Signature Pulse", sigItem.titleHe)
+        assertEquals("FamilyTasks Signature Pulse", sigItem.titleEn)
+        assertEquals("🔷", sigItem.emoji)
+        assertEquals(
+            "FamilyTasks Signature",
+            com.example.notifications.SoundLibraryCategory.FAMILYTASKS_SIGNATURE.titleHe
+        )
+
+        // Verify the existing 48 Velvet sounds remain intact (total 49 verified sounds)
+        val allVerified = com.example.notifications.FamilySoundManager.getVerifiedLibrarySounds(context)
+        assertEquals(49, allVerified.size)
+
+        // =========================================================================
+        // 3. Verify Signature Pulse is the default sound ONLY for TASK_CREATED on a fresh profile,
+        //    while ALARM_DEFAULT, TASK_REMINDER, and other notification types keep their existing defaults
+        // =========================================================================
+        val defaultTaskCreatedCfg = com.example.notifications.FamilySoundManager.getSoundConfigForUsage(
+            context,
+            com.example.notifications.SoundUsageType.TASK_CREATED
+        )
+        assertEquals(
+            "LIBRARY:familytasks_signature_pulse",
+            defaultTaskCreatedCfg.soundId
+        )
+        assertEquals(
+            "FamilyTasks Signature Pulse",
+            com.example.notifications.FamilySoundManager.formatSelectedSoundDisplayName(
+                context,
+                com.example.notifications.SoundUsageType.TASK_CREATED,
+                isHebrew = true
+            )
+        )
+        val taskCreatedPlayableUri = com.example.notifications.FamilySoundManager.resolvePlayableUriOrFallback(
+            context,
+            com.example.notifications.SoundUsageType.TASK_CREATED
+        )
+        assertEquals(sigItem.buildResourceUri(context), taskCreatedPlayableUri.toString())
+
+        // Verify other sound usage types were NOT altered
+        assertEquals(
+            "sound_wakeup_sunrise_glow",
+            com.example.notifications.SoundUsageType.ALARM_DEFAULT.defaultSoundId
+        )
+        assertEquals(
+            "sound_soft_reminder_dew",
+            com.example.notifications.SoundUsageType.TASK_REMINDER.defaultSoundId
+        )
+        assertEquals(
+            "sound_soft_task_updated",
+            com.example.notifications.SoundUsageType.TASK_UPDATED.defaultSoundId
+        )
+        assertEquals(
+            "sound_soft_task_completed",
+            com.example.notifications.SoundUsageType.TASK_COMPLETED.defaultSoundId
+        )
+        assertEquals(
+            "sound_soft_task_deleted",
+            com.example.notifications.SoundUsageType.TASK_DELETED.defaultSoundId
+        )
+        assertEquals(
+            "sound_soft_family_message",
+            com.example.notifications.SoundUsageType.FAMILY_GENERAL.defaultSoundId
+        )
+
+        // =========================================================================
+        // 4. Verify UI display, preview playback, replacing Signature Pulse with another sound,
+        //    and persistence across app closure
+        // =========================================================================
+        var currentSavedType = defaultTaskCreatedCfg.soundId
+        var currentSavedUri = defaultTaskCreatedCfg.customUri
+        var currentSavedTitle = defaultTaskCreatedCfg.customTitle
+        val pickerSession = androidx.compose.runtime.mutableIntStateOf(0)
+
+        setContent {
+            val session = pickerSession.intValue
+            androidx.compose.runtime.key(session) {
+                com.example.ui.screens.FamilyAlarmRingtonePickerScreen(
+                    initialSoundType = currentSavedType,
+                    initialCustomSoundUri = currentSavedUri,
+                    initialCustomSoundTitle = currentSavedTitle,
+                    initialVolumePercent = 85,
+                    isTargetRemoteChild = false,
+                    isHebrew = true,
+                    headerTitleOverride = "צליל: יצירה והקצאת משימה",
+                    showVolumeSlider = false,
+                    onCancel = {},
+                    onConfirmSound = { sType, cUri, cTitle, vol ->
+                        val savedCfg = com.example.notifications.FamilySoundManager.saveSoundConfigForUsage(
+                            context = context,
+                            usage = com.example.notifications.SoundUsageType.TASK_CREATED,
+                            soundType = sType,
+                            customSoundUri = cUri,
+                            customSoundTitle = cTitle,
+                            volumePercent = vol
+                        )
+                        currentSavedType = savedCfg.soundId
+                        currentSavedUri = savedCfg.customUri
+                        currentSavedTitle = savedCfg.customTitle
+                    }
+                )
+            }
+        }
+        waitForIdle()
+
+        // Verify the header shows "FamilyTasks Signature Pulse" as currently selected
+        onNodeWithTag("ringtone_picker_selected_summary").assertTextContains("FamilyTasks Signature Pulse", substring = true)
+        onNodeWithTag("sound_category_chip_FAMILYTASKS_SIGNATURE").assertExists()
+        onNodeWithTag("ringtone_row_familytasks_signature_pulse").assertExists()
+
+        // Click on FamilyTasks Signature Pulse row to preview it
+        onNodeWithTag("ringtone_row_familytasks_signature_pulse").performClick()
+        waitForIdle()
+        assertTrue(com.example.notifications.AlarmAudioController.previewState.value.isPlaying)
+        assertEquals(
+            "familytasks_signature_pulse",
+            com.example.notifications.AlarmAudioController.previewState.value.activeSoundType
+        )
+
+        // Replace Signature Pulse with another sound (e.g. from PIANO_MELODY) and save
+        onNodeWithTag("velvet_sound_category_bar").performScrollToNode(hasTestTag("sound_category_chip_PIANO_MELODY"))
+        onNodeWithTag("sound_category_chip_PIANO_MELODY").performClick()
+        waitForIdle()
+
+        onNodeWithTag("ringtone_picker_list").performScrollToNode(hasTestTag("ringtone_row_sound_piano_morning_sonata"))
+        onNodeWithTag("ringtone_row_sound_piano_morning_sonata").performClick()
+        waitForIdle()
+        assertEquals(
+            "sound_piano_morning_sonata",
+            com.example.notifications.AlarmAudioController.previewState.value.activeSoundType
+        )
+
+        onNodeWithTag("confirm_ringtone_picker_button").performClick()
+        waitForIdle()
+
+        // =========================================================================
+        // 5. Verify existing user sound choice is preserved and NEVER overwritten by default Signature Pulse,
+        //    including after closing/reopening the app
+        // =========================================================================
+        val userChosenCfg = com.example.notifications.FamilySoundManager.getSoundConfigForUsage(
+            context,
+            com.example.notifications.SoundUsageType.TASK_CREATED
+        )
+        assertEquals("LIBRARY:sound_piano_morning_sonata", userChosenCfg.soundId)
+        com.example.notifications.FamilySoundManager.refreshUsageConfigsState(context)
+        val afterRestartCfg = com.example.notifications.FamilySoundManager.getSoundConfigForUsage(
+            context,
+            com.example.notifications.SoundUsageType.TASK_CREATED
+        )
+        assertEquals(
+            "Existing user preference for TASK_CREATED must never be overwritten by default Signature Pulse",
+            "LIBRARY:sound_piano_morning_sonata",
+            afterRestartCfg.soundId
+        )
+
+        // Reopen picker -> must show user's chosen sound, not reset to Signature Pulse
+        pickerSession.intValue++
+        waitForIdle()
+        onNodeWithTag("ringtone_picker_selected_summary").assertTextContains("סונטת בוקר", substring = true)
+
+        // =========================================================================
+        // 6. Verify Android 8+ NotificationChannel behavior & preservation of user OS channel settings
+        //    when switching back to Signature Pulse (or on fresh profile)
+        // =========================================================================
+        com.example.notifications.FamilySoundManager.clearAllSoundPrefsForTesting(context)
+        com.example.util.NotificationHelper.clearChannelPrefsForTesting(context)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            notificationManager.notificationChannels.map { it.id }.forEach { id ->
+                notificationManager.deleteNotificationChannel(id)
+            }
+        }
+
+        // Fresh profile: ensureChannelForSoundUsage(TASK_CREATED) configures channel with Signature Pulse URI
+        val defaultTaskChannelId = com.example.util.NotificationHelper.ensureChannelForSoundUsage(
+            context,
+            com.example.notifications.SoundUsageType.TASK_CREATED
+        )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val ch = notificationManager.getNotificationChannel(defaultTaskChannelId)
+            assertNotNull(ch)
+            assertEquals(sigItem.buildResourceUri(context), ch!!.sound?.toString())
+
+            // Simulate user customizing OS channel settings (e.g. disabling vibration on the channel)
+            ch.enableVibration(false)
+            notificationManager.createNotificationChannel(ch)
+
+            // User changes sound in app -> new rotated channel must preserve user's OS vibration setting (false)
+            com.example.notifications.FamilySoundManager.saveSoundConfigForUsage(
+                context = context,
+                usage = com.example.notifications.SoundUsageType.TASK_CREATED,
+                soundType = "sound_velvet_aurora",
+                customSoundUri = "",
+                customSoundTitle = "",
+                volumePercent = 85
+            )
+            val rotatedChannelId = com.example.util.NotificationHelper.ensureChannelForSoundUsage(
+                context,
+                com.example.notifications.SoundUsageType.TASK_CREATED
+            )
+            val rotatedCh = notificationManager.getNotificationChannel(rotatedChannelId)
+            assertNotNull(rotatedCh)
+            assertFalse(
+                "Rotated NotificationChannel must preserve user's OS-level vibration setting",
+                rotatedCh!!.shouldVibrate()
+            )
+        }
+
+        // Reset back to default Signature Pulse for closed-app FCM & deduplication tests
+        com.example.notifications.FamilySoundManager.clearAllSoundPrefsForTesting(context)
+        com.example.util.NotificationHelper.clearChannelPrefsForTesting(context)
+        notificationManager.cancelAll()
+        com.example.notifications.FcmTokenManager.clearAllDispatchedEventsForTesting()
+
+        // =========================================================================
+        // 7. Verify closed-app ("סגור הכל") new task notification plays Signature Pulse
+        //    and NEVER creates duplicate notifications or double sound playback
+        // =========================================================================
+        val childUid = "child_sig_pulse_uid"
+        val parentUid = "parent_sig_pulse_uid"
+        val newTaskId = "task_sig_pulse_101"
+
+        // Simulate incoming FCM push for a newly created & assigned task when app is closed
+        val handledFirst = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+            context = context,
+            data = mapOf(
+                "eventType" to com.example.notifications.FcmTokenManager.EVENT_TASK_ASSIGNED,
+                "eventKey" to "assign:$newTaskId:$childUid:$childUid",
+                "familyId" to "fam_sig_1",
+                "taskId" to newTaskId,
+                "targetUid" to childUid,
+                "actorUid" to parentUid,
+                "title" to "משימה חדשה שובצה עבורך 📋",
+                "body" to "שובצה לך משימה חדשה: \"לסדר את החדר\""
+            ),
+            signedInUidOverride = childUid
+        )
+        assertTrue("First TASK_ASSIGNED FCM delivery must be handled", handledFirst)
+        assertEquals(
+            "Exactly 1 OS notification must be posted for the new task",
+            1,
+            shadowNotificationManager.allNotifications.size
+        )
+        val postedNotification = shadowNotificationManager.allNotifications.first()
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val activeChannel = notificationManager.getNotificationChannel(postedNotification.channelId)
+            assertNotNull(activeChannel)
+            assertEquals(
+                "TASK_CREATED notification channel must use FamilyTasks Signature Pulse sound",
+                sigItem.buildResourceUri(context),
+                activeChannel!!.sound?.toString()
+            )
+        }
+
+        // Simulate duplicate delivery (e.g. Firestore snapshot listener or duplicate FCM with base key "assign:taskId:uid")
+        val canDispatchDuplicateBaseKey = com.example.notifications.FcmTokenManager.markEventDispatchedIfNew(
+            "assign:$newTaskId:$childUid"
+        )
+        assertFalse(
+            "Canonical eventKey deduplication must block duplicate notification from Firestore snapshot / FCM",
+            canDispatchDuplicateBaseKey
+        )
+        val handledDuplicate = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+            context = context,
+            data = mapOf(
+                "eventType" to com.example.notifications.FcmTokenManager.EVENT_TASK_ASSIGNED,
+                "eventKey" to "assign:$newTaskId:$childUid",
+                "familyId" to "fam_sig_1",
+                "taskId" to newTaskId,
+                "targetUid" to childUid,
+                "actorUid" to parentUid,
+                "title" to "משימה חדשה שובצה עבורך 📋",
+                "body" to "שובצה לך משימה חדשה: \"לסדר את החדר\""
+            ),
+            signedInUidOverride = childUid
+        )
+        assertFalse("Duplicate TASK_ASSIGNED event must be ignored", handledDuplicate)
+        assertEquals(
+            "Notification count must remain 1 (no duplicate notification or double sound)",
+            1,
+            shadowNotificationManager.allNotifications.size
+        )
+
+        // =========================================================================
+        // 8. Verify Family Alarm and Task Reminder mechanisms continue working without change
+        // =========================================================================
+        val futureDueTask = com.example.model.FamilyTask(
+            id = "task_reminder_still_intact",
+            title = "בדיקת תזכורת משימה",
+            assignedToMemberId = childUid,
+            dateEpochDay = java.time.LocalDate.now().plusDays(1).toEpochDay(),
+            dueTimeFormatted = "18:30",
+            hasDueTime = true,
+            reminderOffset = com.example.model.TaskReminderOffset.MINUTES_10_BEFORE,
+            reminderEnabled = true,
+            isCompleted = false
+        )
+        val scheduledReminder = com.example.notifications.TaskReminderScheduler.scheduleOrUpdateTaskReminder(
+            context = context,
+            task = futureDueTask
+        )
+        assertTrue("TaskReminderScheduler must continue scheduling task reminders normally", scheduledReminder)
+        com.example.notifications.TaskReminderScheduler.cancelReminderForTask(context, futureDueTask.id)
     }
 }
 

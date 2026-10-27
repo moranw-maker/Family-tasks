@@ -26,6 +26,13 @@ enum class SoundLibraryCategory(
     val subtitleEn: String,
     val emoji: String
 ) {
+    FAMILYTASKS_SIGNATURE(
+        titleHe = "FamilyTasks Signature",
+        titleEn = "FamilyTasks Signature",
+        subtitleHe = "צליל החתימה הרשמי של FamilyTasks",
+        subtitleEn = "Official FamilyTasks signature sound",
+        emoji = "🔷"
+    ),
     VELVET_PREMIUM(
         titleHe = "Velvet Premium",
         titleEn = "Velvet Premium",
@@ -116,9 +123,9 @@ enum class SoundUsageType(
         titleEn = "Task Created & Assigned",
         subtitleHe = "התראה כאשר משימה חדשה נוצרת או מוקצית לבן משפחה",
         subtitleEn = "Notification when a new task is created or assigned",
-        defaultSoundId = "sound_soft_task_created",
+        defaultSoundId = "familytasks_signature_pulse",
         isAlarmStream = false,
-        emoji = "✨"
+        emoji = "🔷"
     ),
     TASK_UPDATED(
         prefKey = "task_updated",
@@ -214,8 +221,27 @@ object FamilySoundManager {
     private const val TAG = "FamilySoundManager"
     private const val PREFS_NAME = "family_unified_sound_prefs"
     const val SOUND_PREFIX_LIBRARY = "LIBRARY:"
+    const val SOUND_ID_SIGNATURE_PULSE = "familytasks_signature_pulse"
+
+    private val oneShotLock = Any()
+    private var activeOneShotPlayer: MediaPlayer? = null
 
     val allCatalogItems: List<SoundLibraryItem> = listOf(
+        // ==================== 0. FAMILYTASKS SIGNATURE (1) ====================
+        SoundLibraryItem(
+            id = SOUND_ID_SIGNATURE_PULSE,
+            rawResId = R.raw.sound_familytasks_signature_pulse,
+            category = SoundLibraryCategory.FAMILYTASKS_SIGNATURE,
+            titleHe = "FamilyTasks Signature Pulse",
+            titleEn = "FamilyTasks Signature Pulse",
+            subtitleHe = "צליל החתימה הרשמי של FamilyTasks",
+            subtitleEn = "Official FamilyTasks Signature Sound",
+            durationLabelHe = "חתימה • 0.7 שנ׳",
+            durationLabelEn = "Signature • 0.7s",
+            isAlarmMelody = false,
+            emoji = "🔷"
+        ),
+
         // ==================== 1. VELVET PREMIUM (7) ====================
         SoundLibraryItem(
             id = "sound_velvet_aurora",
@@ -884,9 +910,15 @@ object FamilySoundManager {
         if (uriString.isBlank()) return null
         val pkg = context.packageName
         return allCatalogItems.find { item ->
+            val resEntryName = runCatching { context.resources.getResourceEntryName(item.rawResId) }.getOrNull().orEmpty()
             val expectedUri = "android.resource://$pkg/${item.rawResId}"
             val expectedByName = "android.resource://$pkg/raw/${item.id}"
-            (uriString == expectedUri || uriString == expectedByName || uriString.endsWith("/${item.rawResId}")) &&
+            val expectedByResName = if (resEntryName.isNotBlank()) "android.resource://$pkg/raw/$resEntryName" else ""
+            (uriString == expectedUri ||
+                uriString == expectedByName ||
+                (expectedByResName.isNotBlank() && uriString == expectedByResName) ||
+                uriString.endsWith("/${item.rawResId}") ||
+                (resEntryName.isNotBlank() && uriString.endsWith("/$resEntryName"))) &&
                 isRawSoundResourceValid(context, item.rawResId)
         }
     }
@@ -1240,6 +1272,16 @@ object FamilySoundManager {
         val appCtx = context.applicationContext ?: context
         val scalar = (volumePercent.coerceIn(10, 100) / 100f).coerceIn(0.1f, 1.0f)
         return runCatching {
+            synchronized(oneShotLock) {
+                activeOneShotPlayer?.let { prev ->
+                    runCatching {
+                        if (prev.isPlaying) prev.stop()
+                        prev.reset()
+                        prev.release()
+                    }
+                }
+                activeOneShotPlayer = null
+            }
             val mp = MediaPlayer()
             mp.setAudioAttributes(
                 AudioAttributes.Builder()
@@ -1251,12 +1293,22 @@ object FamilySoundManager {
             mp.isLooping = false
             mp.setVolume(scalar, scalar)
             mp.setOnCompletionListener { player ->
+                synchronized(oneShotLock) {
+                    if (activeOneShotPlayer === player) {
+                        activeOneShotPlayer = null
+                    }
+                }
                 runCatching {
                     player.reset()
                     player.release()
                 }
             }
             mp.setOnErrorListener { player, _, _ ->
+                synchronized(oneShotLock) {
+                    if (activeOneShotPlayer === player) {
+                        activeOneShotPlayer = null
+                    }
+                }
                 runCatching {
                     player.reset()
                     player.release()
@@ -1265,6 +1317,9 @@ object FamilySoundManager {
             }
             mp.prepare()
             mp.start()
+            synchronized(oneShotLock) {
+                activeOneShotPlayer = mp
+            }
             true
         }.getOrDefault(false)
     }

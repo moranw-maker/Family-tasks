@@ -52,55 +52,15 @@ object NotificationHelper {
 
     fun createNotificationChannels(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                ?: return
+            ensureChannelForSoundUsage(context, SoundUsageType.TASK_CREATED)
+            ensureChannelForSoundUsage(context, SoundUsageType.FAMILY_GENERAL)
+            ensureChannelForSoundUsage(context, SoundUsageType.TASK_REMINDER)
+        }
+    }
 
-            val audioAttrs = buildNotificationAudioAttributes()
-
-            val taskSoundUri = resolveChannelCompatibleSoundUri(context, SoundUsageType.TASK_CREATED)
-            val taskChannel = NotificationChannel(
-                CHANNEL_TASKS_ID,
-                CHANNEL_TASKS_NAME,
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = CHANNEL_TASKS_DESC
-                enableVibration(true)
-                enableLights(true)
-                if (taskSoundUri != null) {
-                    setSound(taskSoundUri, audioAttrs)
-                }
-            }
-            notificationManager.createNotificationChannel(taskChannel)
-
-            val inviteSoundUri = resolveChannelCompatibleSoundUri(context, SoundUsageType.FAMILY_GENERAL)
-            val inviteChannel = NotificationChannel(
-                CHANNEL_INVITATIONS_ID,
-                CHANNEL_INVITATIONS_NAME,
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = CHANNEL_INVITATIONS_DESC
-                enableVibration(true)
-                enableLights(true)
-                if (inviteSoundUri != null) {
-                    setSound(inviteSoundUri, audioAttrs)
-                }
-            }
-            notificationManager.createNotificationChannel(inviteChannel)
-
-            val reminderSoundUri = resolveChannelCompatibleSoundUri(context, SoundUsageType.TASK_REMINDER)
-            val reminderChannel = NotificationChannel(
-                CHANNEL_TASK_REMINDERS_ID,
-                CHANNEL_TASK_REMINDERS_NAME,
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = CHANNEL_TASK_REMINDERS_DESC
-                enableVibration(true)
-                enableLights(true)
-                if (reminderSoundUri != null) {
-                    setSound(reminderSoundUri, audioAttrs)
-                }
-            }
-            notificationManager.createNotificationChannel(reminderChannel)
+    fun clearChannelPrefsForTesting(context: Context) {
+        runCatching {
+            context.getSharedPreferences(CHANNEL_PREFS_NAME, Context.MODE_PRIVATE).edit().clear().commit()
         }
     }
 
@@ -228,12 +188,29 @@ object NotificationHelper {
         val defaultItem = FamilySoundManager.findLibrarySoundById(context, usageType.defaultSoundId)
         val defaultUriStr = defaultItem?.buildResourceUri(context) ?: "default"
 
-        val targetChannelId = if (soundSignature == defaultUriStr && previousChannelId == null) {
+        val existingBaseChannel = nm.getNotificationChannel(baseId)
+        val canUseBaseIdDirectly = soundSignature == defaultUriStr &&
+            previousChannelId == null &&
+            (existingBaseChannel == null || existingBaseChannel.sound == channelSoundUri)
+
+        val targetChannelId = if (canUseBaseIdDirectly) {
             baseId
         } else {
             val hashSuffix = abs(soundSignature.hashCode() % 100_000)
             "${baseId}_v_$hashSuffix"
         }
+
+        // Preserve any OS-level user settings (importance, mute, vibration, lights, DND) from the prior channel
+        val sourceChannel = previousChannelId?.let { nm.getNotificationChannel(it) } ?: existingBaseChannel
+        val preservedImportance = sourceChannel?.importance ?: NotificationManager.IMPORTANCE_HIGH
+        val preservedVibrate = sourceChannel?.shouldVibrate() ?: true
+        val preservedVibrationPattern = sourceChannel?.vibrationPattern
+        val preservedLights = sourceChannel?.shouldShowLights() ?: true
+        val preservedBypassDnd = sourceChannel?.canBypassDnd() ?: false
+        val userExplicitlyMutedPrevious = sourceChannel != null && (
+            sourceChannel.importance < NotificationManager.IMPORTANCE_DEFAULT ||
+                (sourceChannel.sound == null && previousSig != null && previousSig != "private_file_silent_channel")
+            )
 
         // Delete ONLY the single previous rotated channel for this usageType (never delete active targetChannelId)
         if (!previousChannelId.isNullOrBlank() && previousChannelId != targetChannelId) {
@@ -243,15 +220,19 @@ object NotificationHelper {
         val channel = NotificationChannel(
             targetChannelId,
             channelTitleForUsage(usageType),
-            NotificationManager.IMPORTANCE_HIGH
+            preservedImportance
         ).apply {
             description = channelDescForUsage(usageType)
-            enableVibration(true)
-            enableLights(true)
-            if (channelSoundUri != null) {
-                setSound(channelSoundUri, buildNotificationAudioAttributes())
-            } else {
+            enableVibration(preservedVibrate)
+            if (preservedVibrationPattern != null) {
+                vibrationPattern = preservedVibrationPattern
+            }
+            enableLights(preservedLights)
+            setBypassDnd(preservedBypassDnd)
+            if (userExplicitlyMutedPrevious || channelSoundUri == null) {
                 setSound(null, null)
+            } else {
+                setSound(channelSoundUri, buildNotificationAudioAttributes())
             }
         }
         nm.createNotificationChannel(channel)
@@ -375,12 +356,39 @@ object NotificationHelper {
         overrideSoundType: String = "",
         overrideCustomUri: String = ""
     ) {
-        createNotificationChannels(context)
-
         val effectiveUsage = soundUsageType ?: when {
             channelId.startsWith(CHANNEL_TASK_REMINDERS_ID) -> SoundUsageType.TASK_REMINDER
             channelId.startsWith(CHANNEL_INVITATIONS_ID) -> SoundUsageType.FAMILY_GENERAL
             else -> SoundUsageType.TASK_CREATED
+        }
+
+        val resolvedChannelId = if (
+            channelId == CHANNEL_TASKS_ID ||
+            channelId == CHANNEL_INVITATIONS_ID ||
+            channelId == CHANNEL_TASK_REMINDERS_ID
+        ) {
+            ensureChannelForSoundUsage(
+                context = context,
+                usageType = effectiveUsage,
+                overrideSoundType = overrideSoundType,
+                overrideCustomUri = overrideCustomUri
+            )
+        } else {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                if (nm?.getNotificationChannel(channelId) == null) {
+                    ensureChannelForSoundUsage(
+                        context = context,
+                        usageType = effectiveUsage,
+                        overrideSoundType = overrideSoundType,
+                        overrideCustomUri = overrideCustomUri
+                    )
+                } else {
+                    channelId
+                }
+            } else {
+                channelId
+            }
         }
 
         val config = if (overrideSoundType.isNotBlank() || overrideCustomUri.isNotBlank()) {
@@ -401,11 +409,6 @@ object NotificationHelper {
         )
         val isPrivateFileUri = playableUri?.scheme?.equals("file", ignoreCase = true) == true
 
-        // If a custom private file:// audio was picked, play it safely on USAGE_NOTIFICATION
-        if (isPrivateFileUri && playableUri != null) {
-            FamilySoundManager.playNotificationSoundOneShot(context, playableUri, config.volumePercent)
-        }
-
         // Check POST_NOTIFICATIONS permission on Android 13+ (API 33+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
@@ -413,6 +416,11 @@ object NotificationHelper {
             ) {
                 return
             }
+        }
+
+        // If a custom private file:// audio was picked, play it safely once on USAGE_NOTIFICATION
+        if (isPrivateFileUri && playableUri != null) {
+            FamilySoundManager.playNotificationSoundOneShot(context, playableUri, config.volumePercent)
         }
 
         val intent = Intent(context, MainActivity::class.java).apply {
@@ -430,9 +438,9 @@ object NotificationHelper {
         )
 
         val isReminder = effectiveUsage == SoundUsageType.TASK_REMINDER ||
-            channelId.startsWith(CHANNEL_TASK_REMINDERS_ID)
+            resolvedChannelId.startsWith(CHANNEL_TASK_REMINDERS_ID)
 
-        val builder = NotificationCompat.Builder(context, channelId)
+        val builder = NotificationCompat.Builder(context, resolvedChannelId)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(message)

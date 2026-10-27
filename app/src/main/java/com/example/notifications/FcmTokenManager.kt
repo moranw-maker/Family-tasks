@@ -116,6 +116,17 @@ object FcmTokenManager {
         )
     }
 
+    fun canonicalizeEventKey(eventKey: String): String {
+        val clean = eventKey.trim()
+        if (clean.isEmpty()) return ""
+        val parts = clean.split(":")
+        return if (parts.size >= 4 && parts[parts.size - 1] == parts[parts.size - 2]) {
+            parts.dropLast(1).joinToString(":")
+        } else {
+            clean
+        }
+    }
+
     /**
      * Deduplicates notification events by [eventKey]. Returns `true` the first time [eventKey]
      * is seen, and `false` on any subsequent duplicate delivery.
@@ -123,6 +134,7 @@ object FcmTokenManager {
     fun markEventDispatchedIfNew(eventKey: String): Boolean {
         val clean = eventKey.trim()
         if (clean.isEmpty()) return true
+        val canonical = canonicalizeEventKey(clean)
         synchronized(dispatchedEventKeys) {
             if (dispatchedEventKeys.size > 500) {
                 val iterator = dispatchedEventKeys.iterator()
@@ -131,13 +143,18 @@ object FcmTokenManager {
                     iterator.remove()
                 }
             }
-            return dispatchedEventKeys.add(clean)
+            val isNewClean = dispatchedEventKeys.add(clean)
+            val isNewCanonical = if (canonical != clean) dispatchedEventKeys.add(canonical) else true
+            return isNewClean && isNewCanonical
         }
     }
 
     fun clearEventKey(eventKey: String) {
+        val clean = eventKey.trim()
+        val canonical = canonicalizeEventKey(clean)
         synchronized(dispatchedEventKeys) {
-            dispatchedEventKeys.remove(eventKey.trim())
+            dispatchedEventKeys.remove(clean)
+            dispatchedEventKeys.remove(canonical)
         }
     }
 
