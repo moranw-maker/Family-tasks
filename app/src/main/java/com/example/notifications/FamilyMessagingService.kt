@@ -269,7 +269,8 @@ class FamilyMessagingService : FirebaseMessagingService() {
                 title = resolvedTitle,
                 message = resolvedBody,
                 eventKey = eventKey,
-                taskId = taskId
+                taskId = taskId,
+                eventType = eventType
             )
 
             // Emit to in-app stream so notification history stays in sync

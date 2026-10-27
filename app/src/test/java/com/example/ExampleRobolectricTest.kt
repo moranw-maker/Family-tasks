@@ -13,6 +13,7 @@ import com.example.model.TaskCategory
 import com.example.model.TaskCompletionSyncState
 import com.example.model.TaskPriority
 import com.example.model.UserRole
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
@@ -3665,6 +3666,376 @@ class ExampleRobolectricTest {
 
         com.example.notifications.TaskReminderScheduler.clearAllForTesting(context)
     }
+
+    @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+    @Test
+    fun `test additional sounds crash fix 48 velvet library sounds unified sound system channel rotation and custom sound fallback`() = androidx.compose.ui.test.runComposeUiTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.notifications.FamilySoundManager.clearAllSoundPrefsForTesting(context)
+
+        // 1. Verify all 48 real .wav audio files across all 7 categories exist in res/raw and pass verification
+        val allVerifiedSounds = com.example.notifications.FamilySoundManager.getVerifiedLibrarySounds(context)
+        assertEquals(
+            "All 48 real .wav sounds across the 7 categories must exist in res/raw and pass verification",
+            48,
+            allVerifiedSounds.size
+        )
+        com.example.notifications.SoundLibraryCategory.entries.forEach { category ->
+            val catSounds = com.example.notifications.FamilySoundManager.getVerifiedLibrarySounds(context, category)
+            assertTrue(
+                "Category ${category.name} must have at least 6 verified real audio files",
+                catSounds.size >= 6
+            )
+            catSounds.forEach { item ->
+                assertTrue(
+                    "Sound ${item.id} must have a valid raw resource",
+                    com.example.notifications.FamilySoundManager.isRawSoundResourceValid(context, item.rawResId)
+                )
+            }
+        }
+
+        // 2. Verify getAdditionalCategoryRingtones produces strictly unique idKeys (root cause of LazyColumn duplicate key crash)
+        val additionalRingtones = com.example.notifications.AlarmAudioController.getAdditionalCategoryRingtones(context)
+        val uniqueIdKeys = additionalRingtones.map { it.idKey }.toSet()
+        assertEquals(
+            "Every item returned by getAdditionalCategoryRingtones must have a strictly unique idKey",
+            additionalRingtones.size,
+            uniqueIdKeys.size
+        )
+
+        // 3. Verify createSystemRingtonePickerIntent NEVER exposes a file:// URI in EXTRA_RINGTONE_EXISTING_URI
+        val fileCustomUri = "file:///data/user/0/com.example/files/custom_alarm_tones/custom_test.wav"
+        val pickerIntentWithFileUri = com.example.notifications.AlarmAudioController.createSystemRingtonePickerIntent(
+            context = context,
+            currentSoundType = com.example.notifications.AlarmAudioController.SOUND_CUSTOM_URI,
+            currentCustomUri = fileCustomUri,
+            isHebrew = true
+        )
+        val existingExtraUri = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            pickerIntentWithFileUri.getParcelableExtra(android.media.RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, android.net.Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            pickerIntentWithFileUri.getParcelableExtra(android.media.RingtoneManager.EXTRA_RINGTONE_EXISTING_URI)
+        }
+        assertFalse(
+            "EXTRA_RINGTONE_EXISTING_URI must never expose a file:// scheme URI (prevents FileUriExposedException)",
+            existingExtraUri?.scheme.equals("file", ignoreCase = true)
+        )
+
+        // 4. Test FamilyAlarmRingtonePickerScreen UI:
+        //    - Open "צלילים נוספים" (ringtone_tab_additional_sounds) without crashing
+        //    - Browse all 7 Velvet Sound Library categories and select a sound from each category
+        //    - Preview playback starts and stops previous sound automatically when switching sounds
+        //    - Save selection and reopen picker to verify selection persists
+        var savedSoundType = com.example.notifications.AlarmAudioController.SOUND_SYSTEM_ALARM
+        var savedCustomUri = ""
+        var savedCustomTitle = ""
+        var savedVolume = 85
+        val pickerSessionState = androidx.compose.runtime.mutableIntStateOf(0)
+
+        setContent {
+            val session = pickerSessionState.intValue
+            androidx.compose.runtime.key(session) {
+                com.example.ui.screens.FamilyAlarmRingtonePickerScreen(
+                    initialSoundType = savedSoundType,
+                    initialCustomSoundUri = savedCustomUri,
+                    initialCustomSoundTitle = savedCustomTitle,
+                    initialVolumePercent = savedVolume,
+                    isTargetRemoteChild = false,
+                    isHebrew = true,
+                    onCancel = {},
+                    onConfirmSound = { sType, cUri, cTitle, vol ->
+                        savedSoundType = sType
+                        savedCustomUri = cUri
+                        savedCustomTitle = cTitle
+                        savedVolume = vol
+                    }
+                )
+            }
+        }
+        waitForIdle()
+
+        // Tap "צלילים נוספים" tab -> MUST NOT CRASH!
+        onNodeWithTag("ringtone_tab_additional_sounds").assertExists().performClick()
+        waitForIdle()
+        onNodeWithTag("open_android_ringtone_picker_in_additional").assertExists()
+        onNodeWithTag("velvet_sound_category_bar").assertExists()
+
+        // Select a sound from each of the 7 categories and verify preview state updates & stops previous preview
+        val categorySampleSounds = com.example.notifications.SoundLibraryCategory.entries.map { cat ->
+            cat to com.example.notifications.FamilySoundManager.getVerifiedLibrarySounds(context, cat).first()
+        }
+        categorySampleSounds.forEach { (cat, sampleSound) ->
+            onNodeWithTag("velvet_sound_category_bar").performScrollToNode(hasTestTag("sound_category_chip_${cat.name}"))
+            onNodeWithTag("sound_category_chip_${cat.name}").performClick()
+            waitForIdle()
+
+            onNodeWithTag("ringtone_picker_list").performScrollToNode(hasTestTag("ringtone_row_${sampleSound.id}"))
+            onNodeWithTag("ringtone_row_${sampleSound.id}").performClick()
+            waitForIdle()
+
+            // Verify preview started for this sound and replaced any previous preview
+            assertEquals(
+                "Preview activeSoundType must switch to the newly selected sound ${sampleSound.id}",
+                sampleSound.id,
+                com.example.notifications.AlarmAudioController.previewState.value.activeSoundType
+            )
+        }
+
+        // Confirm & save the last selected sound (from SOFT_NOTIFICATIONS)
+        val lastPickedLibrarySound = categorySampleSounds.last().second
+        onNodeWithTag("confirm_ringtone_picker_button").performClick()
+        waitForIdle()
+
+        assertEquals(lastPickedLibrarySound.id, savedSoundType)
+
+        // Reopen the picker (increment session) and verify the saved sound is preserved
+        pickerSessionState.intValue++
+        waitForIdle()
+        onNodeWithTag("ringtone_picker_selected_summary").assertTextContains(lastPickedLibrarySound.titleHe, substring = true)
+
+        // Tap "צליל מותאם אישית" tab and verify custom file & system picker buttons exist
+        onNodeWithTag("ringtone_tab_custom_sound").performClick()
+        waitForIdle()
+        onNodeWithTag("alarm_custom_sound_chip").assertExists()
+        onNodeWithTag("alarm_system_ringtone_picker_button").assertExists()
+
+        // 5. Test Android System Ringtone Picker result resolution & cancellation
+        val pickedSysIntent = android.content.Intent().apply {
+            putExtra(
+                android.media.RingtoneManager.EXTRA_RINGTONE_PICKED_URI,
+                android.provider.Settings.System.DEFAULT_ALARM_ALERT_URI
+            )
+        }
+        val resolvedSysTone = com.example.notifications.AlarmAudioController.resolvePickedSystemRingtone(
+            context = context,
+            resultData = pickedSysIntent,
+            isHebrew = true
+        )
+        assertNotNull("Picking a valid system ringtone URI must resolve non-null pair", resolvedSysTone)
+        assertTrue(resolvedSysTone!!.first.isNotBlank())
+
+        val cancelledSysTone = com.example.notifications.AlarmAudioController.resolvePickedSystemRingtone(
+            context = context,
+            resultData = null,
+            isHebrew = true
+        )
+        assertNull("Cancelling system ringtone picker (null data) must return null cleanly without crashing", cancelledSysTone)
+
+        // 6. Test importing a personal audio file from device & fallback when custom file is deleted
+        val tempAudioFile = java.io.File(context.cacheDir, "personal_melody_test.wav")
+        context.resources.openRawResource(com.example.R.raw.sound_velvet_aurora).use { input ->
+            tempAudioFile.outputStream().use { output -> input.copyTo(output) }
+        }
+        val tempFileUri = android.net.Uri.fromFile(tempAudioFile)
+        val importResult = com.example.notifications.AlarmAudioController.importAndPersistCustomSoundUri(context, tempFileUri)
+        assertTrue("Importing valid personal audio file must succeed", importResult.isSuccess)
+        val (mirroredUriStr, mirroredTitle) = importResult.getOrThrow()
+        assertTrue(mirroredUriStr.isNotBlank())
+        assertTrue(mirroredTitle.isNotBlank())
+
+        // Save custom sound for TASK_REMINDER and verify it resolves to the custom file while it exists
+        com.example.notifications.FamilySoundManager.saveSoundConfigForUsage(
+            context = context,
+            usageType = com.example.notifications.SoundUsageType.TASK_REMINDER,
+            config = com.example.notifications.SelectedSoundConfig(
+                soundId = com.example.notifications.AlarmAudioController.SOUND_CUSTOM_URI,
+                customUri = mirroredUriStr,
+                customTitle = mirroredTitle,
+                volumePercent = 90
+            )
+        )
+        val persistedReminderCfg = com.example.notifications.FamilySoundManager.getSoundConfigForUsage(
+            context,
+            com.example.notifications.SoundUsageType.TASK_REMINDER
+        )
+        assertEquals(com.example.notifications.AlarmAudioController.SOUND_CUSTOM_URI, persistedReminderCfg.soundId)
+        assertEquals(mirroredTitle, persistedReminderCfg.customTitle)
+
+        // First delete only the primary file -> device-protected mirror must recover it seamlessly!
+        val mirroredFile = java.io.File(android.net.Uri.parse(mirroredUriStr).path ?: "")
+        if (mirroredFile.exists()) {
+            mirroredFile.delete()
+        }
+        val recoveredMirrorUri = com.example.notifications.FamilySoundManager.resolvePlayableUriOrFallback(
+            context = context,
+            usageType = com.example.notifications.SoundUsageType.TASK_REMINDER
+        )
+        assertNotNull("Device-protected mirror must recover when primary custom sound file is deleted", recoveredMirrorUri)
+        assertEquals("file", recoveredMirrorUri.scheme)
+
+        // Now delete the device-protected mirror copy as well -> must automatically fall back to default android.resource sound!
+        val dpFile = java.io.File(recoveredMirrorUri.path ?: "")
+        if (dpFile.exists()) {
+            dpFile.delete()
+        }
+        val fallbackUri = com.example.notifications.FamilySoundManager.resolvePlayableUriOrFallback(
+            context = context,
+            usageType = com.example.notifications.SoundUsageType.TASK_REMINDER
+        )
+        assertNotNull("When custom sound file is completely deleted, resolvePlayableUriOrFallback must return a valid fallback URI", fallbackUri)
+        assertEquals(
+            "Fallback URI must use android.resource scheme from the verified default library sound",
+            "android.resource",
+            fallbackUri.scheme
+        )
+
+        // Also verify startPreview and startAlarmRinging fall back gracefully without crashing when custom file is missing
+        com.example.notifications.AlarmAudioController.startPreview(
+            context = context,
+            soundType = com.example.notifications.AlarmAudioController.SOUND_CUSTOM_URI,
+            customSoundUri = "file:///non_existent_deleted_audio_file.mp3",
+            volumePercent = 80
+        )
+        assertTrue(
+            "startPreview must fall back and play when custom file is missing",
+            com.example.notifications.AlarmAudioController.previewState.value.isPlaying
+        )
+        com.example.notifications.AlarmAudioController.stopPreview(context)
+
+        val alarmFallbackPlayed = com.example.notifications.AlarmAudioController.startAlarmRinging(
+            context = context,
+            soundType = com.example.notifications.AlarmAudioController.SOUND_CUSTOM_URI,
+            customSoundUri = "file:///non_existent_deleted_audio_file.mp3",
+            vibrateEnabled = false,
+            volumePercent = 85
+        )
+        assertTrue("startAlarmRinging must fall back to default alarm sound when custom file is deleted", alarmFallbackPlayed)
+        com.example.notifications.AlarmAudioController.stopAlarmRinging(context)
+
+        // 7. Test Android 8+ NotificationChannel sound rotation without channel explosion
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+
+        // Configure distinct sounds for TASK_REMINDER, TASK_CREATED, TASK_UPDATED, TASK_COMPLETED, TASK_DELETED, FAMILY_GENERAL
+        val usageSoundMappings = mapOf(
+            com.example.notifications.SoundUsageType.ALARM_DEFAULT to "SOUND:sound_velvet_sapphire",
+            com.example.notifications.SoundUsageType.TASK_REMINDER to "SOUND:sound_piano_morning_sonata",
+            com.example.notifications.SoundUsageType.TASK_CREATED to "SOUND:sound_soft_task_created",
+            com.example.notifications.SoundUsageType.TASK_UPDATED to "SOUND:sound_soft_task_updated",
+            com.example.notifications.SoundUsageType.TASK_COMPLETED to "SOUND:sound_soft_task_completed",
+            com.example.notifications.SoundUsageType.TASK_DELETED to "SOUND:sound_soft_task_deleted",
+            com.example.notifications.SoundUsageType.FAMILY_GENERAL to "SOUND:sound_nature_wind_chimes"
+        )
+        usageSoundMappings.forEach { (usage, soundId) ->
+            com.example.notifications.FamilySoundManager.saveSoundConfigForUsage(
+                context = context,
+                usageType = usage,
+                config = com.example.notifications.SelectedSoundConfig(soundId = soundId, volumePercent = 85)
+            )
+            val saved = com.example.notifications.FamilySoundManager.getSoundConfigForUsage(context, usage)
+            assertTrue(
+                "Saved sound for ${usage.name} must persist (${saved.soundId})",
+                saved.soundId.contains(soundId.removePrefix("SOUND:"))
+            )
+        }
+
+        // Verify channel creation & rotation for TASK_REMINDER on Android 8+
+        val firstReminderChannelId = com.example.util.NotificationHelper.ensureChannelForSoundUsage(
+            context,
+            com.example.notifications.SoundUsageType.TASK_REMINDER
+        )
+        // Calling ensureChannelForSoundUsage again with the SAME sound must return the exact same channel ID
+        val repeatedReminderChannelId = com.example.util.NotificationHelper.ensureChannelForSoundUsage(
+            context,
+            com.example.notifications.SoundUsageType.TASK_REMINDER
+        )
+        assertEquals(
+            "Calling ensureChannelForSoundUsage when sound has not changed must reuse the existing channel ID",
+            firstReminderChannelId,
+            repeatedReminderChannelId
+        )
+
+        // Change TASK_REMINDER sound to sound_digital_starlight -> must rotate to a new channel ID and delete the old one
+        com.example.notifications.FamilySoundManager.saveSoundConfigForUsage(
+            context = context,
+            usageType = com.example.notifications.SoundUsageType.TASK_REMINDER,
+            config = com.example.notifications.SelectedSoundConfig(soundId = "sound_digital_starlight", volumePercent = 85)
+        )
+        val rotatedReminderChannelId = com.example.util.NotificationHelper.ensureChannelForSoundUsage(
+            context,
+            com.example.notifications.SoundUsageType.TASK_REMINDER
+        )
+        assertNotEquals(
+            "Changing the sound for TASK_REMINDER must rotate the Android 8+ NotificationChannel ID",
+            firstReminderChannelId,
+            rotatedReminderChannelId
+        )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            assertNull(
+                "Previous channel ID for TASK_REMINDER must be deleted upon rotation to prevent channel buildup",
+                notificationManager.getNotificationChannel(firstReminderChannelId)
+            )
+            val activeChannel = notificationManager.getNotificationChannel(rotatedReminderChannelId)
+            assertNotNull("New rotated channel for TASK_REMINDER must exist", activeChannel)
+            assertNotNull("New rotated channel for TASK_REMINDER must have a valid sound URI", activeChannel!!.sound)
+        }
+
+        // 8. Test Background Playback & Notifications when app is closed:
+        //    - Alarm ringing via FamilyAlarmReceiver -> FamilyAlarmRingingService with Velvet sound
+        //    - Task scheduled reminder via TaskReminderReceiver -> NotificationHelper with rotated sound channel
+        //    - Push/FCM notifications for task_created, task_completed, task_deleted, family_general
+        val velvetAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_velvet_closed_app_test",
+            title = "השכמה עם צליל קטיפה",
+            hour = 7,
+            minute = 0,
+            soundType = "sound_velvet_aurora",
+            volumePercent = 90
+        )
+        val alarmServiceIntent = android.content.Intent(context, com.example.notifications.FamilyAlarmRingingService::class.java).apply {
+            action = com.example.notifications.FamilyAlarmRingingService.ACTION_START_RINGING
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_ID, velvetAlarm.id)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_TITLE, velvetAlarm.title)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_HOUR, velvetAlarm.hour)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_MINUTE, velvetAlarm.minute)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_SOUND_TYPE, velvetAlarm.soundType)
+            putExtra(com.example.notifications.FamilyAlarmScheduler.EXTRA_ALARM_VOLUME_PERCENT, velvetAlarm.volumePercent)
+        }
+        org.robolectric.Robolectric.buildService(
+            com.example.notifications.FamilyAlarmRingingService::class.java,
+            alarmServiceIntent
+        ).create().startCommand(0, 1)
+        assertTrue(
+            "Alarm must start audio playback in background with selected Velvet sound",
+            com.example.notifications.FamilyAlarmScheduler.diagnosticState.value.audioPlaybackStarted
+        )
+        com.example.notifications.FamilyAlarmReceiver.stopActiveRinging(context)
+
+        // Grant POST_NOTIFICATIONS in Robolectric so Android 13+ notification posting succeeds
+        org.robolectric.Shadows.shadowOf(context as android.app.Application).grantPermissions(
+            android.Manifest.permission.POST_NOTIFICATIONS
+        )
+
+        // Trigger Task Reminder Notification when app is closed
+        com.example.util.NotificationHelper.showTaskScheduledReminderNotification(
+            context = context,
+            taskId = "task_rem_sound_test",
+            taskTitle = "להכין תיק לבית ספר",
+            assigneeName = "רועי",
+            dueTimeFormatted = "07:45",
+            points = 15,
+            reminderOffsetLabelHe = "10 דקות לפני",
+            notificationId = 88811
+        )
+        // Trigger regular notifications (TASK_CREATED, TASK_COMPLETED, TASK_DELETED, FAMILY_GENERAL)
+        listOf("task_created", "task_completed", "task_deleted", "family_general").forEach { eventType ->
+            com.example.util.NotificationHelper.showIncomingFcmNotification(
+                context = context,
+                title = "עדכון משימה ($eventType)",
+                message = "בדיקת צליל התראה מותאם",
+                eventKey = "event_key_$eventType",
+                taskId = "task_$eventType",
+                eventType = eventType
+            )
+        }
+        val shadowNotificationManager = org.robolectric.Shadows.shadowOf(notificationManager)
+        assertTrue(
+            "Task reminder and regular notifications must post to NotificationManager",
+            shadowNotificationManager.allNotifications.size >= 5
+        )
+    }
 }
+
+
 
 

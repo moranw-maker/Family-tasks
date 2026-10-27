@@ -76,6 +76,9 @@ fun SettingsScreen(
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     val diagnosticState by FamilyAlarmScheduler.diagnosticState.collectAsState()
     var permissionRefreshTick by remember { mutableIntStateOf(0) }
+    var soundConfigRefreshTick by remember { mutableIntStateOf(0) }
+    var activeSoundPickerUsage by remember { mutableStateOf<com.example.notifications.SoundUsageType?>(null) }
+    var showSoundStudioExpanded by remember { mutableStateOf(true) }
     var showAlarmDiagnosticsPanel by remember {
         mutableStateOf(
             !FamilyAlarmScheduler.canScheduleExactAlarms(context) ||
@@ -95,7 +98,63 @@ fun SettingsScreen(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+            com.example.notifications.AlarmAudioController.stopPreview(context)
         }
+    }
+
+    // If the user opened the Unified Sound Picker for one of the 7 sound usage types:
+    val currentPickerUsage = activeSoundPickerUsage
+    if (currentPickerUsage != null) {
+        val existingCfg = remember(currentPickerUsage, soundConfigRefreshTick) {
+            com.example.notifications.FamilySoundManager.getSoundConfigForUsage(context, currentPickerUsage)
+        }
+        FamilyAlarmRingtonePickerScreen(
+            initialSoundType = existingCfg.soundId,
+            initialCustomSoundUri = existingCfg.customUri,
+            initialCustomSoundTitle = existingCfg.customTitle,
+            initialVolumePercent = existingCfg.volumePercent,
+            isTargetRemoteChild = false,
+            isHebrew = isHebrew,
+            headerTitleOverride = if (isHebrew) {
+                "צליל: ${currentPickerUsage.titleHe}"
+            } else {
+                "Sound: ${currentPickerUsage.titleEn}"
+            },
+            showVolumeSlider = currentPickerUsage == com.example.notifications.SoundUsageType.ALARM_DEFAULT,
+            onCancel = {
+                com.example.notifications.AlarmAudioController.stopPreview(context)
+                activeSoundPickerUsage = null
+            },
+            onConfirmSound = { chosenSoundId, chosenCustomUri, chosenCustomTitle, chosenVolume ->
+                com.example.notifications.AlarmAudioController.stopPreview(context)
+                com.example.notifications.FamilySoundManager.saveSoundConfigForUsage(
+                    context = context,
+                    usageType = currentPickerUsage,
+                    config = com.example.notifications.SelectedSoundConfig(
+                        soundId = chosenSoundId,
+                        customUri = if (chosenSoundId == com.example.notifications.AlarmAudioController.SOUND_CUSTOM_URI) chosenCustomUri else "",
+                        customTitle = if (chosenSoundId == com.example.notifications.AlarmAudioController.SOUND_CUSTOM_URI) chosenCustomTitle else "",
+                        volumePercent = chosenVolume
+                    )
+                )
+                // Immediately rotate/update the Android 8+ NotificationChannel for notification usages
+                if (currentPickerUsage != com.example.notifications.SoundUsageType.ALARM_DEFAULT) {
+                    com.example.util.NotificationHelper.ensureChannelForSoundUsage(context, currentPickerUsage)
+                }
+                soundConfigRefreshTick++
+                activeSoundPickerUsage = null
+                val chosenDisplayName = com.example.notifications.FamilySoundManager.formatSelectedSoundDisplayName(
+                    context = context,
+                    usageType = currentPickerUsage,
+                    isHebrew = isHebrew
+                )
+                onShowToast(
+                    if (isHebrew) "נשמר צליל עבור ${currentPickerUsage.titleHe}: $chosenDisplayName 🔔"
+                    else "Saved sound for ${currentPickerUsage.titleEn}: $chosenDisplayName 🔔"
+                )
+            }
+        )
+        return
     }
 
     SoftGlassScreenBackground(modifier = Modifier.fillMaxSize()) {
@@ -434,6 +493,155 @@ fun SettingsScreen(
                                 .fillMaxWidth()
                                 .testTag("lock_app_now_btn")
                         )
+                    }
+                }
+            }
+
+            // 2A-2. Unified Velvet Sound Studio ("צלילי התראות ושעונים • Velvet Sound Studio")
+            item(key = "settings_velvet_sound_studio_card") {
+                val previewState by com.example.notifications.AlarmAudioController.previewState.collectAsState()
+                val verifiedSoundCount = remember(context) {
+                    com.example.notifications.FamilySoundManager.getVerifiedLibrarySounds(context).size
+                }
+
+                SettingsCardContainer(
+                    title = if (isHebrew) {
+                        "צלילי התראות ושעונים • Velvet ($verifiedSoundCount צלילים)"
+                    } else {
+                        "Notification & Alarm Sounds • Velvet ($verifiedSoundCount sounds)"
+                    },
+                    icon = Icons.Default.MusicNote,
+                    iconTint = glass.primaryAccent
+                ) {
+                    Text(
+                        text = if (isHebrew) {
+                            "בחרו צליל ברירת מחדל נפרד לכל סוג התראה ושעון מעורר מתוך $verifiedSoundCount צלילים ב-7 קטגוריות, צלילי מערכת או קובץ אישי:"
+                        } else {
+                            "Configure a dedicated default sound for each alarm and notification type from $verifiedSoundCount sounds across 7 categories, system tones, or custom audio files:"
+                        },
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = glass.textSecondary
+                        ),
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_sound_studio_list"),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        com.example.notifications.SoundUsageType.entries.forEach { usage ->
+                            val currentCfg = remember(usage, soundConfigRefreshTick) {
+                                com.example.notifications.FamilySoundManager.getSoundConfigForUsage(context, usage)
+                            }
+                            val displaySoundName = remember(currentCfg, isHebrew) {
+                                com.example.notifications.FamilySoundManager.formatSelectedSoundDisplayName(
+                                    context = context,
+                                    usageType = usage,
+                                    isHebrew = isHebrew
+                                )
+                            }
+                            val isPlayingThis = previewState.isPlaying && (
+                                (currentCfg.soundId == com.example.notifications.AlarmAudioController.SOUND_CUSTOM_URI &&
+                                    previewState.activeCustomUri == currentCfg.customUri &&
+                                    currentCfg.customUri.isNotBlank()) ||
+                                    (currentCfg.soundId != com.example.notifications.AlarmAudioController.SOUND_CUSTOM_URI &&
+                                        previewState.activeSoundType == currentCfg.soundId)
+                                )
+
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = glass.screenBackground,
+                                border = BorderStroke(1.dp, glass.cardBorder),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable {
+                                        com.example.notifications.AlarmAudioController.stopPreview(context)
+                                        activeSoundPickerUsage = usage
+                                    }
+                                    .testTag("settings_sound_row_${usage.name}")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        IconButton(
+                                            onClick = {
+                                                if (isPlayingThis) {
+                                                    com.example.notifications.AlarmAudioController.stopPreview(context)
+                                                } else {
+                                                    com.example.notifications.AlarmAudioController.startPreview(
+                                                        context = context,
+                                                        soundType = currentCfg.soundId,
+                                                        customSoundUri = currentCfg.customUri,
+                                                        volumePercent = currentCfg.volumePercent
+                                                    )
+                                                }
+                                            },
+                                            modifier = Modifier
+                                                .size(36.dp)
+                                                .clip( androidx.compose.foundation.shape.CircleShape)
+                                                .background(
+                                                    if (isPlayingThis) GoogleRedLight else glass.primaryAccentSoftBg
+                                                )
+                                                .testTag("settings_preview_sound_${usage.name}")
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isPlayingThis) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                                contentDescription = if (isPlayingThis) {
+                                                    if (isHebrew) "עצור" else "Stop"
+                                                } else {
+                                                    if (isHebrew) "השמע" else "Play"
+                                                },
+                                                tint = if (isPlayingThis) GoogleRedDark else glass.primaryAccent,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "${usage.emoji} ${if (isHebrew) usage.titleHe else usage.titleEn}",
+                                                style = MaterialTheme.typography.bodyMedium.copy(
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    color = glass.textPrimary
+                                                ),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = displaySoundName,
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    color = glass.primaryAccent,
+                                                    fontWeight = FontWeight.Bold
+                                                ),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+
+                                    Icon(
+                                        imageVector = if (isHebrew) {
+                                            Icons.AutoMirrored.Filled.KeyboardArrowLeft
+                                        } else {
+                                            Icons.AutoMirrored.Filled.KeyboardArrowRight
+                                        },
+                                        contentDescription = if (isHebrew) "בחר צליל" else "Choose Sound",
+                                        tint = glass.textSecondary
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -1356,14 +1356,33 @@ fun FamilyAlarmEditorScreen(
             .filterNot { it == SchoolDay.SATURDAY }
             .toSet()
     }
-    val initialSoundType = remember(alarmToEdit) {
-        alarmToEdit?.soundType?.takeIf { it.isNotBlank() } ?: AlarmAudioController.SOUND_SYSTEM_ALARM
+    val defaultAlarmSoundConfig = remember(context) {
+        com.example.notifications.FamilySoundManager.getSoundConfigForUsage(
+            context,
+            com.example.notifications.SoundUsageType.ALARM_DEFAULT
+        )
     }
-    val initialCustomSoundUri = remember(alarmToEdit) {
-        alarmToEdit?.customSoundUri.orEmpty()
+    val initialSoundType = remember(alarmToEdit, defaultAlarmSoundConfig) {
+        alarmToEdit?.soundType?.takeIf { it.isNotBlank() }
+            ?: defaultAlarmSoundConfig.soundId.ifBlank { AlarmAudioController.SOUND_SYSTEM_ALARM }
     }
-    val initialCustomSoundTitle = remember(alarmToEdit) {
-        alarmToEdit?.customSoundTitle.orEmpty()
+    val initialCustomSoundUri = remember(alarmToEdit, defaultAlarmSoundConfig) {
+        if (alarmToEdit != null) {
+            alarmToEdit.customSoundUri
+        } else if (defaultAlarmSoundConfig.soundId == AlarmAudioController.SOUND_CUSTOM_URI) {
+            defaultAlarmSoundConfig.customUri
+        } else {
+            ""
+        }
+    }
+    val initialCustomSoundTitle = remember(alarmToEdit, defaultAlarmSoundConfig) {
+        if (alarmToEdit != null) {
+            alarmToEdit.customSoundTitle
+        } else if (defaultAlarmSoundConfig.soundId == AlarmAudioController.SOUND_CUSTOM_URI) {
+            defaultAlarmSoundConfig.customTitle
+        } else {
+            ""
+        }
     }
     val initialVibrateEnabled = remember(alarmToEdit) {
         alarmToEdit?.vibrateEnabled ?: true
@@ -1371,8 +1390,8 @@ fun FamilyAlarmEditorScreen(
     val initialSnoozeMinutes = remember(alarmToEdit) {
         alarmToEdit?.snoozeDurationMinutes ?: 5
     }
-    val initialVolumePercent = remember(alarmToEdit) {
-        (alarmToEdit?.volumePercent ?: 85).toFloat()
+    val initialVolumePercent = remember(alarmToEdit, defaultAlarmSoundConfig) {
+        (alarmToEdit?.volumePercent ?: defaultAlarmSoundConfig.volumePercent.coerceIn(10, 100)).toFloat()
     }
 
     var title by remember(alarmToEdit) { mutableStateOf(initialTitle) }
@@ -2541,18 +2560,19 @@ fun FamilyAlarmEditorScreen(
 }
 
 /**
- * Dedicated Full-Screen Ringtone Picker Screen ("בחירת צליל מעורר").
+ * Dedicated Full-Screen Velvet Edition Sound & Ringtone Picker Screen ("בחירת צליל מעורר" / "בחירת צליל").
  *
- * Categories:
- * 1. "צלילי מערכת" (`RingtoneManager.TYPE_ALARM`)
- * 2. "צלילים נוספים" (`RingtoneManager.TYPE_RINGTONE` and `RingtoneManager.TYPE_NOTIFICATION`)
- * 3. "צליל מותאם אישית" (Selecting a custom audio file from the phone)
- *
- * Features:
- * - Play / Stop preview button per row (only one sound plays at a time; stops on exit).
- * - Radio selection indicator + soft blue highlight card for the selected ringtone.
- * - Bottom Volume control ("עוצמת הצלצול") with slider and percentage indicator.
- * - Permanently visible bottom buttons: "ביטול" and "בחר צליל".
+ * Supports:
+ * - 7 Rich Velvet Sound Library Categories (48 verified real .wav audio files):
+ *   Velvet Premium, Piano & Melody, Nature, Digital, Classic, Wake Up, Soft Notifications
+ * - 3 Main Mode Tabs:
+ *   1. "צלילי מערכת" (Velvet Library + Android System Alarm Sounds)
+ *   2. "צלילים נוספים" (Additional Sounds, Android System Ringtone Picker & Notification Tones)
+ *   3. "צליל מותאם אישית" (Selecting a personal audio file from the phone or Android Ringtone Picker)
+ * - Play / Stop preview button per row (stops any previous preview automatically; stops on exit).
+ * - Clear selection badge & highlight card for the active sound.
+ * - Safe ActivityNotFoundException / SecurityException handling with friendly fallback banner.
+ * - Fixed bottom bar with Volume slider ("עוצמת הצלצול") and "ביטול" / "בחר צליל" buttons.
  */
 @Composable
 fun FamilyAlarmRingtonePickerScreen(
@@ -2563,16 +2583,40 @@ fun FamilyAlarmRingtonePickerScreen(
     isTargetRemoteChild: Boolean,
     isHebrew: Boolean,
     onCancel: () -> Unit,
-    onConfirmSound: (soundType: String, customSoundUri: String, customSoundTitle: String, volumePercent: Int) -> Unit
+    onConfirmSound: (soundType: String, customSoundUri: String, customSoundTitle: String, volumePercent: Int) -> Unit,
+    headerTitleOverride: String? = null,
+    showVolumeSlider: Boolean = true
 ) {
     val context = LocalContext.current
     val previewState by AlarmAudioController.previewState.collectAsState()
 
+    val verifiedAllLibrarySounds = remember(context) {
+        com.example.notifications.FamilySoundManager.getVerifiedLibrarySounds(context)
+    }
+    val initialLibraryItem = remember(initialSoundType, verifiedAllLibrarySounds) {
+        verifiedAllLibrarySounds.find { it.id == initialSoundType }
+    }
+
+    var selectedLibraryCategory by remember {
+        mutableStateOf(
+            initialLibraryItem?.category
+                ?: com.example.notifications.SoundLibraryCategory.VELVET_PREMIUM
+        )
+    }
+
+    val categorySounds = remember(selectedLibraryCategory, verifiedAllLibrarySounds) {
+        verifiedAllLibrarySounds.filter { it.category == selectedLibraryCategory }
+    }
+
     val systemAlarmRingtones = remember(context) {
         AlarmAudioController.getSystemAlarmCategoryRingtones(context)
+            .filter { it.uriString.isNotBlank() }
+            .distinctBy { it.idKey }
     }
     val additionalRingtones = remember(context) {
         AlarmAudioController.getAdditionalCategoryRingtones(context)
+            .filter { it.uriString.isNotBlank() }
+            .distinctBy { it.idKey }
     }
 
     var selectedTab by remember {
@@ -2611,7 +2655,7 @@ fun FamilyAlarmRingtonePickerScreen(
         onCancel()
     }
 
-    // Native Android System Ringtone Picker launcher
+    // Native Android System Ringtone Picker launcher (handles OK and Back/Cancel safely)
     val systemRingtonePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -2624,21 +2668,60 @@ fun FamilyAlarmRingtonePickerScreen(
             if (resolved != null) {
                 val (pickedUriStr, toneTitle) = resolved
                 customFileErrorHe = null
-                if (isTargetRemoteChild) {
-                    selectedSoundType = AlarmAudioController.SOUND_SYSTEM_ALARM
-                    selectedCustomUri = ""
-                    selectedCustomTitle = ""
-                } else {
-                    selectedSoundType = AlarmAudioController.SOUND_CUSTOM_URI
-                    selectedCustomUri = pickedUriStr
-                    selectedCustomTitle = toneTitle
-                }
+                selectedSoundType = AlarmAudioController.SOUND_CUSTOM_URI
+                selectedCustomUri = pickedUriStr
+                selectedCustomTitle = toneTitle
                 AlarmAudioController.startPreview(
                     context = context,
                     soundType = AlarmAudioController.SOUND_CUSTOM_URI,
                     customSoundUri = pickedUriStr,
                     volumePercent = volumePercent.toInt()
                 )
+            }
+        }
+        // On RESULT_CANCELED (back button), do nothing and keep current selection intact.
+    }
+
+    // Helper to safely launch Android System Ringtone Picker with friendly error message if missing
+    val launchSystemRingtonePickerSafely = {
+        try {
+            val pickerIntent = AlarmAudioController.createSystemRingtonePickerIntent(
+                context = context,
+                currentSoundType = selectedSoundType,
+                currentCustomUri = selectedCustomUri,
+                isHebrew = isHebrew
+            )
+            val canResolve = runCatching {
+                pickerIntent.resolveActivity(context.packageManager) != null
+            }.getOrDefault(true)
+
+            if (!canResolve) {
+                customFileErrorHe = if (isHebrew) {
+                    "לא נמצאה במכשיר אפליקציה מתאימה לבחירת צלילי מערכת. ניתן לבחור מתוך 48 הצלילים בספריית Velvet המובנית."
+                } else {
+                    "No system ringtone picker app found on this device. Please choose from the built-in Velvet sound library."
+                }
+            } else {
+                customFileErrorHe = null
+                systemRingtonePickerLauncher.launch(pickerIntent)
+            }
+        } catch (_: android.content.ActivityNotFoundException) {
+            customFileErrorHe = if (isHebrew) {
+                "לא נמצאה במכשיר אפליקציה מתאימה לבחירת צלילי מערכת. ניתן לבחור מתוך 48 הצלילים בספריית Velvet המובנית."
+            } else {
+                "No system ringtone picker app found on this device. Please choose from the built-in Velvet sound library."
+            }
+        } catch (_: SecurityException) {
+            customFileErrorHe = if (isHebrew) {
+                "אין הרשאה לפתיחת בורר הצלילים במכשיר זה. ניתן לבחור מתוך ספריית הצלילים המובנית."
+            } else {
+                "Permission denied when opening the system ringtone picker. Please choose from the built-in sound library."
+            }
+        } catch (e: Exception) {
+            customFileErrorHe = if (isHebrew) {
+                "לא ניתן לפתוח את בורר הצלילים במכשיר זה. ניתן לבחור מתוך ספריית הצלילים המובנית."
+            } else {
+                "Could not open the system ringtone picker. Please choose from the built-in sound library."
             }
         }
     }
@@ -2661,9 +2744,40 @@ fun FamilyAlarmRingtonePickerScreen(
                     volumePercent = volumePercent.toInt()
                 )
             }.onFailure { err ->
-                customFileErrorHe = err.localizedMessage ?: "לא ניתן לטעון את קובץ השמע שנבחר"
+                customFileErrorHe = err.localizedMessage ?: if (isHebrew) {
+                    "לא ניתן לטעון את קובץ השמע שנבחר"
+                } else {
+                    "Unable to load the selected audio file"
+                }
             }
         }
+    }
+
+    val launchCustomAudioFilePickerSafely = {
+        try {
+            customFileErrorHe = null
+            customAudioLauncher.launch(arrayOf("audio/*"))
+        } catch (_: android.content.ActivityNotFoundException) {
+            customFileErrorHe = if (isHebrew) {
+                "לא נמצאה במכשיר אפליקציית קבצים לבחירת קובץ שמע. ניתן לבחור מתוך ספריית הצלילים המובנית."
+            } else {
+                "No file picker app found on this device. Please choose from the built-in sound library."
+            }
+        } catch (_: Exception) {
+            customFileErrorHe = if (isHebrew) {
+                "לא ניתן לפתוח את בורר הקבצים במכשיר זה."
+            } else {
+                "Could not open the file picker on this device."
+            }
+        }
+    }
+
+    val currentSelectionSummary = remember(selectedSoundType, selectedCustomTitle, isHebrew) {
+        AlarmAudioController.cleanSoundDisplayName(
+            soundType = selectedSoundType,
+            customTitle = selectedCustomTitle,
+            isHebrew = isHebrew
+        )
     }
 
     Scaffold(
@@ -2685,7 +2799,7 @@ fun FamilyAlarmRingtonePickerScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
@@ -2705,24 +2819,36 @@ fun FamilyAlarmRingtonePickerScreen(
                             )
                         }
 
-                        Text(
-                            text = if (isHebrew) "בחירת צליל מעורר" else "Select Alarm Sound",
-                            style = MaterialTheme.typography.titleLarge.copy(
-                                fontWeight = FontWeight.ExtraBold,
-                                color = Color(0xFF15366B),
-                                fontSize = 20.sp
-                            ),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("ringtone_picker_header_title")
-                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = headerTitleOverride ?: if (isHebrew) "בחירת צליל מעורר" else "Select Alarm Sound",
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFF15366B),
+                                    fontSize = 19.sp
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.testTag("ringtone_picker_header_title")
+                            )
+                            Text(
+                                text = if (isHebrew) "נבחר כעת: $currentSelectionSummary" else "Selected: $currentSelectionSummary",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = GoogleBlueDark,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.testTag("ringtone_picker_selected_summary")
+                            )
+                        }
                     }
 
-                    // Three Compact Category Tabs: "צלילי מערכת", "צלילים נוספים", "צליל מותאם אישית"
+                    // Three Compact Main Mode Tabs: "צלילי מערכת", "צלילים נוספים", "צליל מותאם אישית"
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         RingtonePickerTab.entries.forEach { tab ->
@@ -2757,6 +2883,57 @@ fun FamilyAlarmRingtonePickerScreen(
                         }
                     }
 
+                    // 7 Velvet Sound Library Categories Bar (Visible in SYSTEM_ALARMS & ADDITIONAL_SOUNDS)
+                    if (selectedTab != RingtonePickerTab.CUSTOM_SOUND) {
+                        androidx.compose.foundation.lazy.LazyRow(
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("velvet_sound_category_bar")
+                        ) {
+                            items(
+                                items = com.example.notifications.SoundLibraryCategory.entries.toList(),
+                                key = { "cat_${it.name}" }
+                            ) { cat ->
+                                val isSelectedCat = selectedLibraryCategory == cat
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isSelectedCat) Color(0xFF15366B) else Color(0xFFF3F7FE),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isSelectedCat) Color(0xFF15366B) else Color(0xFFD5E3F7)
+                                    ),
+                                    modifier = Modifier
+                                        .defaultMinSize(minHeight = 34.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .clickable { selectedLibraryCategory = cat }
+                                        .testTag("sound_category_chip_${cat.name}")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            text = cat.emoji,
+                                            fontSize = 12.sp
+                                        )
+                                        Text(
+                                            text = if (isHebrew) cat.titleHe else cat.titleEn,
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isSelectedCat) Color.White else Color(0xFF15366B),
+                                                fontSize = 11.5.sp
+                                            ),
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     HorizontalDivider(color = Color(0xFFDCE8F8), thickness = 1.dp)
                 }
             }
@@ -2777,53 +2954,55 @@ fun FamilyAlarmRingtonePickerScreen(
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // Volume Control ("עוצמת הצלצול" + Volume slider + Percentage indicator)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                    if (showVolumeSlider) {
+                        // Volume Control ("עוצמת הצלצול" + Volume slider + Percentage indicator)
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.VolumeUp,
-                                contentDescription = null,
-                                tint = GoogleBlueDark,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Text(
-                                text = if (isHebrew) "עוצמת הצלצול" else "Ringtone Volume",
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF15366B)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.VolumeUp,
+                                    contentDescription = null,
+                                    tint = GoogleBlueDark,
+                                    modifier = Modifier.size(18.dp)
                                 )
+                                Text(
+                                    text = if (isHebrew) "עוצמת הצלצול" else "Ringtone Volume",
+                                    style = MaterialTheme.typography.titleSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF15366B)
+                                    )
+                                )
+                            }
+
+                            Text(
+                                text = "${volumePercent.toInt()}%",
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = GoogleBlueDark
+                                ),
+                                modifier = Modifier.testTag("ringtone_picker_volume_percent")
                             )
                         }
 
-                        Text(
-                            text = "${volumePercent.toInt()}%",
-                            style = MaterialTheme.typography.labelLarge.copy(
-                                fontWeight = FontWeight.ExtraBold,
-                                color = GoogleBlueDark
-                            ),
-                            modifier = Modifier.testTag("ringtone_picker_volume_percent")
+                        Slider(
+                            value = volumePercent,
+                            onValueChange = { newVol ->
+                                volumePercent = newVol
+                                AlarmAudioController.updateActivePreviewVolume(context, newVol.toInt())
+                            },
+                            valueRange = 10f..100f,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(28.dp)
+                                .testTag("ringtone_picker_volume_slider")
                         )
                     }
-
-                    Slider(
-                        value = volumePercent,
-                        onValueChange = { newVol ->
-                            volumePercent = newVol
-                            AlarmAudioController.updateActivePreviewVolume(context, newVol.toInt())
-                        },
-                        valueRange = 10f..100f,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(28.dp)
-                            .testTag("ringtone_picker_volume_slider")
-                    )
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -2890,8 +3069,114 @@ fun FamilyAlarmRingtonePickerScreen(
                 .widthIn(max = 640.dp)
                 .testTag("ringtone_picker_list")
         ) {
+            // Friendly error banner if any picker/audio error occurred (shown across all tabs)
+            val errorText = customFileErrorHe ?: if (isHebrew) previewState.errorMessageHe else previewState.errorMessageEn
+            if (!errorText.isNullOrBlank()) {
+                item(key = "global_audio_error_banner") {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = GoogleRedLight,
+                        border = BorderStroke(1.dp, GoogleRed.copy(alpha = 0.4f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("alarm_audio_error_banner")
+                    ) {
+                        Text(
+                            text = "⚠️ $errorText",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = GoogleRedDark,
+                                fontWeight = FontWeight.Bold
+                            ),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
+                }
+            }
+
             when (selectedTab) {
                 RingtonePickerTab.SYSTEM_ALARMS -> {
+                    // Section header for current Velvet Sound Library Category
+                    item(key = "velvet_category_header_${selectedLibraryCategory.name}") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 2.dp, bottom = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "${selectedLibraryCategory.emoji} ${if (isHebrew) selectedLibraryCategory.titleHe else selectedLibraryCategory.titleEn}",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFF15366B)
+                                )
+                            )
+                            Text(
+                                text = if (isHebrew) "${categorySounds.size} צלילים" else "${categorySounds.size} sounds",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = GoogleBlueDark,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            )
+                        }
+                    }
+
+                    // Verified Velvet Sound Library items in the selected category
+                    items(
+                        items = categorySounds,
+                        key = { "lib_sound_${it.id}" }
+                    ) { libSound ->
+                        val isSelected = selectedSoundType == libSound.id
+                        val isPlayingThis = previewState.isPlaying &&
+                            previewState.activeSoundType == libSound.id
+
+                        RingtoneOptionRow(
+                            title = "${libSound.emoji} ${if (isHebrew) libSound.titleHe else libSound.titleEn}",
+                            subtitle = if (isHebrew) libSound.subtitleHe else libSound.subtitleEn,
+                            isSelected = isSelected,
+                            isPlaying = isPlayingThis,
+                            isHebrew = isHebrew,
+                            onSelect = {
+                                selectedSoundType = libSound.id
+                                selectedCustomUri = ""
+                                selectedCustomTitle = ""
+                                AlarmAudioController.startPreview(
+                                    context = context,
+                                    soundType = libSound.id,
+                                    customSoundUri = "",
+                                    volumePercent = volumePercent.toInt()
+                                )
+                            },
+                            onTogglePlay = {
+                                if (isPlayingThis) {
+                                    AlarmAudioController.stopPreview(context)
+                                } else {
+                                    selectedSoundType = libSound.id
+                                    selectedCustomUri = ""
+                                    selectedCustomTitle = ""
+                                    AlarmAudioController.startPreview(
+                                        context = context,
+                                        soundType = libSound.id,
+                                        customSoundUri = "",
+                                        volumePercent = volumePercent.toInt()
+                                    )
+                                }
+                            },
+                            modifier = Modifier.testTag("ringtone_row_${libSound.id}")
+                        )
+                    }
+
+                    item(key = "system_alarms_divider") {
+                        Text(
+                            text = if (isHebrew) "צלילי השכמה ומערכת נוספים" else "System & Built-In Alarm Tones",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF5A7194)
+                            ),
+                            modifier = Modifier.padding(top = 8.dp, bottom = 2.dp)
+                        )
+                    }
+
                     // Default Android System Alarm Sound option
                     item(key = "default_system_alarm_option") {
                         val isSelected = selectedSoundType == AlarmAudioController.SOUND_SYSTEM_ALARM
@@ -2988,7 +3273,7 @@ fun FamilyAlarmRingtonePickerScreen(
                     if (!isTargetRemoteChild) {
                         items(
                             items = systemAlarmRingtones,
-                            key = { "sys_alarm_${it.uriString}" }
+                            key = { "sys_alarm_${it.idKey}" }
                         ) { tone ->
                             val isSelected = selectedSoundType == AlarmAudioController.SOUND_CUSTOM_URI &&
                                 selectedCustomUri == tone.uriString
@@ -3033,6 +3318,122 @@ fun FamilyAlarmRingtonePickerScreen(
                 }
 
                 RingtonePickerTab.ADDITIONAL_SOUNDS -> {
+                    // Quick Actions inside "צלילים נוספים": Open Android System Picker or Personal Audio File
+                    item(key = "additional_sounds_quick_actions") {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { launchSystemRingtonePickerSafely() },
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, Color(0xFFBFD4F2)),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .defaultMinSize(minHeight = 42.dp)
+                                    .testTag("open_android_ringtone_picker_in_additional")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.NotificationsActive,
+                                    contentDescription = null,
+                                    tint = GoogleBlueDark,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (isHebrew) "בורר צלילי אנדרואיד" else "Android Picker",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    color = GoogleBlueDark,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = { launchCustomAudioFilePickerSafely() },
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, Color(0xFFBFD4F2)),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .defaultMinSize(minHeight = 42.dp)
+                                    .testTag("open_custom_file_picker_in_additional")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FolderOpen,
+                                    contentDescription = null,
+                                    tint = GoogleBlueDark,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (isHebrew) "קובץ שמע מהמכשיר" else "Audio File",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    color = GoogleBlueDark,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
+                    // Verified Velvet Sound Library items in the selected category
+                    item(key = "additional_velvet_category_header_${selectedLibraryCategory.name}") {
+                        Text(
+                            text = "${selectedLibraryCategory.emoji} ${if (isHebrew) selectedLibraryCategory.titleHe else selectedLibraryCategory.titleEn}",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFF15366B)
+                            ),
+                            modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                        )
+                    }
+
+                    items(
+                        items = categorySounds,
+                        key = { "add_lib_sound_${it.id}" }
+                    ) { libSound ->
+                        val isSelected = selectedSoundType == libSound.id
+                        val isPlayingThis = previewState.isPlaying &&
+                            previewState.activeSoundType == libSound.id
+
+                        RingtoneOptionRow(
+                            title = "${libSound.emoji} ${if (isHebrew) libSound.titleHe else libSound.titleEn}",
+                            subtitle = if (isHebrew) libSound.subtitleHe else libSound.subtitleEn,
+                            isSelected = isSelected,
+                            isPlaying = isPlayingThis,
+                            isHebrew = isHebrew,
+                            onSelect = {
+                                selectedSoundType = libSound.id
+                                selectedCustomUri = ""
+                                selectedCustomTitle = ""
+                                AlarmAudioController.startPreview(
+                                    context = context,
+                                    soundType = libSound.id,
+                                    customSoundUri = "",
+                                    volumePercent = volumePercent.toInt()
+                                )
+                            },
+                            onTogglePlay = {
+                                if (isPlayingThis) {
+                                    AlarmAudioController.stopPreview(context)
+                                } else {
+                                    selectedSoundType = libSound.id
+                                    selectedCustomUri = ""
+                                    selectedCustomTitle = ""
+                                    AlarmAudioController.startPreview(
+                                        context = context,
+                                        soundType = libSound.id,
+                                        customSoundUri = "",
+                                        volumePercent = volumePercent.toInt()
+                                    )
+                                }
+                            },
+                            modifier = Modifier.testTag("ringtone_row_${libSound.id}")
+                        )
+                    }
+
                     // Default System Ringtone & Default Notification Sound
                     item(key = "default_system_ringtone_option") {
                         val isSelected = selectedSoundType == AlarmAudioController.SOUND_SYSTEM_RINGTONE
@@ -3121,7 +3522,7 @@ fun FamilyAlarmRingtonePickerScreen(
                     if (!isTargetRemoteChild) {
                         items(
                             items = additionalRingtones,
-                            key = { "add_tone_${it.uriString}" }
+                            key = { "add_tone_${it.idKey}" }
                         ) { tone ->
                             val isSelected = selectedSoundType == AlarmAudioController.SOUND_CUSTOM_URI &&
                                 selectedCustomUri == tone.uriString
@@ -3197,9 +3598,9 @@ fun FamilyAlarmRingtonePickerScreen(
                                     ) {
                                         Text(
                                             text = if (isHebrew)
-                                                "שעון זה מיועד למכשיר של הילד/ה. כדי להבטיח שהצלצול יפעל תמיד במכשיר הילד, מומלץ לבחור מצלילי המערכת."
+                                                "שעון זה מיועד למכשיר של הילד/ה. כדי להבטיח שהצלצול יפעל תמיד במכשיר הילד, מומלץ לבחור מתוך 48 הצלילים בספריית Velvet או מצלילי המערכת."
                                             else
-                                                "This alarm rings on the child's device. System sounds are recommended so playback always works on their phone.",
+                                                "This alarm rings on the child's device. Choosing from the 48 Velvet library sounds or system sounds is recommended.",
                                             style = MaterialTheme.typography.bodySmall.copy(
                                                 color = GoogleBlueDark,
                                                 fontWeight = FontWeight.Medium
@@ -3207,80 +3608,69 @@ fun FamilyAlarmRingtonePickerScreen(
                                             modifier = Modifier.padding(12.dp)
                                         )
                                     }
-                                } else {
-                                    Text(
-                                        text = if (isHebrew)
-                                            "בחרו שיר או קובץ שמע מהמכשיר (MP3, WAV, OGG, M4A) או פתחו את בורר הצלילים של אנדרואיד:"
-                                        else
-                                            "Choose an audio file from your phone (MP3, WAV, OGG, M4A) or open the system ringtone picker:",
-                                        style = MaterialTheme.typography.bodySmall.copy(
-                                            color = Color(0xFF5A7194)
-                                        )
+                                }
+
+                                Text(
+                                    text = if (isHebrew)
+                                        "בחרו שיר או קובץ שמע מהמכשיר (MP3, WAV, OGG, M4A) או פתחו את בורר הצלילים של אנדרואיד:"
+                                    else
+                                        "Choose an audio file from your phone (MP3, WAV, OGG, M4A) or open the system ringtone picker:",
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = Color(0xFF5A7194)
                                     )
+                                )
 
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Button(
+                                        onClick = { launchCustomAudioFilePickerSafely() },
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = GoogleBlue,
+                                            contentColor = Color.White
+                                        ),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .defaultMinSize(minHeight = 46.dp)
+                                            .testTag("alarm_custom_sound_chip")
                                     ) {
-                                        Button(
-                                            onClick = { customAudioLauncher.launch(arrayOf("audio/*")) },
-                                            shape = RoundedCornerShape(12.dp),
-                                            colors = ButtonDefaults.buttonColors(
-                                                containerColor = GoogleBlue,
-                                                contentColor = Color.White
-                                            ),
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .defaultMinSize(minHeight = 46.dp)
-                                                .testTag("alarm_custom_sound_chip")
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.FolderOpen,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text(
-                                                text = if (isHebrew) "בחר קובץ מהמכשיר" else "Choose Audio File",
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 13.sp
-                                            )
-                                        }
+                                        Icon(
+                                            imageVector = Icons.Default.FolderOpen,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = if (isHebrew) "בחר קובץ מהמכשיר" else "Choose Audio File",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp
+                                        )
+                                    }
 
-                                        OutlinedButton(
-                                            onClick = {
-                                                runCatching {
-                                                    systemRingtonePickerLauncher.launch(
-                                                        AlarmAudioController.createSystemRingtonePickerIntent(
-                                                            context = context,
-                                                            currentSoundType = selectedSoundType,
-                                                            currentCustomUri = selectedCustomUri,
-                                                            isHebrew = isHebrew
-                                                        )
-                                                    )
-                                                }
-                                            },
-                                            shape = RoundedCornerShape(12.dp),
-                                            border = BorderStroke(1.dp, Color(0xFFBFD4F2)),
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .defaultMinSize(minHeight = 46.dp)
-                                                .testTag("alarm_system_ringtone_picker_button")
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.NotificationsActive,
-                                                contentDescription = null,
-                                                tint = GoogleBlueDark,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text(
-                                                text = if (isHebrew) "בורר צלילי מערכת" else "System Picker",
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 13.sp,
-                                                color = GoogleBlueDark
-                                            )
-                                        }
+                                    OutlinedButton(
+                                        onClick = { launchSystemRingtonePickerSafely() },
+                                        shape = RoundedCornerShape(12.dp),
+                                        border = BorderStroke(1.dp, Color(0xFFBFD4F2)),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .defaultMinSize(minHeight = 46.dp)
+                                            .testTag("alarm_system_ringtone_picker_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.NotificationsActive,
+                                            contentDescription = null,
+                                            tint = GoogleBlueDark,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = if (isHebrew) "בורר צלילי מערכת" else "System Picker",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp,
+                                            color = GoogleBlueDark
+                                        )
                                     }
                                 }
 
@@ -3317,27 +3707,6 @@ fun FamilyAlarmRingtonePickerScreen(
                                         },
                                         modifier = Modifier.testTag("selected_custom_sound_row")
                                     )
-                                }
-
-                                val errorText = customFileErrorHe ?: if (isHebrew) previewState.errorMessageHe else previewState.errorMessageEn
-                                if (!errorText.isNullOrBlank()) {
-                                    Surface(
-                                        shape = RoundedCornerShape(10.dp),
-                                        color = GoogleRedLight,
-                                        border = BorderStroke(1.dp, GoogleRed.copy(alpha = 0.4f)),
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("alarm_audio_error_banner")
-                                    ) {
-                                        Text(
-                                            text = "⚠️ $errorText",
-                                            style = MaterialTheme.typography.labelSmall.copy(
-                                                color = GoogleRedDark,
-                                                fontWeight = FontWeight.Bold
-                                            ),
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                                        )
-                                    }
                                 }
                             }
                         }
