@@ -129,6 +129,26 @@ data class Task(
     @set:PropertyName("approved_by_parent")
     var approvedByParent: Boolean = false,
 
+    @ColumnInfo(name = "original_assigned_member_id")
+    @get:PropertyName("original_assigned_member_id")
+    @set:PropertyName("original_assigned_member_id")
+    var originalAssignedMemberId: String? = null,
+
+    @ColumnInfo(name = "original_assigned_member_name")
+    @get:PropertyName("original_assigned_member_name")
+    @set:PropertyName("original_assigned_member_name")
+    var originalAssignedMemberName: String? = null,
+
+    @ColumnInfo(name = "transfer_proposal_id")
+    @get:PropertyName("transfer_proposal_id")
+    @set:PropertyName("transfer_proposal_id")
+    var transferProposalId: String? = null,
+
+    @ColumnInfo(name = "pending_proposal_id")
+    @get:PropertyName("pending_proposal_id")
+    @set:PropertyName("pending_proposal_id")
+    var pendingProposalId: String? = null,
+
     @ServerTimestamp
     @ColumnInfo(name = "created_at")
     @get:PropertyName("created_at")
@@ -200,6 +220,10 @@ data class Task(
             completedByMemberId = completedByMemberId,
             familyId = familyId,
             approvedByParent = approvedByParent,
+            originalAssignedToMemberId = originalAssignedMemberId?.takeIf { it.isNotBlank() },
+            originalAssignedMemberName = originalAssignedMemberName?.takeIf { it.isNotBlank() },
+            transferProposalId = transferProposalId?.takeIf { it.isNotBlank() },
+            pendingProposalId = pendingProposalId?.takeIf { it.isNotBlank() },
             createdAtMillis = createdAt?.time ?: System.currentTimeMillis(),
             updatedAtMillis = updatedAt?.time ?: System.currentTimeMillis()
         )
@@ -237,6 +261,10 @@ data class Task(
                 completedByMemberId = familyTask.completedByMemberId,
                 familyId = familyTask.familyId,
                 approvedByParent = familyTask.approvedByParent,
+                originalAssignedMemberId = familyTask.originalAssignedToMemberId,
+                originalAssignedMemberName = familyTask.originalAssignedMemberName,
+                transferProposalId = familyTask.transferProposalId,
+                pendingProposalId = familyTask.pendingProposalId,
                 createdAt = Date(familyTask.createdAtMillis),
                 updatedAt = Date(familyTask.updatedAtMillis)
             )

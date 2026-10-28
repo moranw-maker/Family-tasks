@@ -11,7 +11,7 @@ import com.example.model.Task
 
 @Database(
     entities = [Task::class, OfflineSyncQueueEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 @TypeConverters(RoomDateConverter::class)
@@ -66,6 +66,28 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Safe, non-destructive migration contract preserving user data across versions 3 -> 4.
+         * Adds optional task collaboration provenance columns (`original_assigned_member_id`,
+         * `original_assigned_member_name`, `transfer_proposal_id`, `pending_proposal_id`).
+         */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                runCatching {
+                    db.execSQL("ALTER TABLE `tasks` ADD COLUMN `original_assigned_member_id` TEXT")
+                }
+                runCatching {
+                    db.execSQL("ALTER TABLE `tasks` ADD COLUMN `original_assigned_member_name` TEXT")
+                }
+                runCatching {
+                    db.execSQL("ALTER TABLE `tasks` ADD COLUMN `transfer_proposal_id` TEXT")
+                }
+                runCatching {
+                    db.execSQL("ALTER TABLE `tasks` ADD COLUMN `pending_proposal_id` TEXT")
+                }
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -73,7 +95,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "family_tasks_local.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                     .also { INSTANCE = it }
             }

@@ -55,6 +55,9 @@ class FamilyViewModel(
     val pointsHistory: StateFlow<List<PointsHistoryEntry>> = repository.pointsHistory
     val isProcessingPointsOperation: StateFlow<Boolean> = repository.isProcessingPointsOperation
     val pointsOperationError: StateFlow<String?> = repository.pointsOperationError
+    val taskProposals: StateFlow<List<TaskCollaborationProposal>> = repository.taskProposals
+    val rewardRedemptions: StateFlow<List<RewardRedemptionRequest>> = repository.rewardRedemptions
+    val collaborationError: StateFlow<String?> = repository.collaborationError
 
     private val _validatedInvitationPreview = MutableStateFlow<FamilyInvitation?>(null)
     val validatedInvitationPreview: StateFlow<FamilyInvitation?> = _validatedInvitationPreview.asStateFlow()
@@ -193,6 +196,13 @@ class FamilyViewModel(
         }
         viewModelScope.launch {
             repository.pointsOperationError.collect { err ->
+                if (!err.isNullOrBlank()) {
+                    _snackbarMessage.value = err
+                }
+            }
+        }
+        viewModelScope.launch {
+            repository.collaborationError.collect { err ->
                 if (!err.isNullOrBlank()) {
                     _snackbarMessage.value = err
                 }
@@ -825,9 +835,9 @@ class FamilyViewModel(
     }
 
     fun redeemReward(reward: RewardItem) {
-        val ok = repository.redeemReward(reward)
+        val ok = repository.requestRewardRedemption(reward.id)
         if (ok) {
-            _snackbarMessage.value = "איזה כיף! מימשת את הפרס: ${reward.title} 🎁"
+            _snackbarMessage.value = "בקשה למימוש הפרס \"${reward.title}\" נשלחה לאישור הורה! 🎁"
         } else {
             _snackbarMessage.value = "אין מספיק נקודות למימוש הפרס עדיין 💪"
         }
@@ -1356,6 +1366,204 @@ class FamilyViewModel(
 
     fun clearPointsOperationError() {
         repository.clearPointsOperationError()
+    }
+
+    // --- Task Collaboration (Volunteer & Swap) ---
+
+    fun proposeVolunteerForTask(taskId: String, note: String = ""): Boolean {
+        val ok = repository.proposeVolunteerForTask(taskId, note)
+        if (ok) {
+            _snackbarMessage.value = "ההצעה לביצוע המשימה נשלחה לאישור! 🙋"
+        }
+        return ok
+    }
+
+    fun proposeTaskSwap(offeredTaskId: String, targetTaskId: String, note: String = ""): Boolean {
+        val ok = repository.proposeTaskSwap(offeredTaskId, targetTaskId, note)
+        if (ok) {
+            _snackbarMessage.value = "הצעת החלפת המשימות נשלחה לאישור! 🔁"
+        }
+        return ok
+    }
+
+    fun respondToTaskProposalAsChild(proposalId: String, approve: Boolean): Boolean {
+        val ok = repository.respondToTaskProposalAsChild(proposalId, approve)
+        if (ok) {
+            _snackbarMessage.value = if (approve) {
+                "אישרת את הבקשה! כעת ממתין לאישור הורה 🛡️"
+            } else {
+                "דחית את הבקשה"
+            }
+        }
+        return ok
+    }
+
+    fun decideTaskProposalAsParent(proposalId: String, approve: Boolean): Boolean {
+        val ok = repository.decideTaskProposalAsParent(proposalId, approve)
+        if (ok) {
+            _snackbarMessage.value = if (approve) {
+                "שינוי שיוך המשימה אושר ועודכן! ✅"
+            } else {
+                "הבקשה נדחתה ע״י הורה"
+            }
+        }
+        return ok
+    }
+
+    fun cancelTaskProposal(proposalId: String): Boolean {
+        val ok = repository.cancelTaskProposal(proposalId)
+        if (ok) {
+            _snackbarMessage.value = "ההצעה בוטלה"
+        }
+        return ok
+    }
+
+    fun approveTaskCompletionWithSplit(
+        taskId: String,
+        performerPoints: Int,
+        originalOwnerPoints: Int = 0,
+        bonusPointsForPerformer: Int = 0,
+        parentNote: String = ""
+    ): Boolean {
+        val ok = repository.approveTaskCompletionWithSplit(
+            taskId = taskId,
+            performerPoints = performerPoints,
+            originalOwnerPoints = originalOwnerPoints,
+            bonusPointsForPerformer = bonusPointsForPerformer
+        )
+        if (ok) {
+            _snackbarMessage.value = "המשימה אושרה והנקודות חולקו בהצלחה! ⭐"
+        }
+        return ok
+    }
+
+    // --- Parent Points Transfer & Helping Bonus ---
+
+    fun transferPointsBetweenMembers(
+        fromMemberId: String,
+        toMemberId: String,
+        amount: Int,
+        reason: String
+    ): Boolean {
+        val ok = repository.transferPointsBetweenMembers(fromMemberId, toMemberId, amount, reason)
+        if (ok) {
+            val fromName = members.value.find { it.id == fromMemberId }?.name.orEmpty()
+            val toName = members.value.find { it.id == toMemberId }?.name.orEmpty()
+            _snackbarMessage.value = "הועברו $amount נקודות מ-$fromName אל $toName 🔄"
+        }
+        return ok
+    }
+
+    fun grantHelpingBonusPoints(
+        memberId: String,
+        amount: Int,
+        reason: String,
+        relatedMemberId: String? = null,
+        taskId: String? = null
+    ): Boolean {
+        val ok = repository.grantHelpingBonusPoints(memberId, amount, reason, relatedMemberId, taskId)
+        if (ok) {
+            val targetName = members.value.find { it.id == memberId }?.name.orEmpty()
+            _snackbarMessage.value = "הוענק בונוס עזרה (+$amount נק׳) ל-$targetName 🌟"
+        }
+        return ok
+    }
+
+    // --- Reward Catalog Management (Parent Only) & Redemptions ---
+
+    fun createReward(
+        title: String,
+        pointsCost: Int,
+        iconEmoji: String = "🎁",
+        description: String = "",
+        isActive: Boolean = true
+    ): Boolean {
+        val ok = repository.createReward(title, pointsCost, iconEmoji, description, isActive)
+        if (ok) {
+            _snackbarMessage.value = "פרס חדש נוסף לקטלוג: $title 🎁"
+        }
+        return ok
+    }
+
+    fun createRewardInCatalog(
+        title: String,
+        pointsCost: Int,
+        iconEmoji: String = "🎁",
+        description: String = "",
+        isActive: Boolean = true
+    ): Boolean = createReward(title, pointsCost, iconEmoji, description, isActive)
+
+    fun updateReward(
+        rewardId: String,
+        title: String,
+        pointsCost: Int,
+        iconEmoji: String,
+        description: String,
+        isActive: Boolean = true
+    ): Boolean {
+        val ok = repository.updateReward(rewardId, title, pointsCost, iconEmoji, description, isActive)
+        if (ok) {
+            _snackbarMessage.value = "הפרס עודכן בקטלוג ✓"
+        }
+        return ok
+    }
+
+    fun updateRewardInCatalog(
+        rewardId: String,
+        title: String,
+        pointsCost: Int,
+        iconEmoji: String,
+        description: String,
+        isActive: Boolean = true
+    ): Boolean = updateReward(rewardId, title, pointsCost, iconEmoji, description, isActive)
+
+    fun setRewardActiveState(rewardId: String, isActive: Boolean): Boolean {
+        val ok = repository.setRewardActiveState(rewardId, isActive)
+        if (ok) {
+            _snackbarMessage.value = if (isActive) "הפרס הופעל בקטלוג ✓" else "הפרס הושבת זמנית בקטלוג"
+        }
+        return ok
+    }
+
+    fun deleteRewardFromCatalog(rewardId: String): Boolean {
+        val ok = repository.deleteRewardFromCatalog(rewardId)
+        if (ok) {
+            _snackbarMessage.value = "הפרס הוסר מהקטלוג"
+        }
+        return ok
+    }
+
+    fun requestRewardRedemption(reward: RewardItem): Boolean {
+        val ok = repository.redeemReward(reward)
+        if (ok) {
+            _snackbarMessage.value = "בקשה למימוש \"${reward.title}\" נשלחה לאישור הורה! 🎁"
+        }
+        return ok
+    }
+
+    fun requestRewardRedemption(rewardId: String): Boolean {
+        val reward = rewards.value.find { it.id == rewardId }
+        val ok = repository.requestRewardRedemption(rewardId)
+        if (ok) {
+            _snackbarMessage.value = "בקשה למימוש \"${reward?.title.orEmpty()}\" נשלחה לאישור הורה! 🎁"
+        }
+        return ok
+    }
+
+    fun decideRewardRedemptionAsParent(
+        redemptionId: String,
+        approve: Boolean,
+        rejectionReason: String = ""
+    ): Boolean {
+        val ok = repository.decideRewardRedemptionAsParent(redemptionId, approve, rejectionReason)
+        if (ok) {
+            _snackbarMessage.value = if (approve) {
+                "מימוש הפרס אושר והנקודות הופחתו! 🎉"
+            } else {
+                "בקשת מימוש הפרס נדחתה (הנקודות נשמרו)"
+            }
+        }
+        return ok
     }
 
     fun showToastMessage(msg: String) {

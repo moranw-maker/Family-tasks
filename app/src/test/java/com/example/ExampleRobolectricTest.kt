@@ -1985,7 +1985,9 @@ class ExampleRobolectricTest {
             pickerIntent.action
         )
         assertEquals(
-            android.media.RingtoneManager.TYPE_ALARM or android.media.RingtoneManager.TYPE_RINGTONE,
+            android.media.RingtoneManager.TYPE_ALARM or
+                android.media.RingtoneManager.TYPE_RINGTONE or
+                android.media.RingtoneManager.TYPE_NOTIFICATION,
             pickerIntent.getIntExtra(android.media.RingtoneManager.EXTRA_RINGTONE_TYPE, -1)
         )
     }
@@ -4383,7 +4385,441 @@ class ExampleRobolectricTest {
         assertTrue("TaskReminderScheduler must continue scheduling task reminders normally", scheduledReminder)
         com.example.notifications.TaskReminderScheduler.cancelReminderForTask(context, futureDueTask.id)
     }
+
+    @Test
+    fun `test task volunteering and task swapping require both target child and parent approval and preserve provenance`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = FamilyRepository(context = context)
+
+        val dad = repository.members.value.first { it.id == "m_dad" }
+        val kid1 = repository.members.value.first { it.id == "m_kid1" } // נועם
+        val kid2 = repository.members.value.first { it.id == "m_kid2" } // מאיה
+
+        // Parent creates active tasks: one for kid1 ("task_vol_target"), one for kid1 ("task_swap_kid1"), and one for kid2 ("task_swap_kid2")
+        repository.switchCurrentMember(dad)
+        val todayEpoch = LocalDate.now().toEpochDay()
+        repository.addTask(
+            com.example.model.FamilyTask(
+                id = "task_vol_target",
+                title = "להוריד את הזבל",
+                assignedToMemberId = kid1.id,
+                dateEpochDay = todayEpoch,
+                points = 40
+            )
+        )
+        repository.addTask(
+            com.example.model.FamilyTask(
+                id = "task_swap_kid1",
+                title = "לסדר את הסלון",
+                assignedToMemberId = kid1.id,
+                dateEpochDay = todayEpoch,
+                points = 30
+            )
+        )
+        repository.addTask(
+            com.example.model.FamilyTask(
+                id = "task_swap_kid2",
+                title = "לרוקן מדיח כלים",
+                assignedToMemberId = kid2.id,
+                dateEpochDay = todayEpoch,
+                points = 30
+            )
+        )
+
+        // =========================================================================
+        // 1. Volunteering Flow (Part A): Kid2 volunteers to perform Kid1's task
+        // =========================================================================
+        repository.switchCurrentMember(kid2)
+        val volunteerProposal = repository.proposeVolunteerForTaskAsync("task_vol_target").getOrThrow()
+        assertEquals(com.example.model.TaskProposalType.VOLUNTEER_FOR_TASK, volunteerProposal.type)
+        assertEquals(com.example.model.TaskProposalStatus.PENDING_CHILD_APPROVAL, volunteerProposal.status)
+        assertEquals(kid2.id, volunteerProposal.proposerMemberId)
+        assertEquals(kid1.id, volunteerProposal.targetOwnerMemberId)
+
+        // Task assignment MUST NOT change yet!
+        assertEquals(
+            "Task assignment must remain kid1 while pending child approval",
+            kid1.id,
+            repository.tasks.value.first { it.id == "task_vol_target" }.assignedToMemberId
+        )
+
+        // Parent CANNOT approve before the target child (kid1) approves!
+        repository.switchCurrentMember(dad)
+        val prematureParentApprove = repository.decideTaskProposalAsParentAsync(volunteerProposal.id, approve = true)
+        assertTrue("Parent cannot approve proposal before target child approves", prematureParentApprove.isFailure)
+
+        // Proposer child (kid2) CANNOT approve on behalf of target child (kid1)!
+        repository.switchCurrentMember(kid2)
+        val wrongChildApprove = repository.respondToTaskProposalAsChildAsync(volunteerProposal.id, approve = true)
+        assertTrue("Proposer child cannot approve on behalf of target owner child", wrongChildApprove.isFailure)
+
+        // Target child (kid1) approves the volunteer request -> moves to PENDING_PARENT_APPROVAL
+        repository.switchCurrentMember(kid1)
+        val afterChildApproval = repository.respondToTaskProposalAsChildAsync(volunteerProposal.id, approve = true).getOrThrow()
+        assertEquals(com.example.model.TaskProposalStatus.PENDING_PARENT_APPROVAL, afterChildApproval.status)
+
+        // Task assignment STILL must not change until Parent approves!
+        assertEquals(
+            "Task assignment must still remain kid1 until parent approves",
+            kid1.id,
+            repository.tasks.value.first { it.id == "task_vol_target" }.assignedToMemberId
+        )
+
+        // Child CANNOT call decideTaskProposalAsParentAsync (Part G security check)
+        val childAttemptParentApprove = repository.decideTaskProposalAsParentAsync(volunteerProposal.id, approve = true)
+        assertTrue("Child must be blocked from parent approval action", childAttemptParentApprove.isFailure)
+
+        // Parent approves -> Now assignment transfers to kid2 and originalAssignedToMemberId is preserved as kid1!
+        repository.switchCurrentMember(dad)
+        val afterParentApproval = repository.decideTaskProposalAsParentAsync(volunteerProposal.id, approve = true).getOrThrow()
+        assertEquals(com.example.model.TaskProposalStatus.APPROVED_BY_PARENT, afterParentApproval.status)
+
+        val transferredTask = repository.tasks.value.first { it.id == "task_vol_target" }
+        assertEquals("Task must now be assigned to volunteering child kid2", kid2.id, transferredTask.assignedToMemberId)
+        assertEquals("Original owner kid1 must be preserved", kid1.id, transferredTask.originalAssignedToMemberId)
+        assertTrue("wasTransferredOrSwapped must be true", transferredTask.wasTransferredOrSwapped)
+        assertNull("pendingProposalId must be cleared after completion of approval", transferredTask.pendingProposalId)
+
+        // =========================================================================
+        // 2. Task Swap Flow (Part B): Kid2 proposes swapping task_swap_kid2 with Kid1's task_swap_kid1
+        // =========================================================================
+        repository.switchCurrentMember(kid2)
+        val swapProposal = repository.proposeTaskSwapAsync(
+            targetTaskId = "task_swap_kid1",
+            offeredSwapTaskId = "task_swap_kid2"
+        ).getOrThrow()
+        assertEquals(com.example.model.TaskProposalType.SWAP_TASKS, swapProposal.type)
+        assertEquals(com.example.model.TaskProposalStatus.PENDING_CHILD_APPROVAL, swapProposal.status)
+
+        // Neither task assignment has changed yet
+        assertEquals(kid1.id, repository.tasks.value.first { it.id == "task_swap_kid1" }.assignedToMemberId)
+        assertEquals(kid2.id, repository.tasks.value.first { it.id == "task_swap_kid2" }.assignedToMemberId)
+
+        // While a task is in an active proposal, another proposal on the same task is blocked
+        val duplicateProposalAttempt = repository.proposeVolunteerForTaskAsync("task_swap_kid1")
+        assertTrue("Task already in an active proposal cannot accept another proposal", duplicateProposalAttempt.isFailure)
+
+        // Kid1 approves the swap -> PENDING_PARENT_APPROVAL
+        repository.switchCurrentMember(kid1)
+        val swapAfterChild = repository.respondToTaskProposalAsChildAsync(swapProposal.id, approve = true).getOrThrow()
+        assertEquals(com.example.model.TaskProposalStatus.PENDING_PARENT_APPROVAL, swapAfterChild.status)
+        // Still not swapped before parent approval
+        assertEquals(kid1.id, repository.tasks.value.first { it.id == "task_swap_kid1" }.assignedToMemberId)
+        assertEquals(kid2.id, repository.tasks.value.first { it.id == "task_swap_kid2" }.assignedToMemberId)
+
+        // Parent approves the swap -> Both tasks atomically swap assignedToMemberId and preserve originalAssignedToMemberId
+        repository.switchCurrentMember(dad)
+        val swapAfterParent = repository.decideTaskProposalAsParentAsync(swapProposal.id, approve = true).getOrThrow()
+        assertEquals(com.example.model.TaskProposalStatus.APPROVED_BY_PARENT, swapAfterParent.status)
+
+        val swappedTask1 = repository.tasks.value.first { it.id == "task_swap_kid1" }
+        val swappedTask2 = repository.tasks.value.first { it.id == "task_swap_kid2" }
+        assertEquals("task_swap_kid1 must now be assigned to kid2", kid2.id, swappedTask1.assignedToMemberId)
+        assertEquals("task_swap_kid1 must preserve kid1 as originalAssignedToMemberId", kid1.id, swappedTask1.originalAssignedToMemberId)
+        assertEquals("task_swap_kid2 must now be assigned to kid1", kid1.id, swappedTask2.assignedToMemberId)
+        assertEquals("task_swap_kid2 must preserve kid2 as originalAssignedToMemberId", kid2.id, swappedTask2.originalAssignedToMemberId)
+    }
+
+    @Test
+    fun `test flexible points splitting idempotency and parent points transfer and helping bonus`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = FamilyRepository(context = context)
+
+        val dad = repository.members.value.first { it.id == "m_dad" }
+        val kid1 = repository.members.value.first { it.id == "m_kid1" }
+        val kid2 = repository.members.value.first { it.id == "m_kid2" }
+
+        // Create and transfer a 50-point task originally owned by kid1 to performer kid2
+        repository.switchCurrentMember(dad)
+        repository.addTask(
+            com.example.model.FamilyTask(
+                id = "task_split_50",
+                title = "שטיפת החצר",
+                assignedToMemberId = kid2.id,
+                dateEpochDay = LocalDate.now().toEpochDay(),
+                originalAssignedToMemberId = kid1.id,
+                originalAssignedMemberName = kid1.name,
+                points = 50,
+                isCompleted = true,
+                completedByMemberId = kid2.id,
+                approvedByParent = false
+            )
+        )
+
+        val kid1BalanceBefore = repository.members.value.first { it.id == kid1.id }.earnedPoints
+        val kid2BalanceBefore = repository.members.value.first { it.id == kid2.id }.earnedPoints
+
+        // =========================================================================
+        // 3. Points Split Validation: performerPoints + originalOwnerPoints > task.points is rejected!
+        // =========================================================================
+        val invalidSplitOverTotal = repository.approveTaskCompletionWithSplitAsync(
+            taskId = "task_split_50",
+            performerPoints = 35,
+            originalOwnerPoints = 25, // 35 + 25 = 60 > 50!
+            bonusPointsForPerformer = 0
+        )
+        assertTrue(
+            "Points split exceeding task.points (35 + 25 > 50) must be rejected",
+            invalidSplitOverTotal.isFailure
+        )
+
+        val invalidNegativeSplit = repository.approveTaskCompletionWithSplitAsync(
+            taskId = "task_split_50",
+            performerPoints = -10,
+            originalOwnerPoints = 50
+        )
+        assertTrue("Negative split points must be rejected", invalidNegativeSplit.isFailure)
+
+        // Child cannot approve task completion with split
+        repository.switchCurrentMember(kid2)
+        val childSplitAttempt = repository.approveTaskCompletionWithSplitAsync(
+            taskId = "task_split_50",
+            performerPoints = 30,
+            originalOwnerPoints = 20
+        )
+        assertTrue("Child must not be allowed to approve task completion", childSplitAttempt.isFailure)
+
+        // Valid Parent Split: 30 pts to performer (kid2), 20 pts to original owner (kid1), + 10 helping bonus to kid2
+        repository.switchCurrentMember(dad)
+        val validSplitResult = repository.approveTaskCompletionWithSplitAsync(
+            taskId = "task_split_50",
+            performerPoints = 30,
+            originalOwnerPoints = 20,
+            bonusPointsForPerformer = 10,
+            parentNote = "עבודת צוות נהדרת"
+        )
+        assertTrue("Valid split (30 + 20 <= 50, bonus 10) must succeed", validSplitResult.isSuccess)
+
+        val kid1BalanceAfterSplit = repository.members.value.first { it.id == kid1.id }.earnedPoints
+        val kid2BalanceAfterSplit = repository.members.value.first { it.id == kid2.id }.earnedPoints
+        assertEquals("Original owner kid1 must receive +20 split points", kid1BalanceBefore + 20, kid1BalanceAfterSplit)
+        assertEquals("Performer kid2 must receive +30 split points + 10 bonus = +40", kid2BalanceBefore + 40, kid2BalanceAfterSplit)
+
+        // =========================================================================
+        // 4. Strict Idempotency: Approving the same task a second time NEVER awards points twice!
+        // =========================================================================
+        val duplicateApprovalAttempt = repository.approveTaskCompletionWithSplitAsync(
+            taskId = "task_split_50",
+            performerPoints = 50,
+            originalOwnerPoints = 0
+        )
+        assertTrue("Second approval of an already-approved task must be rejected", duplicateApprovalAttempt.isFailure)
+        repository.approveTaskCompletion("task_split_50")
+        assertEquals(
+            "Kid2 balance must remain unchanged after duplicate approval attempt",
+            kid2BalanceAfterSplit,
+            repository.members.value.first { it.id == kid2.id }.earnedPoints
+        )
+        assertEquals(
+            "Kid1 balance must remain unchanged after duplicate approval attempt",
+            kid1BalanceAfterSplit,
+            repository.members.value.first { it.id == kid1.id }.earnedPoints
+        )
+
+        // =========================================================================
+        // 5 & 6. Parent Points Transfer Between Children:
+        //    - Blocks self-transfer (fromMemberId == toMemberId)
+        //    - Blocks amount <= 0
+        //    - Blocks transfer exceeding sender's available balance (prevents negative balance)
+        //    - Child cannot transfer points
+        // =========================================================================
+        repository.switchCurrentMember(kid1)
+        val childTransferAttempt = repository.transferPointsBetweenMembersAsync(
+            fromMemberId = kid1.id,
+            toMemberId = kid2.id,
+            amount = 10,
+            reason = "ניסיון העברה ע״י ילד"
+        )
+        assertTrue("Child must not be able to transfer points", childTransferAttempt.isFailure)
+
+        repository.switchCurrentMember(dad)
+        val selfTransferAttempt = repository.transferPointsBetweenMembersAsync(
+            fromMemberId = kid1.id,
+            toMemberId = kid1.id,
+            amount = 10,
+            reason = "העברה לעצמי"
+        )
+        assertTrue("Self-transfer (fromMemberId == toMemberId) must be blocked", selfTransferAttempt.isFailure)
+
+        val zeroTransferAttempt = repository.transferPointsBetweenMembersAsync(
+            fromMemberId = kid1.id,
+            toMemberId = kid2.id,
+            amount = 0,
+            reason = "אפס נקודות"
+        )
+        assertTrue("Zero or negative transfer amount must be blocked", zeroTransferAttempt.isFailure)
+
+        val currentKid1Balance = repository.members.value.first { it.id == kid1.id }.earnedPoints
+        val excessiveTransferAttempt = repository.transferPointsBetweenMembersAsync(
+            fromMemberId = kid1.id,
+            toMemberId = kid2.id,
+            amount = currentKid1Balance + 500,
+            reason = "ניסיון חריגה מהיתרה"
+        )
+        assertTrue(
+            "Transfer exceeding sender's earnedPoints must be blocked to prevent negative balance",
+            excessiveTransferAttempt.isFailure
+        )
+
+        // Valid transfer of 15 points from kid1 to kid2
+        val currentKid2Balance = repository.members.value.first { it.id == kid2.id }.earnedPoints
+        val validTransfer = repository.transferPointsBetweenMembersAsync(
+            fromMemberId = kid1.id,
+            toMemberId = kid2.id,
+            amount = 15,
+            reason = "מאיה עזרה לנועם במשימה"
+        )
+        assertTrue("Valid parent points transfer must succeed", validTransfer.isSuccess)
+        assertEquals(currentKid1Balance - 15, repository.members.value.first { it.id == kid1.id }.earnedPoints)
+        assertEquals(currentKid2Balance + 15, repository.members.value.first { it.id == kid2.id }.earnedPoints)
+
+        // Verify linked TRANSFER_OUT and TRANSFER_IN entries exist in pointsHistory
+        assertTrue(
+            repository.pointsHistory.value.any {
+                it.memberId == kid1.id &&
+                    it.actionType == com.example.model.PointsActionType.TRANSFER_OUT &&
+                    it.pointsDelta == -15 &&
+                    it.relatedMemberId == kid2.id
+            }
+        )
+        assertTrue(
+            repository.pointsHistory.value.any {
+                it.memberId == kid2.id &&
+                    it.actionType == com.example.model.PointsActionType.TRANSFER_IN &&
+                    it.pointsDelta == 15 &&
+                    it.relatedMemberId == kid1.id
+            }
+        )
+    }
+
+    @Test
+    fun `test parent reward catalog management and child reward redemption with parallel negative balance protection`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = FamilyRepository(context = context)
+
+        val dad = repository.members.value.first { it.id == "m_dad" }
+        val kid1 = repository.members.value.first { it.id == "m_kid1" }
+
+        // =========================================================================
+        // 7 & 8. Reward Catalog Management (Parent Only)
+        // =========================================================================
+        repository.switchCurrentMember(kid1)
+        val childCreateRewardAttempt = repository.createRewardAsync(
+            title = "פרס פיראטי",
+            pointsCost = 10,
+            iconEmoji = "🎮",
+            description = "ניסיון של ילד"
+        )
+        assertTrue("Child must be blocked from creating catalog rewards", childCreateRewardAttempt.isFailure)
+
+        repository.switchCurrentMember(dad)
+        val zeroCostRewardAttempt = repository.createRewardAsync(
+            title = "פרס בחינם",
+            pointsCost = 0,
+            iconEmoji = "🎁",
+            description = "עלות 0 לא חוקית"
+        )
+        assertTrue("Reward with pointsCost <= 0 must be rejected", zeroCostRewardAttempt.isFailure)
+
+        val createdReward = repository.createRewardAsync(
+            title = "שעת משחק בפלייסטיישן",
+            pointsCost = 80,
+            iconEmoji = "🎮",
+            description = "שעה מלאה בסלון"
+        ).getOrThrow()
+        assertTrue(createdReward.isActive)
+        assertFalse(createdReward.isDeleted)
+
+        // Update reward details
+        val updatedReward = repository.updateRewardAsync(
+            rewardId = createdReward.id,
+            title = "שעתיים משחק בפלייסטיישן",
+            pointsCost = 100,
+            iconEmoji = "🎮",
+            description = "שעתיים מלאות בסופ״ש",
+            isActive = true
+        ).getOrThrow()
+        assertEquals("שעתיים משחק בפלייסטיישן", updatedReward.title)
+        assertEquals(100, updatedReward.pointsCost)
+
+        // =========================================================================
+        // 9. Child Redemption Request Does NOT Deduct Points Before Parent Approval
+        // =========================================================================
+        // Set kid1's balance to exactly 120 points
+        repository.resetMemberPoints(kid1.id, "איפוס לבדיקה", "op_reset_kid1_redemption_test")
+        repository.addMemberPoints(kid1.id, 120, "נקודות לבדיקת מימוש", "op_add_120_kid1_redemption_test")
+        assertEquals(120, repository.members.value.first { it.id == kid1.id }.earnedPoints)
+
+        repository.switchCurrentMember(kid1)
+        val redemptionReq1 = repository.requestRewardRedemptionAsync(updatedReward).getOrThrow()
+        assertEquals(com.example.model.RedemptionStatus.PENDING_PARENT_APPROVAL, redemptionReq1.status)
+        assertEquals(100, redemptionReq1.pointsCost)
+
+        // Crucial check: kid1's balance is STILL 120 before parent approval!
+        assertEquals(
+            "Points must NOT be deducted when child submits a redemption request (before parent approval)",
+            120,
+            repository.members.value.first { it.id == kid1.id }.earnedPoints
+        )
+
+        // =========================================================================
+        // 10. Two Parallel Redemption Requests Cannot Push Child Into Negative Balance
+        // =========================================================================
+        // While redemptionReq1 (100 pts) is still PENDING_PARENT_APPROVAL and kid1 still has 120 pts,
+        // kid1 submits a second redemption request for a 60-point reward!
+        repository.switchCurrentMember(dad)
+        val secondReward = repository.createRewardAsync(
+            title = "גלידה משפחתית",
+            pointsCost = 60,
+            iconEmoji = "🍦",
+            description = "גלידה לבחירה"
+        ).getOrThrow()
+
+        repository.switchCurrentMember(kid1)
+        val redemptionReq2 = repository.requestRewardRedemptionAsync(secondReward).getOrThrow()
+        assertEquals(com.example.model.RedemptionStatus.PENDING_PARENT_APPROVAL, redemptionReq2.status)
+
+        // Child cannot approve their own redemption request
+        val childApproveRedemptionAttempt = repository.decideRewardRedemptionAsParentAsync(redemptionReq1.id, approve = true)
+        assertTrue("Child must not be able to approve reward redemptions", childApproveRedemptionAttempt.isFailure)
+
+        // Parent approves first redemption request (100 pts) -> succeeds, balance drops from 120 to 20
+        repository.switchCurrentMember(dad)
+        val approvedReq1 = repository.decideRewardRedemptionAsParentAsync(redemptionReq1.id, approve = true).getOrThrow()
+        assertEquals(com.example.model.RedemptionStatus.APPROVED, approvedReq1.status)
+        assertEquals(
+            "After approving 100-pt reward, child balance must be 20",
+            20,
+            repository.members.value.first { it.id == kid1.id }.earnedPoints
+        )
+
+        // Now Parent tries to approve the parallel second redemption request (60 pts),
+        // when child only has 20 pts left -> MUST FAIL and NEVER cause a negative balance!
+        val parallelOverdrawApprove = repository.decideRewardRedemptionAsParentAsync(redemptionReq2.id, approve = true)
+        assertTrue(
+            "Approving second parallel redemption when remaining balance (20) < cost (60) must be blocked",
+            parallelOverdrawApprove.isFailure
+        )
+        assertEquals(
+            "Child balance must remain 20 and never become negative",
+            20,
+            repository.members.value.first { it.id == kid1.id }.earnedPoints
+        )
+
+        // Parent rejects the second redemption request -> status becomes REJECTED, balance remains 20
+        val rejectedReq2 = repository.decideRewardRedemptionAsParentAsync(redemptionReq2.id, approve = false).getOrThrow()
+        assertEquals(com.example.model.RedemptionStatus.REJECTED, rejectedReq2.status)
+        assertEquals(20, repository.members.value.first { it.id == kid1.id }.earnedPoints)
+
+        // Soft-deleting the reward from catalog preserves historical redemption records and points history
+        assertTrue(repository.deleteRewardFromCatalog(updatedReward.id))
+        assertTrue(repository.rewards.value.first { it.id == updatedReward.id }.isDeleted)
+        val preservedHistoricalRedemption = repository.rewardRedemptions.value.first { it.id == redemptionReq1.id }
+        assertEquals("שעתיים משחק בפלייסטיישן", preservedHistoricalRedemption.rewardTitle)
+        assertEquals(com.example.model.RedemptionStatus.APPROVED, preservedHistoricalRedemption.status)
+    }
 }
+
 
 
 

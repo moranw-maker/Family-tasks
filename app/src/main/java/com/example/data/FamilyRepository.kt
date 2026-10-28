@@ -250,12 +250,18 @@ class FamilyRepository(
     private var filesListenerRegistration: ListenerRegistration? = null
     private var alarmsListenerRegistration: ListenerRegistration? = null
     private var pointsHistoryListenerRegistration: ListenerRegistration? = null
+    private var taskProposalsListenerRegistration: ListenerRegistration? = null
+    private var redemptionsListenerRegistration: ListenerRegistration? = null
 
     private val pointsMutex = Mutex()
     private val processedPointsOperationIds: MutableSet<String> =
         ConcurrentHashMap.newKeySet()
     private val syncedServerMemberBalancesForFamilies: MutableSet<String> =
         ConcurrentHashMap.newKeySet()
+    private val processedCollaborationOperationIds: MutableSet<String> =
+        ConcurrentHashMap.newKeySet()
+    private val notifiedCollaborationEventKeys: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     private val _pointsHistory = MutableStateFlow<List<PointsHistoryEntry>>(emptyList())
     val pointsHistory: StateFlow<List<PointsHistoryEntry>> = _pointsHistory.asStateFlow()
@@ -265,6 +271,15 @@ class FamilyRepository(
 
     private val _pointsOperationError = MutableStateFlow<String?>(null)
     val pointsOperationError: StateFlow<String?> = _pointsOperationError.asStateFlow()
+
+    private val _taskProposals = MutableStateFlow<List<TaskCollaborationProposal>>(emptyList())
+    val taskProposals: StateFlow<List<TaskCollaborationProposal>> = _taskProposals.asStateFlow()
+
+    private val _rewardRedemptions = MutableStateFlow<List<RewardRedemptionRequest>>(emptyList())
+    val rewardRedemptions: StateFlow<List<RewardRedemptionRequest>> = _rewardRedemptions.asStateFlow()
+
+    private val _collaborationError = MutableStateFlow<String?>(null)
+    val collaborationError: StateFlow<String?> = _collaborationError.asStateFlow()
 
     private val locallyManagedAlarms = ConcurrentHashMap<String, FamilyAlarm>()
     private val explicitlyDeletedAlarmIds: MutableSet<String> =
@@ -3025,6 +3040,14 @@ class FamilyRepository(
         val updatedAtMillis = extractTimestampMillis(data["updatedAt"])
             ?: extractTimestampMillis(data["updated_at"])
             ?: System.currentTimeMillis()
+        val originalAssignedToMemberId = (data["originalAssignedToMemberId"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["original_assigned_member_id"] as? String)?.takeIf { it.isNotBlank() }
+        val originalAssignedMemberName = (data["originalAssignedMemberName"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["original_assigned_member_name"] as? String)?.takeIf { it.isNotBlank() }
+        val transferProposalId = (data["transferProposalId"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["transfer_proposal_id"] as? String)?.takeIf { it.isNotBlank() }
+        val pendingProposalId = (data["pendingProposalId"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (data["pending_proposal_id"] as? String)?.takeIf { it.isNotBlank() }
 
         return FamilyTask(
             id = docId,
@@ -3045,6 +3068,10 @@ class FamilyRepository(
             approvedByParent = approvedByParent,
             completedAtMillis = completedAtMillis,
             completedByMemberId = completedByMemberId,
+            originalAssignedToMemberId = originalAssignedToMemberId,
+            originalAssignedMemberName = originalAssignedMemberName,
+            transferProposalId = transferProposalId,
+            pendingProposalId = pendingProposalId,
             updatedAtMillis = updatedAtMillis
         )
     }
@@ -3516,20 +3543,29 @@ class FamilyRepository(
                 .addSnapshotListener { snapshot, error ->
                     if (error != null || snapshot == null) return@addSnapshotListener
                     val remoteRewards = snapshot.documents.mapNotNull { doc ->
+                        val isDeleted = doc.getBoolean("isDeleted") ?: false
+                        if (isDeleted) return@mapNotNull null
                         val title = doc.getString("title") ?: return@mapNotNull null
-                        val cost = (doc.getLong("pointsCost") ?: 50L).toInt()
+                        val cost = (doc.getLong("pointsCost") ?: 50L).toInt().coerceAtLeast(1)
                         val emoji = doc.getString("iconEmoji") ?: "🎁"
                         val desc = doc.getString("description") ?: ""
+                        val isActive = doc.getBoolean("isActive") ?: true
+                        val createdAt = doc.getLong("createdAtMillis") ?: 0L
+                        val updatedAt = doc.getLong("updatedAtMillis") ?: createdAt
                         RewardItem(
                             id = doc.id,
                             familyId = familyId,
                             title = title,
                             pointsCost = cost,
                             iconEmoji = emoji,
-                            description = desc
+                            description = desc,
+                            isActive = isActive,
+                            isDeleted = false,
+                            createdAtMillis = createdAt,
+                            updatedAtMillis = updatedAt
                         )
                     }
-                    if (remoteRewards.isNotEmpty()) {
+                    if (remoteRewards.isNotEmpty() || snapshot.documents.isNotEmpty()) {
                         _rewards.value = remoteRewards
                     }
                 }
@@ -3858,6 +3894,165 @@ class FamilyRepository(
                     mergeRemotePointsHistory(familyId, remoteEntries)
                 }
         }
+
+        // 10. Real-time Task Collaboration Proposals Listener (/families/{familyId}/task_proposals)
+        runCatching {
+            var hasProcessedInitialProposalsSnapshot = false
+            taskProposalsListenerRegistration?.remove()
+            taskProposalsListenerRegistration = familyRef.collection("task_proposals")
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null || snapshot == null) return@addSnapshotListener
+                    val remoteProposals = snapshot.documents.mapNotNull { doc ->
+                        val data = doc.data ?: return@mapNotNull null
+                        parseTaskProposalDocument(doc.id, data, familyId)
+                    }.sortedByDescending { it.updatedAtMillis }
+
+                    val prevById = _taskProposals.value.associateBy { it.id }
+                    val selfUid = currentUid()
+                    val current = _currentMember.value
+
+                    for (prop in remoteProposals) {
+                        val statusEventKey = "prop:${prop.id}:${prop.status.name}"
+                        if (!hasProcessedInitialProposalsSnapshot) {
+                            notifiedCollaborationEventKeys.add(statusEventKey)
+                        } else if (notifiedCollaborationEventKeys.add(statusEventKey)) {
+                            val prev = prevById[prop.id]
+                            val isSelfTarget = prop.targetChildId == current.id || (selfUid.isNotBlank() && prop.targetChildId == selfUid)
+                            val isSelfRequester = prop.requesterChildId == current.id || (selfUid.isNotBlank() && prop.requesterChildId == selfUid)
+
+                            when (prop.status) {
+                                TaskProposalStatus.PENDING_CHILD_APPROVAL -> {
+                                    if (prev == null && isSelfTarget) {
+                                        val title = if (prop.type == TaskProposalType.SWAP_TASKS) {
+                                            "הצעה חדשה להחלפת משימות 🔁"
+                                        } else {
+                                            "הצעה חדשה לביצוע משימה 🙋"
+                                        }
+                                        val msg = if (prop.type == TaskProposalType.SWAP_TASKS) {
+                                            "${prop.requesterChildName} מציע/ה להחליף את \"${prop.offeredSwapTaskTitle}\" בתמורה ל-\"${prop.primaryTaskTitle}\""
+                                        } else {
+                                            "${prop.requesterChildName} מציע/ה לבצע במקומך את המשימה \"${prop.primaryTaskTitle}\""
+                                        }
+                                        pushAlert(
+                                            title = title,
+                                            message = msg,
+                                            targetName = prop.targetChildName,
+                                            targetEmoji = "📬",
+                                            reason = AlertReason.TASK_REMINDER,
+                                            showBanner = true
+                                        )
+                                    }
+                                }
+                                TaskProposalStatus.PENDING_PARENT_APPROVAL -> {
+                                    if (current.isParent) {
+                                        pushAlert(
+                                            title = "בקשת משימה ממתינה לאישור הורה ⏳",
+                                            message = "${prop.requesterChildName} ו-${prop.targetChildName} הסכימו על ${prop.type.labelHe} עבור \"${prop.primaryTaskTitle}\"",
+                                            targetName = current.name,
+                                            targetEmoji = "👨‍👩‍👧‍👦",
+                                            reason = AlertReason.TASK_REMINDER,
+                                            showBanner = true
+                                        )
+                                    }
+                                }
+                                TaskProposalStatus.APPROVED_BY_PARENT -> {
+                                    if (isSelfRequester || isSelfTarget) {
+                                        pushAlert(
+                                            title = "הבקשה אושרה ע\"י הורה! ✅",
+                                            message = "${prop.type.labelHe} עבור \"${prop.primaryTaskTitle}\" אושרה ע\"י ${prop.parentDecidedByName ?: "הורה"}",
+                                            targetName = current.name,
+                                            targetEmoji = "✅",
+                                            reason = AlertReason.TASK_COMPLETED,
+                                            showBanner = true
+                                        )
+                                    }
+                                }
+                                TaskProposalStatus.REJECTED_BY_CHILD, TaskProposalStatus.REJECTED_BY_PARENT -> {
+                                    if (isSelfRequester || isSelfTarget) {
+                                        pushAlert(
+                                            title = "הבקשה נדחתה ❌",
+                                            message = "${prop.type.labelHe} עבור \"${prop.primaryTaskTitle}\" (${prop.status.labelHe})",
+                                            targetName = current.name,
+                                            targetEmoji = "❌",
+                                            reason = AlertReason.TASK_REMINDER,
+                                            showBanner = true
+                                        )
+                                    }
+                                }
+                                TaskProposalStatus.CANCELLED -> Unit
+                            }
+                        }
+                    }
+                    hasProcessedInitialProposalsSnapshot = true
+                    _taskProposals.value = remoteProposals
+                }
+        }
+
+        // 11. Real-time Reward Redemptions Listener (/families/{familyId}/redemptions)
+        runCatching {
+            var hasProcessedInitialRedemptionsSnapshot = false
+            redemptionsListenerRegistration?.remove()
+            redemptionsListenerRegistration = familyRef.collection("redemptions")
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null || snapshot == null) return@addSnapshotListener
+                    val remoteRedemptions = snapshot.documents.mapNotNull { doc ->
+                        val data = doc.data ?: return@mapNotNull null
+                        parseRewardRedemptionDocument(doc.id, data, familyId)
+                    }.sortedByDescending { it.requestedAtMillis }
+
+                    val selfUid = currentUid()
+                    val current = _currentMember.value
+                    for (red in remoteRedemptions) {
+                        val eventKey = "red:${red.id}:${red.status.name}"
+                        if (!hasProcessedInitialRedemptionsSnapshot) {
+                            notifiedCollaborationEventKeys.add(eventKey)
+                        } else if (notifiedCollaborationEventKeys.add(eventKey)) {
+                            val isSelfChild = red.childUid == current.id || (selfUid.isNotBlank() && red.childUid == selfUid)
+                            when (red.status) {
+                                RedemptionStatus.PENDING_PARENT_APPROVAL -> {
+                                    if (current.isParent) {
+                                        pushAlert(
+                                            title = "בקשה חדשה למימוש פרס 🎁",
+                                            message = "${red.childName} מבקש/ת לממש: \"${red.rewardTitle}\" (${red.pointsCost} נק')",
+                                            targetName = red.childName,
+                                            targetEmoji = red.rewardIconEmoji,
+                                            reason = AlertReason.TASK_REMINDER,
+                                            showBanner = true
+                                        )
+                                    }
+                                }
+                                RedemptionStatus.APPROVED -> {
+                                    if (isSelfChild) {
+                                        pushAlert(
+                                            title = "בקשת המימוש אושרה! 🎉",
+                                            message = "ההורה אישר את מימוש הפרס \"${red.rewardTitle}\" (-${red.pointsCost} נק')",
+                                            targetName = red.childName,
+                                            targetEmoji = red.rewardIconEmoji,
+                                            reason = AlertReason.TASK_COMPLETED,
+                                            showBanner = true
+                                        )
+                                    }
+                                }
+                                RedemptionStatus.REJECTED -> {
+                                    if (isSelfChild) {
+                                        pushAlert(
+                                            title = "בקשת המימוש נדחתה ❌",
+                                            message = "בקשת המימוש עבור \"${red.rewardTitle}\" נדחתה. הנקודות לא הופחתו.",
+                                            targetName = red.childName,
+                                            targetEmoji = red.rewardIconEmoji,
+                                            reason = AlertReason.TASK_REMINDER,
+                                            showBanner = true
+                                        )
+                                    }
+                                }
+                                RedemptionStatus.CANCELLED -> Unit
+                            }
+                        }
+                    }
+                    hasProcessedInitialRedemptionsSnapshot = true
+                    _rewardRedemptions.value = remoteRedemptions
+                }
+        }
     }
 
     fun detachFirestoreListeners() {
@@ -3870,6 +4065,8 @@ class FamilyRepository(
         filesListenerRegistration?.remove()
         alarmsListenerRegistration?.remove()
         pointsHistoryListenerRegistration?.remove()
+        taskProposalsListenerRegistration?.remove()
+        redemptionsListenerRegistration?.remove()
         tasksListenerRegistration = null
         membersListenerRegistration = null
         rewardsListenerRegistration = null
@@ -3879,6 +4076,8 @@ class FamilyRepository(
         filesListenerRegistration = null
         alarmsListenerRegistration = null
         pointsHistoryListenerRegistration = null
+        taskProposalsListenerRegistration = null
+        redemptionsListenerRegistration = null
     }
 
     private suspend fun flushOfflineSyncQueue(familyId: String) {
@@ -3929,6 +4128,14 @@ class FamilyRepository(
             "approvedByParent" to task.approvedByParent,
             "completedAtMillis" to task.completedAtMillis,
             "completedByMemberId" to task.completedByMemberId,
+            "originalAssignedToMemberId" to task.originalAssignedToMemberId,
+            "original_assigned_member_id" to task.originalAssignedToMemberId,
+            "originalAssignedMemberName" to task.originalAssignedMemberName,
+            "original_assigned_member_name" to task.originalAssignedMemberName,
+            "transferProposalId" to task.transferProposalId,
+            "transfer_proposal_id" to task.transferProposalId,
+            "pendingProposalId" to task.pendingProposalId,
+            "pending_proposal_id" to task.pendingProposalId,
             "dateEpochDay" to task.dateEpochDay,
             "dueDate" to (task.dateEpochDay * 86_400_000L),
             "category" to task.category.name,
@@ -5066,7 +5273,7 @@ class FamilyRepository(
             _pointsHistory.value.any {
                 it.operationId == taskOpId ||
                     it.id == taskOpId ||
-                    (it.actionType == PointsActionType.TASK_EARNED && it.taskId == taskId)
+                    ((it.actionType == PointsActionType.TASK_EARNED || it.actionType == PointsActionType.TASK_SPLIT_EARNED) && it.taskId == taskId)
             }
 
         val completedBy = if (isParentApprovalEvent) {
@@ -5216,9 +5423,16 @@ class FamilyRepository(
                             )
                         }
 
-                        val reason = "השלמת משימה: $taskTitle"
+                        val origId = approvedTask.originalAssignedToMemberId?.takeIf { it.isNotBlank() }
+                        val origName = approvedTask.originalAssignedMemberName?.takeIf { it.isNotBlank() }
+                            ?: origId?.let { id -> _members.value.find { it.id == id }?.name }
+                        val reason = if (!origName.isNullOrBlank() && origId != assigneeId) {
+                            "השלמת משימה: $taskTitle (בוצע במקום $origName)"
+                        } else {
+                            "השלמת משימה: $taskTitle"
+                        }
                         val performedByName = current.name.ifBlank { "הורה" }
-                        val historyMap = mapOf<String, Any?>(
+                        val historyMap = mutableMapOf<String, Any?>(
                             "id" to taskOpId,
                             "operationId" to taskOpId,
                             "familyId" to resolvedFamilyId,
@@ -5233,8 +5447,19 @@ class FamilyRepository(
                             "performedByName" to performedByName,
                             "timestampMillis" to nowMillis,
                             "taskId" to approvedTask.id,
+                            "performedTaskByMemberId" to assigneeId,
+                            "performedTaskByMemberName" to resolvedMemberName,
                             "serverTimestamp" to FieldValue.serverTimestamp()
                         )
+                        if (!origId.isNullOrBlank()) {
+                            historyMap["relatedMemberId"] = origId
+                        }
+                        if (!origName.isNullOrBlank()) {
+                            historyMap["relatedMemberName"] = origName
+                        }
+                        if (!approvedTask.transferProposalId.isNullOrBlank()) {
+                            historyMap["proposalId"] = approvedTask.transferProposalId
+                        }
                         tx.set(historyDocRef, historyMap)
 
                         val createdEntry = PointsHistoryEntry(
@@ -5251,7 +5476,12 @@ class FamilyRepository(
                             performedByUid = authUser.uid,
                             performedByName = performedByName,
                             timestampMillis = nowMillis,
-                            taskId = approvedTask.id
+                            taskId = approvedTask.id,
+                            performedTaskByMemberId = assigneeId,
+                            performedTaskByMemberName = resolvedMemberName,
+                            relatedMemberId = origId,
+                            relatedMemberName = origName,
+                            proposalId = approvedTask.transferProposalId
                         )
                         AtomicTaskApprovalTxOutcome(
                             approvedTask = approvedTask.copy(assignedToMemberId = assigneeId, points = taskPoints),
@@ -5294,7 +5524,14 @@ class FamilyRepository(
                 val localAssignee = _members.value.find { it.id == approvedTask.assignedToMemberId }
                 val previousBalance = (localAssignee?.earnedPoints ?: 0).coerceAtLeast(0)
                 val newBalance = previousBalance + approvedTask.points
-                val reason = "השלמת משימה: ${approvedTask.title}"
+                val origId = approvedTask.originalAssignedToMemberId?.takeIf { it.isNotBlank() }
+                val origName = approvedTask.originalAssignedMemberName?.takeIf { it.isNotBlank() }
+                    ?: origId?.let { id -> _members.value.find { it.id == id }?.name }
+                val reason = if (!origName.isNullOrBlank() && origId != approvedTask.assignedToMemberId) {
+                    "השלמת משימה: ${approvedTask.title} (בוצע במקום $origName)"
+                } else {
+                    "השלמת משימה: ${approvedTask.title}"
+                }
                 val performedByName = current.name.ifBlank { "הורה" }
                 val entry = PointsHistoryEntry(
                     id = taskOpId,
@@ -5310,7 +5547,12 @@ class FamilyRepository(
                     performedByUid = actorId,
                     performedByName = performedByName,
                     timestampMillis = nowMillis,
-                    taskId = approvedTask.id
+                    taskId = approvedTask.id,
+                    performedTaskByMemberId = approvedTask.assignedToMemberId,
+                    performedTaskByMemberName = localAssignee?.name.orEmpty(),
+                    relatedMemberId = origId,
+                    relatedMemberName = origName,
+                    proposalId = approvedTask.transferProposalId
                 )
                 AtomicTaskApprovalTxOutcome(
                     approvedTask = approvedTask,
@@ -5494,21 +5736,7 @@ class FamilyRepository(
     // --- Rewards Store Operations ---
 
     fun redeemReward(reward: RewardItem): Boolean {
-        val current = _currentMember.value
-        if (current.earnedPoints < reward.pointsCost) return false
-        val newPoints = (current.earnedPoints - reward.pointsCost).coerceAtLeast(0)
-        val updatedMember = current.copy(earnedPoints = newPoints)
-        _currentMember.value = updatedMember
-        _members.value = _members.value.map { if (it.id == current.id) updatedMember else it }
-
-        pushAlert(
-            title = "פרס מומש בהצלחה! 🎁",
-            message = "${current.name} מימש/ה את הפרס: \"${reward.title}\" (-${reward.pointsCost} נק')",
-            targetName = current.name,
-            targetEmoji = current.avatarEmoji,
-            reason = AlertReason.TASK_COMPLETED
-        )
-        return true
+        return requestRewardRedemption(reward.id)
     }
 
     // --- School Timetable Operations (PARENT only for mutations, synced to Firestore /families/{familyId}/schedule) ---
@@ -8645,7 +8873,7 @@ class FamilyRepository(
             return@withLock Result.failure(IllegalArgumentException(errMsg))
         }
 
-        if ((actionType == PointsActionType.ADD || actionType == PointsActionType.DEDUCT || actionType == PointsActionType.TASK_EARNED) && amount <= 0) {
+        if (actionType != PointsActionType.RESET && amount <= 0) {
             processedPointsOperationIds.remove(cleanOpId)
             val errMsg = "מספר הנקודות חייב להיות שלם וחיובי (גדול מ-0)"
             _pointsOperationError.value = errMsg
@@ -8661,8 +8889,11 @@ class FamilyRepository(
             return@withLock Result.failure(IllegalArgumentException(errMsg))
         }
 
+        val isDeductingAction = actionType == PointsActionType.DEDUCT ||
+            actionType == PointsActionType.TRANSFER_OUT ||
+            actionType == PointsActionType.REWARD_REDEEMED
         val localPrevBalance = localTarget.earnedPoints.coerceAtLeast(0)
-        if (actionType == PointsActionType.DEDUCT && !allowNegativeBalance && localPrevBalance - amount < 0) {
+        if (isDeductingAction && !allowNegativeBalance && localPrevBalance - amount < 0) {
             processedPointsOperationIds.remove(cleanOpId)
             val errMsg = "לא ניתן להפחית $amount נקודות — היתרה הנוכחית של ${localTarget.name} היא $localPrevBalance נקודות בלבד"
             _pointsOperationError.value = errMsg
@@ -8734,11 +8965,17 @@ class FamilyRepository(
                     val pointsDelta: Int
                     val newBalance: Int
                     when (actionType) {
-                        PointsActionType.ADD, PointsActionType.TASK_EARNED -> {
+                        PointsActionType.ADD,
+                        PointsActionType.TASK_EARNED,
+                        PointsActionType.TASK_SPLIT_EARNED,
+                        PointsActionType.TRANSFER_IN,
+                        PointsActionType.HELPING_BONUS -> {
                             pointsDelta = amount
                             newBalance = previousBalance + amount
                         }
-                        PointsActionType.DEDUCT -> {
+                        PointsActionType.DEDUCT,
+                        PointsActionType.TRANSFER_OUT,
+                        PointsActionType.REWARD_REDEEMED -> {
                             if (!allowNegativeBalance && previousBalance - amount < 0) {
                                 throw IllegalArgumentException("לא ניתן להפחית $amount נקודות — היתרה בענן היא $previousBalance נקודות בלבד")
                             }
@@ -8829,11 +9066,17 @@ class FamilyRepository(
                 val pointsDelta: Int
                 val newBalance: Int
                 when (actionType) {
-                    PointsActionType.ADD, PointsActionType.TASK_EARNED -> {
+                    PointsActionType.ADD,
+                    PointsActionType.TASK_EARNED,
+                    PointsActionType.TASK_SPLIT_EARNED,
+                    PointsActionType.TRANSFER_IN,
+                    PointsActionType.HELPING_BONUS -> {
                         pointsDelta = amount
                         newBalance = previousBalance + amount
                     }
-                    PointsActionType.DEDUCT -> {
+                    PointsActionType.DEDUCT,
+                    PointsActionType.TRANSFER_OUT,
+                    PointsActionType.REWARD_REDEEMED -> {
                         if (!allowNegativeBalance && previousBalance - amount < 0) {
                             throw IllegalArgumentException("לא ניתן להפחית $amount נקודות — היתרה הנוכחית היא $previousBalance נקודות בלבד")
                         }
@@ -8912,6 +9155,13 @@ class FamilyRepository(
             ?: System.currentTimeMillis()
         val opId = (data["operationId"] as? String)?.takeIf { it.isNotBlank() } ?: docId
         val taskId = (data["taskId"] as? String)?.takeIf { it.isNotBlank() }
+        val performedTaskByMemberId = (data["performedTaskByMemberId"] as? String)?.takeIf { it.isNotBlank() }
+        val performedTaskByMemberName = (data["performedTaskByMemberName"] as? String)?.takeIf { it.isNotBlank() }
+        val relatedMemberId = (data["relatedMemberId"] as? String)?.takeIf { it.isNotBlank() }
+        val relatedMemberName = (data["relatedMemberName"] as? String)?.takeIf { it.isNotBlank() }
+        val rewardId = (data["rewardId"] as? String)?.takeIf { it.isNotBlank() }
+        val redemptionId = (data["redemptionId"] as? String)?.takeIf { it.isNotBlank() }
+        val proposalId = (data["proposalId"] as? String)?.takeIf { it.isNotBlank() }
         return PointsHistoryEntry(
             id = docId,
             operationId = opId,
@@ -8926,7 +9176,14 @@ class FamilyRepository(
             performedByUid = performedByUid,
             performedByName = performedByName,
             timestampMillis = tsMillis,
-            taskId = taskId
+            taskId = taskId,
+            performedTaskByMemberId = performedTaskByMemberId,
+            performedTaskByMemberName = performedTaskByMemberName,
+            relatedMemberId = relatedMemberId,
+            relatedMemberName = relatedMemberName,
+            rewardId = rewardId,
+            redemptionId = redemptionId,
+            proposalId = proposalId
         )
     }
 
@@ -8983,9 +9240,14 @@ class FamilyRepository(
                     put("performedByUid", e.performedByUid)
                     put("performedByName", e.performedByName)
                     put("timestampMillis", e.timestampMillis)
-                    if (!e.taskId.isNullOrBlank()) {
-                        put("taskId", e.taskId)
-                    }
+                    if (!e.taskId.isNullOrBlank()) put("taskId", e.taskId)
+                    if (!e.performedTaskByMemberId.isNullOrBlank()) put("performedTaskByMemberId", e.performedTaskByMemberId)
+                    if (!e.performedTaskByMemberName.isNullOrBlank()) put("performedTaskByMemberName", e.performedTaskByMemberName)
+                    if (!e.relatedMemberId.isNullOrBlank()) put("relatedMemberId", e.relatedMemberId)
+                    if (!e.relatedMemberName.isNullOrBlank()) put("relatedMemberName", e.relatedMemberName)
+                    if (!e.rewardId.isNullOrBlank()) put("rewardId", e.rewardId)
+                    if (!e.redemptionId.isNullOrBlank()) put("redemptionId", e.redemptionId)
+                    if (!e.proposalId.isNullOrBlank()) put("proposalId", e.proposalId)
                 }
                 arr.put(obj)
             }
@@ -9046,7 +9308,14 @@ class FamilyRepository(
                         performedByUid = obj.optString("performedByUid"),
                         performedByName = obj.optString("performedByName", "הורה"),
                         timestampMillis = obj.optLong("timestampMillis", 0L),
-                        taskId = obj.optString("taskId").takeIf { it.isNotBlank() }
+                        taskId = obj.optString("taskId").takeIf { it.isNotBlank() },
+                        performedTaskByMemberId = obj.optString("performedTaskByMemberId").takeIf { it.isNotBlank() },
+                        performedTaskByMemberName = obj.optString("performedTaskByMemberName").takeIf { it.isNotBlank() },
+                        relatedMemberId = obj.optString("relatedMemberId").takeIf { it.isNotBlank() },
+                        relatedMemberName = obj.optString("relatedMemberName").takeIf { it.isNotBlank() },
+                        rewardId = obj.optString("rewardId").takeIf { it.isNotBlank() },
+                        redemptionId = obj.optString("redemptionId").takeIf { it.isNotBlank() },
+                        proposalId = obj.optString("proposalId").takeIf { it.isNotBlank() }
                     )
                     if (entry.memberId.isNotBlank()) {
                         restoredList.add(entry)
@@ -9063,4 +9332,2049 @@ class FamilyRepository(
             }
         }
     }
+
+    // =========================================================================
+    //  TASK COLLABORATION (PART A & B): VOLUNTEER FOR TASK & SWAP TASKS
+    // =========================================================================
+
+    fun clearCollaborationError() {
+        _collaborationError.value = null
+    }
+
+    private fun parseTaskProposalDocument(
+        docId: String,
+        data: Map<String, Any?>,
+        fallbackFamilyId: String
+    ): TaskCollaborationProposal? {
+        val requesterChildId = (data["requesterChildId"] as? String)?.trim().orEmpty()
+        val targetChildId = (data["targetChildId"] as? String)?.trim().orEmpty()
+        val primaryTaskId = (data["primaryTaskId"] as? String)?.trim().orEmpty()
+        if (requesterChildId.isBlank() || targetChildId.isBlank() || primaryTaskId.isBlank()) return null
+
+        val typeRaw = (data["type"] as? String) ?: TaskProposalType.VOLUNTEER_FOR_TASK.firestoreValue
+        val statusRaw = (data["status"] as? String) ?: TaskProposalStatus.PENDING_CHILD_APPROVAL.firestoreValue
+        val createdAt = (data["createdAtMillis"] as? Number)?.toLong() ?: System.currentTimeMillis()
+        val updatedAt = (data["updatedAtMillis"] as? Number)?.toLong() ?: createdAt
+
+        return TaskCollaborationProposal(
+            id = docId,
+            operationId = (data["operationId"] as? String)?.takeIf { it.isNotBlank() } ?: docId,
+            familyId = (data["familyId"] as? String)?.takeIf { it.isNotBlank() } ?: fallbackFamilyId,
+            type = TaskProposalType.fromFirestoreValue(typeRaw),
+            requesterChildId = requesterChildId,
+            requesterChildName = (data["requesterChildName"] as? String).orEmpty(),
+            targetChildId = targetChildId,
+            targetChildName = (data["targetChildName"] as? String).orEmpty(),
+            primaryTaskId = primaryTaskId,
+            primaryTaskTitle = (data["primaryTaskTitle"] as? String).orEmpty(),
+            primaryTaskPoints = (data["primaryTaskPoints"] as? Number)?.toInt() ?: 0,
+            offeredSwapTaskId = (data["offeredSwapTaskId"] as? String)?.takeIf { it.isNotBlank() },
+            offeredSwapTaskTitle = (data["offeredSwapTaskTitle"] as? String)?.takeIf { it.isNotBlank() },
+            offeredSwapTaskPoints = (data["offeredSwapTaskPoints"] as? Number)?.toInt(),
+            status = TaskProposalStatus.fromFirestoreValue(statusRaw),
+            note = (data["note"] as? String).orEmpty(),
+            childRespondedAtMillis = (data["childRespondedAtMillis"] as? Number)?.toLong(),
+            parentDecidedByUid = (data["parentDecidedByUid"] as? String)?.takeIf { it.isNotBlank() },
+            parentDecidedByName = (data["parentDecidedByName"] as? String)?.takeIf { it.isNotBlank() },
+            parentDecidedAtMillis = (data["parentDecidedAtMillis"] as? Number)?.toLong(),
+            createdAtMillis = createdAt,
+            updatedAtMillis = updatedAt
+        )
+    }
+
+    private fun buildTaskProposalFirestoreMap(proposal: TaskCollaborationProposal): Map<String, Any?> {
+        val map = mutableMapOf<String, Any?>(
+            "id" to proposal.id,
+            "operationId" to proposal.operationId,
+            "familyId" to proposal.familyId,
+            "type" to proposal.type.firestoreValue,
+            "requesterChildId" to proposal.requesterChildId,
+            "requesterChildName" to proposal.requesterChildName,
+            "targetChildId" to proposal.targetChildId,
+            "targetChildName" to proposal.targetChildName,
+            "primaryTaskId" to proposal.primaryTaskId,
+            "primaryTaskTitle" to proposal.primaryTaskTitle,
+            "primaryTaskPoints" to proposal.primaryTaskPoints,
+            "status" to proposal.status.firestoreValue,
+            "note" to proposal.note,
+            "createdAtMillis" to proposal.createdAtMillis,
+            "updatedAtMillis" to proposal.updatedAtMillis
+        )
+        if (!proposal.offeredSwapTaskId.isNullOrBlank()) map["offeredSwapTaskId"] = proposal.offeredSwapTaskId
+        if (!proposal.offeredSwapTaskTitle.isNullOrBlank()) map["offeredSwapTaskTitle"] = proposal.offeredSwapTaskTitle
+        if (proposal.offeredSwapTaskPoints != null) map["offeredSwapTaskPoints"] = proposal.offeredSwapTaskPoints
+        if (proposal.childRespondedAtMillis != null) map["childRespondedAtMillis"] = proposal.childRespondedAtMillis
+        if (!proposal.parentDecidedByUid.isNullOrBlank()) map["parentDecidedByUid"] = proposal.parentDecidedByUid
+        if (!proposal.parentDecidedByName.isNullOrBlank()) map["parentDecidedByName"] = proposal.parentDecidedByName
+        if (proposal.parentDecidedAtMillis != null) map["parentDecidedAtMillis"] = proposal.parentDecidedAtMillis
+        return map
+    }
+
+    /**
+     * Part A: Child proposes to volunteer to perform another child's active task.
+     * Stage 1 -> Creates proposal in [TaskProposalStatus.PENDING_CHILD_APPROVAL].
+     * Task ownership is NOT changed until both target child and parent approve.
+     */
+    suspend fun proposeVolunteerForTaskAsync(
+        taskId: String,
+        note: String = ""
+    ): Result<TaskCollaborationProposal> {
+        val requester = _currentMember.value
+        val familyId = _activeFamilyId.value.ifBlank { "fam_israeli_8492" }
+        val targetTask = _tasks.value.find { it.id == taskId }
+        if (targetTask == null) {
+            _collaborationError.value = "המשימה המבוקשת לא נמצאה"
+            return Result.failure(IllegalArgumentException("המשימה המבוקשת לא נמצאה"))
+        }
+
+        if (targetTask.isCompleted || targetTask.approvedByParent) {
+            val msg = "לא ניתן להציע לבצע משימה שכבר הושלמה"
+            _collaborationError.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
+        if (targetTask.assignedToMemberId.isBlank() || targetTask.assignedToMemberId == requester.id) {
+            val msg = "לא ניתן להתנדב למשימה שכבר משויכת אליך"
+            _collaborationError.value = msg
+            return Result.failure(IllegalArgumentException(msg))
+        }
+        val hasPendingProposal = !targetTask.pendingProposalId.isNullOrBlank() ||
+            _taskProposals.value.any {
+                it.status.isPending && (it.primaryTaskId == taskId || it.offeredSwapTaskId == taskId)
+            }
+        if (hasPendingProposal) {
+            val msg = "קיימת כבר הצעה פעילה עבור משימה זו"
+            _collaborationError.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
+
+        val targetChild = _members.value.find { it.id == targetTask.assignedToMemberId }
+        val targetChildName = targetChild?.name?.ifBlank { "ילד/ה" } ?: "ילד/ה"
+        val nowMillis = System.currentTimeMillis()
+        val proposalId = "prop_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+
+        val proposal = TaskCollaborationProposal(
+            id = proposalId,
+            operationId = proposalId,
+            familyId = familyId,
+            type = TaskProposalType.VOLUNTEER_FOR_TASK,
+            requesterChildId = requester.id,
+            requesterChildName = requester.name,
+            targetChildId = targetTask.assignedToMemberId,
+            targetChildName = targetChildName,
+            primaryTaskId = targetTask.id,
+            primaryTaskTitle = targetTask.title,
+            primaryTaskPoints = targetTask.points,
+            status = TaskProposalStatus.PENDING_CHILD_APPROVAL,
+            note = note.trim(),
+            createdAtMillis = nowMillis,
+            updatedAtMillis = nowMillis
+        )
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                val familyRef = db.collection("families").document(familyId)
+                val proposalRef = familyRef.collection("task_proposals").document(proposalId)
+                val taskRef = familyRef.collection("tasks").document(targetTask.id)
+                db.runBatch { batch ->
+                    batch.set(proposalRef, buildTaskProposalFirestoreMap(proposal))
+                    batch.update(taskRef, mapOf("pendingProposalId" to proposalId, "updatedAt" to nowMillis))
+                }.await()
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "שגיאה בשליחת ההצעה לביצוע המשימה"
+                _collaborationError.value = msg
+                return Result.failure(e)
+            }
+        }
+
+        _collaborationError.value = null
+        _taskProposals.value = listOf(proposal) + _taskProposals.value.filterNot { it.id == proposalId }
+        _tasks.value = _tasks.value.map { t ->
+            if (t.id == targetTask.id) t.copy(pendingProposalId = proposalId, updatedAtMillis = nowMillis) else t
+        }
+
+        pushAlert(
+            title = "🙋 הצעה חדשה לביצוע משימה",
+            message = "${requester.name} מציע/ה לבצע את המשימה \"${targetTask.title}\" במקום $targetChildName. ממתין לאישור של $targetChildName.",
+            targetName = targetChildName,
+            targetEmoji = targetChild?.avatarEmoji ?: "🙋",
+            reason = AlertReason.TASK_REMINDER
+        )
+        return Result.success(proposal)
+    }
+
+    fun proposeVolunteerForTask(taskId: String, note: String = ""): Boolean {
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                proposeVolunteerForTaskAsync(taskId, note).isSuccess
+            }
+        }
+        repoScope.launch {
+            proposeVolunteerForTaskAsync(taskId, note)
+        }
+        return true
+    }
+
+    /**
+     * Part B: Child proposes to swap one of their active tasks ([offeredTaskId])
+     * with another child's active task ([targetTaskId]).
+     * Stage 1 -> Creates proposal in [TaskProposalStatus.PENDING_CHILD_APPROVAL].
+     * Neither task changes owner until both target child and parent approve.
+     */
+    suspend fun proposeTaskSwapAsync(
+        offeredTaskId: String = "",
+        targetTaskId: String,
+        offeredSwapTaskId: String = offeredTaskId,
+        note: String = ""
+    ): Result<TaskCollaborationProposal> {
+        val effectiveOfferedId = offeredSwapTaskId.ifBlank { offeredTaskId }
+        val requester = _currentMember.value
+        val familyId = _activeFamilyId.value.ifBlank { "fam_israeli_8492" }
+
+        if (effectiveOfferedId.isBlank() || targetTaskId.isBlank() || effectiveOfferedId == targetTaskId) {
+            val msg = "יש לבחור שתי משימות שונות להחלפה"
+            _collaborationError.value = msg
+            return Result.failure(IllegalArgumentException(msg))
+        }
+
+        val offeredTask = _tasks.value.find { it.id == effectiveOfferedId }
+        if (offeredTask == null) {
+            _collaborationError.value = "המשימה שלך להחלפה לא נמצאה"
+            return Result.failure(IllegalArgumentException("המשימה שלך להחלפה לא נמצאה"))
+        }
+        val targetTask = _tasks.value.find { it.id == targetTaskId }
+        if (targetTask == null) {
+            _collaborationError.value = "המשימה המבוקשת להחלפה לא נמצאה"
+            return Result.failure(IllegalArgumentException("המשימה המבוקשת להחלפה לא נמצאה"))
+        }
+
+        if (offeredTask.assignedToMemberId != requester.id) {
+            val msg = "ניתן להציע להחלפה רק משימה שמשויכת אליך"
+            _collaborationError.value = msg
+            return Result.failure(IllegalArgumentException(msg))
+        }
+        if (targetTask.assignedToMemberId.isBlank() || targetTask.assignedToMemberId == requester.id) {
+            val msg = "יש לבחור משימה של ילד/ה אחר/ת להחלפה"
+            _collaborationError.value = msg
+            return Result.failure(IllegalArgumentException(msg))
+        }
+        if (offeredTask.isCompleted || offeredTask.approvedByParent || targetTask.isCompleted || targetTask.approvedByParent) {
+            val msg = "לא ניתן להחליף משימות שכבר הושלמו"
+            _collaborationError.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
+
+        val anyPending = !offeredTask.pendingProposalId.isNullOrBlank() ||
+            !targetTask.pendingProposalId.isNullOrBlank() ||
+            _taskProposals.value.any {
+                it.status.isPending && (
+                    it.primaryTaskId == effectiveOfferedId ||
+                        it.primaryTaskId == targetTaskId ||
+                        it.offeredSwapTaskId == effectiveOfferedId ||
+                        it.offeredSwapTaskId == targetTaskId
+                    )
+            }
+        if (anyPending) {
+            val msg = "אחת המשימות כבר נמצאת בבקשת שיתוף או החלפה פעילה"
+            _collaborationError.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
+
+        val targetChild = _members.value.find { it.id == targetTask.assignedToMemberId }
+        val targetChildName = targetChild?.name?.ifBlank { "ילד/ה" } ?: "ילד/ה"
+        val nowMillis = System.currentTimeMillis()
+        val proposalId = "prop_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+
+        val proposal = TaskCollaborationProposal(
+            id = proposalId,
+            operationId = proposalId,
+            familyId = familyId,
+            type = TaskProposalType.SWAP_TASKS,
+            requesterChildId = requester.id,
+            requesterChildName = requester.name,
+            targetChildId = targetTask.assignedToMemberId,
+            targetChildName = targetChildName,
+            primaryTaskId = targetTask.id,
+            primaryTaskTitle = targetTask.title,
+            primaryTaskPoints = targetTask.points,
+            offeredSwapTaskId = offeredTask.id,
+            offeredSwapTaskTitle = offeredTask.title,
+            offeredSwapTaskPoints = offeredTask.points,
+            status = TaskProposalStatus.PENDING_CHILD_APPROVAL,
+            note = note.trim(),
+            createdAtMillis = nowMillis,
+            updatedAtMillis = nowMillis
+        )
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                val familyRef = db.collection("families").document(familyId)
+                val proposalRef = familyRef.collection("task_proposals").document(proposalId)
+                val targetTaskRef = familyRef.collection("tasks").document(targetTask.id)
+                val offeredTaskRef = familyRef.collection("tasks").document(offeredTask.id)
+                db.runBatch { batch ->
+                    batch.set(proposalRef, buildTaskProposalFirestoreMap(proposal))
+                    batch.update(targetTaskRef, mapOf("pendingProposalId" to proposalId, "updatedAt" to nowMillis))
+                    batch.update(offeredTaskRef, mapOf("pendingProposalId" to proposalId, "updatedAt" to nowMillis))
+                }.await()
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "שגיאה בשליחת הצעת החלפת המשימות"
+                _collaborationError.value = msg
+                return Result.failure(e)
+            }
+        }
+
+        _collaborationError.value = null
+        _taskProposals.value = listOf(proposal) + _taskProposals.value.filterNot { it.id == proposalId }
+        _tasks.value = _tasks.value.map { t ->
+            if (t.id == targetTask.id || t.id == offeredTask.id) {
+                t.copy(pendingProposalId = proposalId, updatedAtMillis = nowMillis)
+            } else {
+                t
+            }
+        }
+
+        pushAlert(
+            title = "🔁 הצעה להחלפת משימות",
+            message = "${requester.name} מציע/ה להחליף את \"${offeredTask.title}\" תמורת \"${targetTask.title}\" של $targetChildName.",
+            targetName = targetChildName,
+            targetEmoji = targetChild?.avatarEmoji ?: "🔁",
+            reason = AlertReason.TASK_REMINDER
+        )
+        return Result.success(proposal)
+    }
+
+    fun proposeTaskSwap(offeredTaskId: String, targetTaskId: String, note: String = ""): Boolean {
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                proposeTaskSwapAsync(offeredTaskId, targetTaskId, note).isSuccess
+            }
+        }
+        repoScope.launch {
+            proposeTaskSwapAsync(offeredTaskId, targetTaskId, note)
+        }
+        return true
+    }
+
+    /**
+     * Stage 2 of Task Collaboration: The target child (owner of the requested task)
+     * approves or rejects the proposal.
+     * - If approved: status transitions to [TaskProposalStatus.PENDING_PARENT_APPROVAL] (tasks are NOT reassigned yet!).
+     * - If rejected: status transitions to [TaskProposalStatus.REJECTED_BY_CHILD] and `pendingProposalId` is cleared.
+     */
+    suspend fun respondToTaskProposalAsChildAsync(
+        proposalId: String,
+        approve: Boolean
+    ): Result<TaskCollaborationProposal> {
+        val current = _currentMember.value
+        val authUid = currentUid()
+        val proposal = _taskProposals.value.find { it.id == proposalId }
+        if (proposal == null) {
+            _collaborationError.value = "ההצעה לא נמצאה"
+            return Result.failure(IllegalArgumentException("ההצעה לא נמצאה"))
+        }
+
+        if (proposal.status != TaskProposalStatus.PENDING_CHILD_APPROVAL) {
+            val msg = "הצעה זו אינה ממתינה לאישור הילד/ה"
+            _collaborationError.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
+
+        val isTargetChild = current.id == proposal.targetChildId || (authUid.isNotBlank() && authUid == proposal.targetChildId)
+        if (!isTargetChild) {
+            val msg = "רק בעל/ת המשימה (${proposal.targetChildName}) יכול/ה לאשר או לדחות בשלב זה"
+            _collaborationError.value = msg
+            return Result.failure(SecurityException(msg))
+        }
+
+        val nowMillis = System.currentTimeMillis()
+        val familyId = proposal.familyId.ifBlank { _activeFamilyId.value.ifBlank { "fam_israeli_8492" } }
+        val newStatus = if (approve) {
+            TaskProposalStatus.PENDING_PARENT_APPROVAL
+        } else {
+            TaskProposalStatus.REJECTED_BY_CHILD
+        }
+        val updatedProposal = proposal.copy(
+            status = newStatus,
+            childRespondedAtMillis = nowMillis,
+            updatedAtMillis = nowMillis
+        )
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                val familyRef = db.collection("families").document(familyId)
+                val proposalRef = familyRef.collection("task_proposals").document(proposalId)
+                db.runBatch { batch ->
+                    batch.update(
+                        proposalRef,
+                        mapOf(
+                            "status" to newStatus.firestoreValue,
+                            "childRespondedAtMillis" to nowMillis,
+                            "updatedAtMillis" to nowMillis
+                        )
+                    )
+                    if (!approve) {
+                        val primaryRef = familyRef.collection("tasks").document(proposal.primaryTaskId)
+                        batch.update(primaryRef, mapOf("pendingProposalId" to null, "updatedAt" to nowMillis))
+                        if (!proposal.offeredSwapTaskId.isNullOrBlank()) {
+                            val swapRef = familyRef.collection("tasks").document(proposal.offeredSwapTaskId)
+                            batch.update(swapRef, mapOf("pendingProposalId" to null, "updatedAt" to nowMillis))
+                        }
+                    }
+                }.await()
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "שגיאה בעדכון תגובת הילד/ה להצעה"
+                _collaborationError.value = msg
+                return Result.failure(e)
+            }
+        }
+
+        _collaborationError.value = null
+        _taskProposals.value = _taskProposals.value.map { if (it.id == proposalId) updatedProposal else it }
+        if (!approve) {
+            _tasks.value = _tasks.value.map { t ->
+                if (t.id == proposal.primaryTaskId || t.id == proposal.offeredSwapTaskId) {
+                    t.copy(pendingProposalId = null, updatedAtMillis = nowMillis)
+                } else {
+                    t
+                }
+            }
+            pushAlert(
+                title = "ההצעה נדחתה ע״י ${proposal.targetChildName}",
+                message = "${proposal.targetChildName} דחה/תה את ההצעה עבור המשימה \"${proposal.primaryTaskTitle}\".",
+                targetName = proposal.requesterChildName,
+                targetEmoji = "ℹ️",
+                reason = AlertReason.TASK_REMINDER
+            )
+        } else {
+            pushAlert(
+                title = "ממתין לאישור הורה 🛡️",
+                message = "${proposal.targetChildName} אישר/ה את ההצעה של ${proposal.requesterChildName} עבור \"${proposal.primaryTaskTitle}\". כעת ממתין לאישור הורה.",
+                targetName = "הורים",
+                targetEmoji = "🛡️",
+                reason = AlertReason.TASK_REMINDER
+            )
+        }
+        return Result.success(updatedProposal)
+    }
+
+    fun respondToTaskProposalAsChild(proposalId: String, approve: Boolean): Boolean {
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                respondToTaskProposalAsChildAsync(proposalId, approve).isSuccess
+            }
+        }
+        repoScope.launch {
+            respondToTaskProposalAsChildAsync(proposalId, approve)
+        }
+        return true
+    }
+
+    /**
+     * Stage 3 of Task Collaboration (PARENT ONLY):
+     * Parent approves or rejects a proposal that has already been approved by the target child
+     * ([TaskProposalStatus.PENDING_PARENT_APPROVAL]).
+     * - Only when `approve == true` does task ownership actually change!
+     * - For [TaskProposalType.VOLUNTEER_FOR_TASK]: `primaryTask.assignedToMemberId` becomes `requesterChildId`,
+     *   preserving `originalAssignedToMemberId` and `originalAssignedMemberName`.
+     * - For [TaskProposalType.SWAP_TASKS]: `primaryTask` and `offeredSwapTask` swap their `assignedToMemberId`
+     *   atomically, preserving `originalAssignedToMemberId` and `originalAssignedMemberName` on both tasks.
+     */
+    suspend fun decideTaskProposalAsParentAsync(
+        proposalId: String,
+        approve: Boolean
+    ): Result<TaskCollaborationProposal> {
+        val caller = _currentMember.value
+        if (!caller.isParent) {
+            val msg = "רק הורה רשאי לאשר או לדחות סופית שינוי שיוך או החלפת משימות 🔒"
+            _collaborationError.value = msg
+            return Result.failure(SecurityException(msg))
+        }
+
+        val proposal = _taskProposals.value.find { it.id == proposalId }
+        if (proposal == null) {
+            _collaborationError.value = "ההצעה לא נמצאה"
+            return Result.failure(IllegalArgumentException("ההצעה לא נמצאה"))
+        }
+
+        if (proposal.status != TaskProposalStatus.PENDING_PARENT_APPROVAL) {
+            val msg = "ניתן לאשר/לדחות כהורה רק הצעה שכבר אושרה על ידי הילד/ה השני/ה"
+            _collaborationError.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
+
+        val primaryTask = _tasks.value.find { it.id == proposal.primaryTaskId }
+        if (primaryTask == null) {
+            _collaborationError.value = "המשימה הראשית בהצעה לא נמצאה"
+            return Result.failure(IllegalStateException("המשימה הראשית בהצעה לא נמצאה"))
+        }
+        if (primaryTask.isCompleted || primaryTask.approvedByParent) {
+            val msg = "לא ניתן לאשר העברה של משימה שכבר הושלמה"
+            _collaborationError.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
+
+        val offeredSwapTask = if (proposal.type == TaskProposalType.SWAP_TASKS) {
+            val swapId = proposal.offeredSwapTaskId.orEmpty()
+            val found = _tasks.value.find { it.id == swapId }
+            if (found == null) {
+                _collaborationError.value = "המשימה המוצעת להחלפה לא נמצאה"
+                return Result.failure(IllegalStateException("המשימה המוצעת להחלפה לא נמצאה"))
+            }
+            if (found.isCompleted || found.approvedByParent) {
+                val msg = "לא ניתן להחליף משימה שכבר הושלמה"
+                _collaborationError.value = msg
+                return Result.failure(IllegalStateException(msg))
+            }
+            found
+        } else {
+            null
+        }
+
+        val nowMillis = System.currentTimeMillis()
+        val familyId = proposal.familyId.ifBlank { _activeFamilyId.value.ifBlank { "fam_israeli_8492" } }
+        val actorUid = currentUid().ifBlank { caller.id }
+        val actorName = caller.name.ifBlank { "הורה" }
+        val newStatus = if (approve) {
+            TaskProposalStatus.APPROVED_BY_PARENT
+        } else {
+            TaskProposalStatus.REJECTED_BY_PARENT
+        }
+
+        val updatedProposal = proposal.copy(
+            status = newStatus,
+            parentDecidedByUid = actorUid,
+            parentDecidedByName = actorName,
+            parentDecidedAtMillis = nowMillis,
+            updatedAtMillis = nowMillis
+        )
+
+        val origPrimaryOwnerId = primaryTask.originalAssignedToMemberId?.takeIf { it.isNotBlank() }
+            ?: primaryTask.assignedToMemberId
+        val origPrimaryOwnerName = primaryTask.originalAssignedMemberName?.takeIf { it.isNotBlank() }
+            ?: _members.value.find { it.id == origPrimaryOwnerId }?.name
+            ?: proposal.targetChildName
+
+        val updatedPrimaryTask = if (approve) {
+            primaryTask.copy(
+                assignedToMemberId = proposal.requesterChildId,
+                originalAssignedToMemberId = origPrimaryOwnerId,
+                originalAssignedMemberName = origPrimaryOwnerName,
+                transferProposalId = proposal.id,
+                pendingProposalId = null,
+                updatedAtMillis = nowMillis
+            )
+        } else {
+            primaryTask.copy(
+                pendingProposalId = null,
+                updatedAtMillis = nowMillis
+            )
+        }
+
+        val updatedSwapTask = if (offeredSwapTask != null) {
+            if (approve) {
+                val origSwapOwnerId = offeredSwapTask.originalAssignedToMemberId?.takeIf { it.isNotBlank() }
+                    ?: offeredSwapTask.assignedToMemberId
+                val origSwapOwnerName = offeredSwapTask.originalAssignedMemberName?.takeIf { it.isNotBlank() }
+                    ?: _members.value.find { it.id == origSwapOwnerId }?.name
+                    ?: proposal.requesterChildName
+                offeredSwapTask.copy(
+                    assignedToMemberId = proposal.targetChildId,
+                    originalAssignedToMemberId = origSwapOwnerId,
+                    originalAssignedMemberName = origSwapOwnerName,
+                    transferProposalId = proposal.id,
+                    pendingProposalId = null,
+                    updatedAtMillis = nowMillis
+                )
+            } else {
+                offeredSwapTask.copy(
+                    pendingProposalId = null,
+                    updatedAtMillis = nowMillis
+                )
+            }
+        } else {
+            null
+        }
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                val familyRef = db.collection("families").document(familyId)
+                val proposalRef = familyRef.collection("task_proposals").document(proposalId)
+                val primaryRef = familyRef.collection("tasks").document(updatedPrimaryTask.id)
+                db.runBatch { batch ->
+                    batch.update(
+                        proposalRef,
+                        mapOf(
+                            "status" to newStatus.firestoreValue,
+                            "parentDecidedByUid" to actorUid,
+                            "parentDecidedByName" to actorName,
+                            "parentDecidedAtMillis" to nowMillis,
+                            "updatedAtMillis" to nowMillis
+                        )
+                    )
+                    batch.set(
+                        primaryRef,
+                        buildFullTaskFirestoreMap(updatedPrimaryTask, familyId, nowMillis),
+                        SetOptions.merge()
+                    )
+                    if (updatedSwapTask != null) {
+                        val swapRef = familyRef.collection("tasks").document(updatedSwapTask.id)
+                        batch.set(
+                            swapRef,
+                            buildFullTaskFirestoreMap(updatedSwapTask, familyId, nowMillis),
+                            SetOptions.merge()
+                        )
+                    }
+                }.await()
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "שגיאה בעדכון החלטת ההורה על ההצעה"
+                _collaborationError.value = msg
+                return Result.failure(e)
+            }
+        }
+
+        _collaborationError.value = null
+        _taskProposals.value = _taskProposals.value.map { if (it.id == proposalId) updatedProposal else it }
+        _tasks.value = _tasks.value.map { t ->
+            when (t.id) {
+                updatedPrimaryTask.id -> updatedPrimaryTask
+                updatedSwapTask?.id -> updatedSwapTask
+                else -> t
+            }
+        }
+        resyncTaskRemindersForActiveMember()
+
+        if (approve) {
+            val alertMessage = if (proposal.type == TaskProposalType.SWAP_TASKS && updatedSwapTask != null) {
+                "$actorName אישר/ה את החלפת המשימות בין ${proposal.requesterChildName} לבין ${proposal.targetChildName}!"
+            } else {
+                "$actorName אישר/ה ש-${proposal.requesterChildName} יבצע/תבצע את המשימה \"${updatedPrimaryTask.title}\" במקום ${proposal.targetChildName}!"
+            }
+            pushAlert(
+                title = "אושר ע״י הורה! ✅",
+                message = alertMessage,
+                targetName = proposal.requesterChildName,
+                targetEmoji = "✅",
+                reason = AlertReason.TASK_REMINDER
+            )
+        } else {
+            pushAlert(
+                title = "ההצעה נדחתה ע״י הורה",
+                message = "$actorName דחה/תה את הבקשה לשינוי שיוך המשימה \"${updatedPrimaryTask.title}\".",
+                targetName = proposal.requesterChildName,
+                targetEmoji = "ℹ️",
+                reason = AlertReason.TASK_REMINDER
+            )
+        }
+        return Result.success(updatedProposal)
+    }
+
+    fun decideTaskProposalAsParent(proposalId: String, approve: Boolean): Boolean {
+        if (!_currentMember.value.isParent) {
+            _collaborationError.value = "רק הורה רשאי לאשר או לדחות סופית שינוי שיוך או החלפת משימות 🔒"
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                decideTaskProposalAsParentAsync(proposalId, approve).isSuccess
+            }
+        }
+        repoScope.launch {
+            decideTaskProposalAsParentAsync(proposalId, approve)
+        }
+        return true
+    }
+
+    suspend fun cancelTaskProposalAsync(proposalId: String): Result<TaskCollaborationProposal> {
+        val current = _currentMember.value
+        val proposal = _taskProposals.value.find { it.id == proposalId }
+            ?: return Result.failure(IllegalArgumentException("ההצעה לא נמצאה"))
+        if (! proposal.status.isPending) {
+            return Result.failure(IllegalStateException("לא ניתן לבטל הצעה שכבר הסתיימה"))
+        }
+        if (!current.isParent && current.id != proposal.requesterChildId) {
+            return Result.failure(SecurityException("רק יוזם/ת ההצעה או הורה רשאים לבטל אותה"))
+        }
+
+        val nowMillis = System.currentTimeMillis()
+        val familyId = proposal.familyId.ifBlank { _activeFamilyId.value.ifBlank { "fam_israeli_8492" } }
+        val cancelled = proposal.copy(
+            status = TaskProposalStatus.CANCELLED,
+            updatedAtMillis = nowMillis
+        )
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                val familyRef = db.collection("families").document(familyId)
+                val proposalRef = familyRef.collection("task_proposals").document(proposalId)
+                db.runBatch { batch ->
+                    batch.update(proposalRef, mapOf("status" to TaskProposalStatus.CANCELLED.firestoreValue, "updatedAtMillis" to nowMillis))
+                    val primaryRef = familyRef.collection("tasks").document(proposal.primaryTaskId)
+                    batch.update(primaryRef, mapOf("pendingProposalId" to null, "updatedAt" to nowMillis))
+                    if (!proposal.offeredSwapTaskId.isNullOrBlank()) {
+                        val swapRef = familyRef.collection("tasks").document(proposal.offeredSwapTaskId)
+                        batch.update(swapRef, mapOf("pendingProposalId" to null, "updatedAt" to nowMillis))
+                    }
+                }.await()
+            } catch (e: Exception) {
+                return Result.failure(e)
+            }
+        }
+
+        _taskProposals.value = _taskProposals.value.map { if (it.id == proposalId) cancelled else it }
+        _tasks.value = _tasks.value.map { t ->
+            if (t.id == proposal.primaryTaskId || t.id == proposal.offeredSwapTaskId) {
+                t.copy(pendingProposalId = null, updatedAtMillis = nowMillis)
+            } else {
+                t
+            }
+        }
+        return Result.success(cancelled)
+    }
+
+    fun cancelTaskProposal(proposalId: String): Boolean {
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                cancelTaskProposalAsync(proposalId).isSuccess
+            }
+        }
+        repoScope.launch {
+            cancelTaskProposalAsync(proposalId)
+        }
+        return true
+    }
+
+    // =========================================================================
+    //  PART C: FLEXIBLE POINTS SPLITTING ON PARENT TASK APPROVAL
+    // =========================================================================
+
+    /**
+     * Approves a task completion as a PARENT and distributes its points flexibly between:
+     * - the performing child (`targetTask.assignedToMemberId`): [performerPoints]
+     * - the original task owner (`targetTask.originalAssignedToMemberId`, if transferred/swapped): [originalOwnerPoints]
+     * - optional extra parent helping bonus (`bonusPointsForPerformer`) that does not deduct from the original owner.
+     *
+     * Enforces:
+     * 1. Caller is PARENT.
+     * 2. `performerPoints >= 0`, `originalOwnerPoints >= 0`, `bonusPointsForPerformer >= 0`.
+     * 3. `performerPoints + originalOwnerPoints <= targetTask.points` (never exceeds base task points).
+     * 4. Strict idempotency (`pts_task_$taskId`) so a task can never award base points more than once.
+     */
+    suspend fun approveTaskCompletionWithSplitAsync(
+        taskId: String,
+        performerPoints: Int,
+        originalOwnerPoints: Int = 0,
+        bonusPointsForPerformer: Int = 0,
+        parentNote: String = ""
+    ): Result<FamilyTask> {
+        val caller = _currentMember.value
+        if (!caller.isParent) {
+            val errMsg = "רק הורה רשאי לאשר השלמת משימה ולחלק נקודות 🔒"
+            _pointsOperationError.value = errMsg
+            _taskOperationError.value = errMsg
+            return Result.failure(SecurityException(errMsg))
+        }
+
+        val targetTask = resolveTaskFromStateOrFirestore(taskId)
+        if (targetTask == null) {
+            _pointsOperationError.value = "המשימה לא נמצאה"
+            return Result.failure(IllegalArgumentException("המשימה לא נמצאה"))
+        }
+
+        if (performerPoints < 0 || originalOwnerPoints < 0 || bonusPointsForPerformer < 0) {
+            val errMsg = "חלוקת הנקודות חייבת להכיל ערכים אי-שליליים בלבד"
+            _pointsOperationError.value = errMsg
+            return Result.failure(IllegalArgumentException(errMsg))
+        }
+
+        if (performerPoints + originalOwnerPoints > targetTask.points) {
+            val errMsg = "סך הנקודות לחלוקה (${performerPoints + originalOwnerPoints}) עולה על נקודות המשימה (${targetTask.points})"
+            _pointsOperationError.value = errMsg
+            return Result.failure(IllegalArgumentException(errMsg))
+        }
+
+        val origOwnerId = targetTask.originalAssignedToMemberId?.takeIf { it.isNotBlank() }
+        if (originalOwnerPoints > 0 && origOwnerId.isNullOrBlank()) {
+            val errMsg = "לא ניתן להעניק נקודות לבעלים מקורי במשימה שלא הועברה"
+            _pointsOperationError.value = errMsg
+            return Result.failure(IllegalArgumentException(errMsg))
+        }
+
+        // If 100% goes to the performer and no originalOwnerPoints / bonusPoints are requested,
+        // and performerPoints == targetTask.points, we can still execute the unified split/approval transaction below
+        return pointsMutex.withLock {
+            val resolvedFamilyId = targetTask.familyId.ifBlank { _activeFamilyId.value.ifBlank { "fam_israeli_8492" } }
+            val nowMillis = System.currentTimeMillis()
+            val actorUid = currentUid().ifBlank { caller.id }
+            val actorName = caller.name.ifBlank { "הורה" }
+            val taskOpId = "pts_task_$taskId"
+            val origOpId = "pts_task_${taskId}_orig"
+            val bonusOpId = "pts_task_${taskId}_bonus"
+
+            val wasAlreadyApprovedLocally = (targetTask.isCompleted && targetTask.approvedByParent) ||
+                processedPointsOperationIds.contains(taskOpId) ||
+                _pointsHistory.value.any {
+                    it.operationId == taskOpId ||
+                        it.id == taskOpId ||
+                        ((it.actionType == PointsActionType.TASK_EARNED || it.actionType == PointsActionType.TASK_SPLIT_EARNED) && it.taskId == taskId)
+                }
+
+            val completedBy = targetTask.completedByMemberId ?: targetTask.assignedToMemberId.ifBlank { actorUid }
+            val approvedTask = targetTask.copy(
+                familyId = resolvedFamilyId,
+                isCompleted = true,
+                approvedByParent = true,
+                completedAtMillis = targetTask.completedAtMillis ?: nowMillis,
+                completedByMemberId = completedBy,
+                updatedAtMillis = nowMillis
+            )
+
+            if (wasAlreadyApprovedLocally) {
+                // Reject duplicate split-approval without awarding points a second time
+                _tasks.value = _tasks.value.map { if (it.id == taskId) approvedTask else it }
+                _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVED_APPROVED)
+                val dupMsg = "המשימה כבר אושרה והנקודות עבורה כבר חולקו"
+                _pointsOperationError.value = dupMsg
+                return@withLock Result.failure(IllegalStateException(dupMsg))
+            }
+
+            val performerId = approvedTask.assignedToMemberId
+            val performerMember = _members.value.find { it.id == performerId }
+            val performerName = performerMember?.name.orEmpty()
+            val origMember = origOwnerId?.let { id -> _members.value.find { it.id == id } }
+            val origName = approvedTask.originalAssignedMemberName?.takeIf { it.isNotBlank() }
+                ?: origMember?.name.orEmpty()
+
+            val isSplit = originalOwnerPoints > 0 || performerPoints < approvedTask.points
+            val actionForTask = if (isSplit) PointsActionType.TASK_SPLIT_EARNED else PointsActionType.TASK_EARNED
+
+            val createdEntries = mutableListOf<PointsHistoryEntry>()
+            val updatedBalances = mutableMapOf<String, Int>()
+
+            if (performerId.isNotBlank() && performerPoints > 0) {
+                val prevBal = (performerMember?.earnedPoints ?: 0).coerceAtLeast(0)
+                val newBal = prevBal + performerPoints
+                updatedBalances[performerId] = newBal
+                val reason = if (!origName.isNullOrBlank() && origOwnerId != performerId) {
+                    if (isSplit) {
+                        "חלוקת נקודות ממשימה: ${approvedTask.title} ($performerPoints/${approvedTask.points} נק׳ למבצע/ת במקום $origName)"
+                    } else {
+                        "השלמת משימה: ${approvedTask.title} (בוצע במקום $origName)"
+                    }
+                } else {
+                    "השלמת משימה: ${approvedTask.title}"
+                }
+                createdEntries.add(
+                    PointsHistoryEntry(
+                        id = taskOpId,
+                        operationId = taskOpId,
+                        familyId = resolvedFamilyId,
+                        memberId = performerId,
+                        memberName = performerName,
+                        actionType = actionForTask,
+                        pointsDelta = performerPoints,
+                        previousBalance = prevBal,
+                        newBalance = newBal,
+                        reason = reason,
+                        performedByUid = actorUid,
+                        performedByName = actorName,
+                        timestampMillis = nowMillis,
+                        taskId = approvedTask.id,
+                        performedTaskByMemberId = performerId,
+                        performedTaskByMemberName = performerName,
+                        relatedMemberId = origOwnerId,
+                        relatedMemberName = origName.ifBlank { null },
+                        proposalId = approvedTask.transferProposalId
+                    )
+                )
+            } else {
+                // Record the base taskOpId even if performerPoints == 0 so the task can never be rewarded again
+                processedPointsOperationIds.add(taskOpId)
+            }
+
+            if (!origOwnerId.isNullOrBlank() && originalOwnerPoints > 0) {
+                val baseBal = updatedBalances[origOwnerId] ?: (origMember?.earnedPoints ?: 0).coerceAtLeast(0)
+                val newBal = baseBal + originalOwnerPoints
+                updatedBalances[origOwnerId] = newBal
+                val reason = "חלוקת נקודות ממשימה: ${approvedTask.title} ($originalOwnerPoints/${approvedTask.points} נק׳ לבעלים המקורי, בוצע ע״י $performerName)"
+                createdEntries.add(
+                    PointsHistoryEntry(
+                        id = origOpId,
+                        operationId = origOpId,
+                        familyId = resolvedFamilyId,
+                        memberId = origOwnerId,
+                        memberName = origName,
+                        actionType = PointsActionType.TASK_SPLIT_EARNED,
+                        pointsDelta = originalOwnerPoints,
+                        previousBalance = baseBal,
+                        newBalance = newBal,
+                        reason = reason,
+                        performedByUid = actorUid,
+                        performedByName = actorName,
+                        timestampMillis = nowMillis + 1,
+                        taskId = approvedTask.id,
+                        performedTaskByMemberId = performerId,
+                        performedTaskByMemberName = performerName,
+                        relatedMemberId = performerId,
+                        relatedMemberName = performerName.ifBlank { null },
+                        proposalId = approvedTask.transferProposalId
+                    )
+                )
+            }
+
+            if (performerId.isNotBlank() && bonusPointsForPerformer > 0) {
+                val baseBal = updatedBalances[performerId] ?: (performerMember?.earnedPoints ?: 0).coerceAtLeast(0)
+                val newBal = baseBal + bonusPointsForPerformer
+                updatedBalances[performerId] = newBal
+                val reason = "בונוס מיוחד מהורה על עזרה במשימה: ${approvedTask.title}"
+                createdEntries.add(
+                    PointsHistoryEntry(
+                        id = bonusOpId,
+                        operationId = bonusOpId,
+                        familyId = resolvedFamilyId,
+                        memberId = performerId,
+                        memberName = performerName,
+                        actionType = PointsActionType.HELPING_BONUS,
+                        pointsDelta = bonusPointsForPerformer,
+                        previousBalance = baseBal,
+                        newBalance = newBal,
+                        reason = reason,
+                        performedByUid = actorUid,
+                        performedByName = actorName,
+                        timestampMillis = nowMillis + 2,
+                        taskId = approvedTask.id,
+                        performedTaskByMemberId = performerId,
+                        performedTaskByMemberName = performerName,
+                        relatedMemberId = origOwnerId,
+                        relatedMemberName = origName.ifBlank { null },
+                        proposalId = approvedTask.transferProposalId
+                    )
+                )
+            }
+
+            val db = firestoreProvider()
+            val authUser = authProvider()?.currentUser
+            if (db != null && authUser != null) {
+                try {
+                    val familyRef = db.collection("families").document(resolvedFamilyId)
+                    val taskDocRef = familyRef.collection("tasks").document(approvedTask.id)
+                    db.runBatch { batch ->
+                        val fullMap = buildFullTaskFirestoreMap(approvedTask, resolvedFamilyId, nowMillis).toMutableMap()
+                        fullMap["rewardedOperationId"] = taskOpId
+                        batch.set(taskDocRef, fullMap, SetOptions.merge())
+
+                        val lastOpIdByMember = createdEntries.associate { it.memberId to it.id }
+                        updatedBalances.forEach { (mId, bal) ->
+                            val mRef = familyRef.collection("members").document(mId)
+                            val memberOpId = lastOpIdByMember[mId] ?: taskOpId
+                            batch.set(
+                                mRef,
+                                mapOf(
+                                    "earnedPoints" to bal,
+                                    "lastPointsOperationId" to memberOpId,
+                                    "updatedAt" to nowMillis
+                                ),
+                                SetOptions.merge()
+                            )
+                        }
+
+                        createdEntries.forEach { entry ->
+                            val hRef = familyRef.collection("points_history").document(entry.id)
+                            val hMap = mutableMapOf<String, Any?>(
+                                "id" to entry.id,
+                                "operationId" to entry.operationId,
+                                "familyId" to entry.familyId,
+                                "memberId" to entry.memberId,
+                                "memberName" to entry.memberName,
+                                "actionType" to entry.actionType.firestoreValue,
+                                "pointsDelta" to entry.pointsDelta,
+                                "previousBalance" to entry.previousBalance,
+                                "newBalance" to entry.newBalance,
+                                "reason" to entry.reason,
+                                "performedByUid" to entry.performedByUid,
+                                "performedByName" to entry.performedByName,
+                                "timestampMillis" to entry.timestampMillis,
+                                "taskId" to entry.taskId,
+                                "performedTaskByMemberId" to entry.performedTaskByMemberId,
+                                "performedTaskByMemberName" to entry.performedTaskByMemberName,
+                                "serverTimestamp" to FieldValue.serverTimestamp()
+                            )
+                            if (!entry.relatedMemberId.isNullOrBlank()) hMap["relatedMemberId"] = entry.relatedMemberId
+                            if (!entry.relatedMemberName.isNullOrBlank()) hMap["relatedMemberName"] = entry.relatedMemberName
+                            if (!entry.proposalId.isNullOrBlank()) hMap["proposalId"] = entry.proposalId
+                            batch.set(hRef, hMap)
+                        }
+                    }.await()
+                } catch (e: Exception) {
+                    val msg = e.localizedMessage ?: "שגיאה באישור המשימה וחלוקת הנקודות"
+                    _pointsOperationError.value = msg
+                    return@withLock Result.failure(e)
+                }
+            }
+
+            processedPointsOperationIds.add(taskOpId)
+            _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVED_APPROVED)
+            _tasks.value = _tasks.value.map { if (it.id == taskId) approvedTask else it }
+            resyncTaskRemindersForActiveMember()
+
+            if (updatedBalances.isNotEmpty()) {
+                _members.value = _members.value.map { m ->
+                    val newBal = updatedBalances[m.id]
+                    if (newBal != null) {
+                        val updated = m.copy(earnedPoints = newBal)
+                        if (_currentMember.value.id == m.id) {
+                            _currentMember.value = updated
+                        }
+                        persistMemberPointsBalanceLocally(resolvedFamilyId, m.id, newBal)
+                        updated
+                    } else {
+                        m
+                    }
+                }
+            }
+
+            createdEntries.forEach { entry ->
+                appendPointsHistoryEntryLocally(resolvedFamilyId, entry)
+            }
+
+            spawnNextRecurringOccurrenceIfNeeded(approvedTask)
+            emitTaskCompletionNotificationIfNeeded(approvedTask, isParentApprovalEvent = true)
+            Result.success(approvedTask)
+        }
+    }
+
+    fun approveTaskCompletionWithSplit(
+        taskId: String,
+        performerPoints: Int,
+        originalOwnerPoints: Int = 0,
+        bonusPointsForPerformer: Int = 0
+    ): Boolean {
+        if (!_currentMember.value.isParent) {
+            _pointsOperationError.value = "רק הורה רשאי לאשר השלמת משימה ולחלק נקודות 🔒"
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                approveTaskCompletionWithSplitAsync(
+                    taskId = taskId,
+                    performerPoints = performerPoints,
+                    originalOwnerPoints = originalOwnerPoints,
+                    bonusPointsForPerformer = bonusPointsForPerformer
+                ).isSuccess
+            }
+        }
+        repoScope.launch {
+            approveTaskCompletionWithSplitAsync(
+                taskId = taskId,
+                performerPoints = performerPoints,
+                originalOwnerPoints = originalOwnerPoints,
+                bonusPointsForPerformer = bonusPointsForPerformer
+            )
+        }
+        return true
+    }
+
+    // =========================================================================
+    //  PART D: PARENT POINTS TRANSFER BETWEEN CHILDREN & HELPING BONUS
+    // =========================================================================
+
+    /**
+     * Atomically transfers [amount] points from [fromMemberId] to [toMemberId] (PARENT ONLY).
+     * Validates:
+     * 1. Caller is PARENT.
+     * 2. `fromMemberId != toMemberId` (blocks self-transfer).
+     * 3. `amount > 0` (blocks zero or negative transfer).
+     * 4. `reason.isNotBlank()`.
+     * 5. `fromMember.earnedPoints >= amount` (blocks transfer exceeding sender's balance).
+     */
+    suspend fun transferPointsBetweenMembersAsync(
+        fromMemberId: String,
+        toMemberId: String,
+        amount: Int,
+        reason: String,
+        operationId: String = "pts_tx_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+    ): Result<Pair<PointsHistoryEntry, PointsHistoryEntry>> = pointsMutex.withLock {
+        val caller = _currentMember.value
+        if (!caller.isParent) {
+            val msg = "רק הורה רשאי להעביר נקודות בין ילדים 🔒"
+            _pointsOperationError.value = msg
+            return@withLock Result.failure(SecurityException(msg))
+        }
+        if (fromMemberId.isBlank() || toMemberId.isBlank() || fromMemberId == toMemberId) {
+            val msg = "יש לבחור שני בני משפחה שונים להעברת נקודות"
+            _pointsOperationError.value = msg
+            return@withLock Result.failure(IllegalArgumentException(msg))
+        }
+        if (amount <= 0) {
+            val msg = "כמות הנקודות להעברה חייבת להיות חיובית (גדולה מ-0)"
+            _pointsOperationError.value = msg
+            return@withLock Result.failure(IllegalArgumentException(msg))
+        }
+        val cleanReason = reason.trim()
+        if (cleanReason.isBlank()) {
+            val msg = "נא להזין סיבה להעברת הנקודות"
+            _pointsOperationError.value = msg
+            return@withLock Result.failure(IllegalArgumentException(msg))
+        }
+
+        val sender = _members.value.find { it.id == fromMemberId }
+        if (sender == null) {
+            _pointsOperationError.value = "הילד/ה המעביר/ה לא נמצא/ה"
+            return@withLock Result.failure(IllegalArgumentException("הילד/ה המעביר/ה לא נמצא/ה"))
+        }
+        val receiver = _members.value.find { it.id == toMemberId }
+        if (receiver == null) {
+            _pointsOperationError.value = "הילד/ה המקבל/ת לא נמצא/ה"
+            return@withLock Result.failure(IllegalArgumentException("הילד/ה המקבל/ת לא נמצא/ה"))
+        }
+
+        val senderPrev = sender.earnedPoints.coerceAtLeast(0)
+        if (senderPrev < amount) {
+            val msg = "לא ניתן להעביר $amount נקודות מ-${sender.name} — היתרה הקיימת היא $senderPrev נקודות בלבד"
+            _pointsOperationError.value = msg
+            return@withLock Result.failure(IllegalArgumentException(msg))
+        }
+
+        val receiverPrev = receiver.earnedPoints.coerceAtLeast(0)
+        val senderNew = senderPrev - amount
+        val receiverNew = receiverPrev + amount
+        val nowMillis = System.currentTimeMillis()
+        val familyId = _activeFamilyId.value.ifBlank { "fam_israeli_8492" }
+        val actorUid = currentUid().ifBlank { caller.id }
+        val actorName = caller.name.ifBlank { "הורה" }
+
+        val outOpId = "${operationId}_out"
+        val inOpId = "${operationId}_in"
+
+        val outEntry = PointsHistoryEntry(
+            id = outOpId,
+            operationId = outOpId,
+            familyId = familyId,
+            memberId = sender.id,
+            memberName = sender.name,
+            actionType = PointsActionType.TRANSFER_OUT,
+            pointsDelta = -amount,
+            previousBalance = senderPrev,
+            newBalance = senderNew,
+            reason = "העברה אל ${receiver.name}: $cleanReason",
+            performedByUid = actorUid,
+            performedByName = actorName,
+            timestampMillis = nowMillis,
+            relatedMemberId = receiver.id,
+            relatedMemberName = receiver.name
+        )
+
+        val inEntry = PointsHistoryEntry(
+            id = inOpId,
+            operationId = inOpId,
+            familyId = familyId,
+            memberId = receiver.id,
+            memberName = receiver.name,
+            actionType = PointsActionType.TRANSFER_IN,
+            pointsDelta = amount,
+            previousBalance = receiverPrev,
+            newBalance = receiverNew,
+            reason = "קבלה מ-${sender.name}: $cleanReason",
+            performedByUid = actorUid,
+            performedByName = actorName,
+            timestampMillis = nowMillis + 1,
+            relatedMemberId = sender.id,
+            relatedMemberName = sender.name
+        )
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                val familyRef = db.collection("families").document(familyId)
+                val senderRef = familyRef.collection("members").document(sender.id)
+                val receiverRef = familyRef.collection("members").document(receiver.id)
+                val outHistRef = familyRef.collection("points_history").document(outOpId)
+                val inHistRef = familyRef.collection("points_history").document(inOpId)
+
+                db.runTransaction { tx ->
+                    val senderSnap = tx.get(senderRef)
+                    val receiverSnap = tx.get(receiverRef)
+                    val cloudSenderPrev = if (senderSnap.exists()) {
+                        (senderSnap.getLong("earnedPoints") ?: senderPrev.toLong()).toInt().coerceAtLeast(0)
+                    } else {
+                        senderPrev
+                    }
+                    if (cloudSenderPrev < amount) {
+                        throw IllegalArgumentException("לא ניתן להעביר $amount נקודות מ-${sender.name} — היתרה בענן היא $cloudSenderPrev נקודות בלבד")
+                    }
+                    val cloudReceiverPrev = if (receiverSnap.exists()) {
+                        (receiverSnap.getLong("earnedPoints") ?: receiverPrev.toLong()).toInt().coerceAtLeast(0)
+                    } else {
+                        receiverPrev
+                    }
+                    val cloudSenderNew = cloudSenderPrev - amount
+                    val cloudReceiverNew = cloudReceiverPrev + amount
+
+                    tx.set(
+                        senderRef,
+                        mapOf(
+                            "earnedPoints" to cloudSenderNew,
+                            "lastPointsOperationId" to outOpId,
+                            "updatedAt" to nowMillis
+                        ),
+                        SetOptions.merge()
+                    )
+                    tx.set(
+                        receiverRef,
+                        mapOf(
+                            "earnedPoints" to cloudReceiverNew,
+                            "lastPointsOperationId" to inOpId,
+                            "updatedAt" to nowMillis
+                        ),
+                        SetOptions.merge()
+                    )
+                    tx.set(
+                        outHistRef,
+                        mapOf(
+                            "id" to outEntry.id,
+                            "operationId" to outEntry.operationId,
+                            "familyId" to familyId,
+                            "memberId" to sender.id,
+                            "memberName" to sender.name,
+                            "actionType" to PointsActionType.TRANSFER_OUT.firestoreValue,
+                            "pointsDelta" to -amount,
+                            "previousBalance" to cloudSenderPrev,
+                            "newBalance" to cloudSenderNew,
+                            "reason" to outEntry.reason,
+                            "performedByUid" to actorUid,
+                            "performedByName" to actorName,
+                            "timestampMillis" to outEntry.timestampMillis,
+                            "relatedMemberId" to receiver.id,
+                            "relatedMemberName" to receiver.name,
+                            "serverTimestamp" to FieldValue.serverTimestamp()
+                        )
+                    )
+                    tx.set(
+                        inHistRef,
+                        mapOf(
+                            "id" to inEntry.id,
+                            "operationId" to inEntry.operationId,
+                            "familyId" to familyId,
+                            "memberId" to receiver.id,
+                            "memberName" to receiver.name,
+                            "actionType" to PointsActionType.TRANSFER_IN.firestoreValue,
+                            "pointsDelta" to amount,
+                            "previousBalance" to cloudReceiverPrev,
+                            "newBalance" to cloudReceiverNew,
+                            "reason" to inEntry.reason,
+                            "performedByUid" to actorUid,
+                            "performedByName" to actorName,
+                            "timestampMillis" to inEntry.timestampMillis,
+                            "relatedMemberId" to sender.id,
+                            "relatedMemberName" to sender.name,
+                            "serverTimestamp" to FieldValue.serverTimestamp()
+                        )
+                    )
+                }.await()
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "שגיאה בהעברת הנקודות בין הילדים"
+                _pointsOperationError.value = msg
+                return@withLock Result.failure(e)
+            }
+        }
+
+        _pointsOperationError.value = null
+        _members.value = _members.value.map { m ->
+            when (m.id) {
+                sender.id -> {
+                    val updated = m.copy(earnedPoints = senderNew)
+                    if (_currentMember.value.id == m.id) _currentMember.value = updated
+                    updated
+                }
+                receiver.id -> {
+                    val updated = m.copy(earnedPoints = receiverNew)
+                    if (_currentMember.value.id == m.id) _currentMember.value = updated
+                    updated
+                }
+                else -> m
+            }
+        }
+        persistMemberPointsBalanceLocally(familyId, sender.id, senderNew)
+        persistMemberPointsBalanceLocally(familyId, receiver.id, receiverNew)
+        appendPointsHistoryEntryLocally(familyId, outEntry)
+        appendPointsHistoryEntryLocally(familyId, inEntry)
+
+        pushAlert(
+            title = "🔄 העברת נקודות בוצעה",
+            message = "$actorName העביר/ה $amount נקודות מ-${sender.name} אל ${receiver.name} ($cleanReason)",
+            targetName = receiver.name,
+            targetEmoji = receiver.avatarEmoji,
+            reason = AlertReason.TASK_COMPLETED
+        )
+        return@withLock Result.success(outEntry to inEntry)
+    }
+
+    fun transferPointsBetweenMembers(
+        fromMemberId: String,
+        toMemberId: String,
+        amount: Int,
+        reason: String
+    ): Boolean {
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                transferPointsBetweenMembersAsync(fromMemberId, toMemberId, amount, reason).isSuccess
+            }
+        }
+        repoScope.launch {
+            transferPointsBetweenMembersAsync(fromMemberId, toMemberId, amount, reason)
+        }
+        return true
+    }
+
+    /**
+     * Grants a special parent helping bonus ([PointsActionType.HELPING_BONUS]) to [memberId]
+     * without deducting points from any other child.
+     */
+    suspend fun grantHelpingBonusPointsAsync(
+        memberId: String,
+        amount: Int,
+        reason: String,
+        relatedMemberId: String? = null,
+        taskId: String? = null
+    ): Result<PointsHistoryEntry> {
+        val cleanReason = reason.trim().ifBlank { "בונוס מיוחד על עזרה ושיתוף פעולה" }
+        val result = adjustMemberPointsAsync(
+            memberId = memberId,
+            actionType = PointsActionType.HELPING_BONUS,
+            amount = amount,
+            reason = cleanReason,
+            taskId = taskId
+        )
+        if (result.isSuccess && !relatedMemberId.isNullOrBlank()) {
+            val entry = result.getOrNull()!!
+            val relName = _members.value.find { it.id == relatedMemberId }?.name
+            val enriched = entry.copy(
+                relatedMemberId = relatedMemberId,
+                relatedMemberName = relName
+            )
+            val familyId = _activeFamilyId.value.ifBlank { "fam_israeli_8492" }
+            appendPointsHistoryEntryLocally(familyId, enriched)
+            return Result.success(enriched)
+        }
+        return result
+    }
+
+    fun grantHelpingBonusPoints(
+        memberId: String,
+        amount: Int,
+        reason: String,
+        relatedMemberId: String? = null,
+        taskId: String? = null
+    ): Boolean {
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                grantHelpingBonusPointsAsync(memberId, amount, reason, relatedMemberId, taskId).isSuccess
+            }
+        }
+        repoScope.launch {
+            grantHelpingBonusPointsAsync(memberId, amount, reason, relatedMemberId, taskId)
+        }
+        return true
+    }
+
+    // =========================================================================
+    //  PART E: FULL REWARD CATALOG MANAGEMENT (PARENT ONLY)
+    // =========================================================================
+
+    private fun buildRewardFirestoreMap(reward: RewardItem, familyId: String): Map<String, Any?> {
+        return mapOf(
+            "id" to reward.id,
+            "familyId" to familyId,
+            "title" to reward.title,
+            "pointsCost" to reward.pointsCost,
+            "iconEmoji" to reward.iconEmoji,
+            "description" to reward.description,
+            "isActive" to reward.isActive,
+            "isDeleted" to reward.isDeleted,
+            "createdAtMillis" to reward.createdAtMillis,
+            "updatedAtMillis" to reward.updatedAtMillis
+        )
+    }
+
+    suspend fun createRewardAsync(
+        title: String,
+        pointsCost: Int,
+        iconEmoji: String = "🎁",
+        description: String = "",
+        isActive: Boolean = true
+    ): Result<RewardItem> {
+        val caller = _currentMember.value
+        if (!caller.isParent) {
+            val msg = "רק הורה רשאי להוסיף פרסים לקטלוג 🔒"
+            _pointsOperationError.value = msg
+            return Result.failure(SecurityException(msg))
+        }
+        val cleanTitle = title.trim()
+        if (cleanTitle.isBlank()) {
+            val msg = "נא להזין שם לפרס"
+            _pointsOperationError.value = msg
+            return Result.failure(IllegalArgumentException(msg))
+        }
+        if (pointsCost <= 0) {
+            val msg = "עלות הפרס בנקודות חייבת להיות גדולה מ-0"
+            _pointsOperationError.value = msg
+            return Result.failure(IllegalArgumentException(msg))
+        }
+
+        val nowMillis = System.currentTimeMillis()
+        val familyId = _activeFamilyId.value.ifBlank { "fam_israeli_8492" }
+        val rewardId = "rew_${UUID.randomUUID().toString().replace("-", "").take(10)}"
+        val reward = RewardItem(
+            id = rewardId,
+            familyId = familyId,
+            title = cleanTitle,
+            pointsCost = pointsCost,
+            iconEmoji = iconEmoji.trim().ifBlank { "🎁" },
+            description = description.trim(),
+            isActive = isActive,
+            isDeleted = false,
+            createdAtMillis = nowMillis,
+            updatedAtMillis = nowMillis
+        )
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                db.collection("families")
+                    .document(familyId)
+                    .collection("rewards")
+                    .document(rewardId)
+                    .set(buildRewardFirestoreMap(reward, familyId))
+                    .await()
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "שגיאה בשמירת הפרס החדש"
+                _pointsOperationError.value = msg
+                return Result.failure(e)
+            }
+        }
+
+        _pointsOperationError.value = null
+        _rewards.value = (_rewards.value.filterNot { it.id == rewardId } + reward)
+            .sortedBy { it.pointsCost }
+        return Result.success(reward)
+    }
+
+    fun createReward(
+        title: String,
+        pointsCost: Int,
+        iconEmoji: String = "🎁",
+        description: String = "",
+        isActive: Boolean = true
+    ): Boolean {
+        if (!_currentMember.value.isParent) {
+            _pointsOperationError.value = "רק הורה רשאי להוסיף פרסים לקטלוג 🔒"
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                createRewardAsync(title, pointsCost, iconEmoji, description, isActive).isSuccess
+            }
+        }
+        repoScope.launch {
+            createRewardAsync(title, pointsCost, iconEmoji, description, isActive)
+        }
+        return true
+    }
+
+    suspend fun updateRewardAsync(
+        rewardId: String,
+        title: String,
+        pointsCost: Int,
+        iconEmoji: String,
+        description: String,
+        isActive: Boolean = true
+    ): Result<RewardItem> {
+        val caller = _currentMember.value
+        if (!caller.isParent) {
+            val msg = "רק הורה רשאי לערוך פרסים בקטלוג 🔒"
+            _pointsOperationError.value = msg
+            return Result.failure(SecurityException(msg))
+        }
+        val existing = _rewards.value.find { it.id == rewardId && !it.isDeleted }
+        if (existing == null) {
+            _pointsOperationError.value = "הפרס המבוקש לא נמצא בקטלוג"
+            return Result.failure(IllegalArgumentException("הפרס המבוקש לא נמצא בקטלוג"))
+        }
+        val cleanTitle = title.trim()
+        if (cleanTitle.isBlank()) {
+            val msg = "נא להזין שם לפרס"
+            _pointsOperationError.value = msg
+            return Result.failure(IllegalArgumentException(msg))
+        }
+        if (pointsCost <= 0) {
+            val msg = "עלות הפרס בנקודות חייבת להיות גדולה מ-0"
+            _pointsOperationError.value = msg
+            return Result.failure(IllegalArgumentException(msg))
+        }
+
+        val nowMillis = System.currentTimeMillis()
+        val familyId = existing.familyId.ifBlank { _activeFamilyId.value.ifBlank { "fam_israeli_8492" } }
+        val updated = existing.copy(
+            familyId = familyId,
+            title = cleanTitle,
+            pointsCost = pointsCost,
+            iconEmoji = iconEmoji.trim().ifBlank { "🎁" },
+            description = description.trim(),
+            isActive = isActive,
+            updatedAtMillis = nowMillis
+        )
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                db.collection("families")
+                    .document(familyId)
+                    .collection("rewards")
+                    .document(rewardId)
+                    .set(buildRewardFirestoreMap(updated, familyId), SetOptions.merge())
+                    .await()
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "שגיאה בעדכון הפרס"
+                _pointsOperationError.value = msg
+                return Result.failure(e)
+            }
+        }
+
+        _pointsOperationError.value = null
+        _rewards.value = _rewards.value.map { if (it.id == rewardId) updated else it }
+            .sortedBy { it.pointsCost }
+        return Result.success(updated)
+    }
+
+    fun updateReward(
+        rewardId: String,
+        title: String,
+        pointsCost: Int,
+        iconEmoji: String,
+        description: String,
+        isActive: Boolean = true
+    ): Boolean {
+        if (!_currentMember.value.isParent) {
+            _pointsOperationError.value = "רק הורה רשאי לערוך פרסים בקטלוג 🔒"
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                updateRewardAsync(rewardId, title, pointsCost, iconEmoji, description, isActive).isSuccess
+            }
+        }
+        repoScope.launch {
+            updateRewardAsync(rewardId, title, pointsCost, iconEmoji, description, isActive)
+        }
+        return true
+    }
+
+    suspend fun setRewardActiveStateAsync(rewardId: String, isActive: Boolean): Result<RewardItem> {
+        val existing = _rewards.value.find { it.id == rewardId && !it.isDeleted }
+            ?: return Result.failure(IllegalArgumentException("הפרס לא נמצא"))
+        return updateRewardAsync(
+            rewardId = existing.id,
+            title = existing.title,
+            pointsCost = existing.pointsCost,
+            iconEmoji = existing.iconEmoji,
+            description = existing.description,
+            isActive = isActive
+        )
+    }
+
+    fun setRewardActiveState(rewardId: String, isActive: Boolean): Boolean {
+        if (!_currentMember.value.isParent) {
+            _pointsOperationError.value = "רק הורה רשאי להפעיל או להשבית פרסים בקטלוג 🔒"
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                setRewardActiveStateAsync(rewardId, isActive).isSuccess
+            }
+        }
+        repoScope.launch {
+            setRewardActiveStateAsync(rewardId, isActive)
+        }
+        return true
+    }
+
+    /**
+     * Soft-deletes a reward from the active catalog without corrupting or deleting historical
+     * [RewardRedemptionRequest] or [PointsHistoryEntry] records.
+     */
+    suspend fun deleteRewardFromCatalogAsync(rewardId: String): Result<Boolean> {
+        val caller = _currentMember.value
+        if (!caller.isParent) {
+            val msg = "רק הורה רשאי למחוק פרסים מהקטלוג 🔒"
+            _pointsOperationError.value = msg
+            return Result.failure(SecurityException(msg))
+        }
+        val existing = _rewards.value.find { it.id == rewardId }
+            ?: return Result.failure(IllegalArgumentException("הפרס לא נמצא בקטלוג"))
+
+        val nowMillis = System.currentTimeMillis()
+        val familyId = existing.familyId.ifBlank { _activeFamilyId.value.ifBlank { "fam_israeli_8492" } }
+        val softDeleted = existing.copy(isActive = false, isDeleted = true, updatedAtMillis = nowMillis)
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                db.collection("families")
+                    .document(familyId)
+                    .collection("rewards")
+                    .document(rewardId)
+                    .set(buildRewardFirestoreMap(softDeleted, familyId), SetOptions.merge())
+                    .await()
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "שגיאה במחיקת הפרס מהקטלוג"
+                _pointsOperationError.value = msg
+                return Result.failure(e)
+            }
+        }
+
+        _pointsOperationError.value = null
+        _rewards.value = _rewards.value.map { if (it.id == rewardId) softDeleted else it }
+        return Result.success(true)
+    }
+
+    fun deleteRewardFromCatalog(rewardId: String): Boolean {
+        if (!_currentMember.value.isParent) {
+            _pointsOperationError.value = "רק הורה רשאי למחוק פרסים מהקטלוג 🔒"
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                deleteRewardFromCatalogAsync(rewardId).isSuccess
+            }
+        }
+        repoScope.launch {
+            deleteRewardFromCatalogAsync(rewardId)
+        }
+        return true
+    }
+
+    // =========================================================================
+    //  PART F: REWARD REDEMPTION REQUESTS & PARENT APPROVAL
+    // =========================================================================
+
+    private fun parseRewardRedemptionDocument(
+        docId: String,
+        data: Map<String, Any?>,
+        fallbackFamilyId: String
+    ): RewardRedemptionRequest? {
+        val rewardId = (data["rewardId"] as? String)?.trim().orEmpty()
+        val childUid = (data["childUid"] as? String)?.trim().orEmpty()
+        if (rewardId.isBlank() || childUid.isBlank()) return null
+
+        val statusRaw = (data["status"] as? String) ?: RedemptionStatus.PENDING_PARENT_APPROVAL.firestoreValue
+        val pointsCost = (data["pointsCost"] as? Number)?.toInt() ?: 0
+        val requestedAt = (data["requestedAtMillis"] as? Number)?.toLong() ?: System.currentTimeMillis()
+
+        return RewardRedemptionRequest(
+            id = docId,
+            operationId = (data["operationId"] as? String)?.takeIf { it.isNotBlank() } ?: docId,
+            familyId = (data["familyId"] as? String)?.takeIf { it.isNotBlank() } ?: fallbackFamilyId,
+            rewardId = rewardId,
+            rewardTitle = (data["rewardTitle"] as? String).orEmpty(),
+            rewardIconEmoji = (data["rewardIconEmoji"] as? String)?.takeIf { it.isNotBlank() } ?: "🎁",
+            pointsCost = pointsCost,
+            childUid = childUid,
+            childName = (data["childName"] as? String).orEmpty(),
+            status = RedemptionStatus.fromFirestoreValue(statusRaw),
+            requestedAtMillis = requestedAt,
+            decidedAtMillis = (data["decidedAtMillis"] as? Number)?.toLong(),
+            decidedByParentUid = (data["decidedByParentUid"] as? String)?.takeIf { it.isNotBlank() },
+            decidedByParentName = (data["decidedByParentName"] as? String)?.takeIf { it.isNotBlank() },
+            rejectionReason = (data["rejectionReason"] as? String)?.takeIf { it.isNotBlank() }
+        )
+    }
+
+    private fun buildRewardRedemptionFirestoreMap(req: RewardRedemptionRequest): Map<String, Any?> {
+        val map = mutableMapOf<String, Any?>(
+            "id" to req.id,
+            "operationId" to req.operationId,
+            "familyId" to req.familyId,
+            "rewardId" to req.rewardId,
+            "rewardTitle" to req.rewardTitle,
+            "rewardIconEmoji" to req.rewardIconEmoji,
+            "pointsCost" to req.pointsCost,
+            "childUid" to req.childUid,
+            "childName" to req.childName,
+            "status" to req.status.firestoreValue,
+            "requestedAtMillis" to req.requestedAtMillis
+        )
+        if (req.decidedAtMillis != null) map["decidedAtMillis"] = req.decidedAtMillis
+        if (!req.decidedByParentUid.isNullOrBlank()) map["decidedByParentUid"] = req.decidedByParentUid
+        if (!req.decidedByParentName.isNullOrBlank()) map["decidedByParentName"] = req.decidedByParentName
+        if (!req.rejectionReason.isNullOrBlank()) map["rejectionReason"] = req.rejectionReason
+        return map
+    }
+
+    /**
+     * Child requests to redeem an active reward from the catalog.
+     * - Validates that the reward is active (`isActive && !isDeleted`) and `child.earnedPoints >= reward.pointsCost`.
+     * - Creates a [RewardRedemptionRequest] in [RedemptionStatus.PENDING_PARENT_APPROVAL].
+     * - Does NOT deduct points before parent approval!
+     */
+    suspend fun requestRewardRedemptionAsync(
+        reward: RewardItem,
+        childMemberId: String = _currentMember.value.id
+    ): Result<RewardRedemptionRequest> {
+        if (_rewards.value.none { it.id == reward.id }) {
+            _rewards.value = _rewards.value + reward
+        }
+        return requestRewardRedemptionAsync(reward.id, childMemberId)
+    }
+
+    suspend fun requestRewardRedemptionAsync(
+        rewardId: String,
+        childMemberId: String = _currentMember.value.id
+    ): Result<RewardRedemptionRequest> {
+        val reward = _rewards.value.find { it.id == rewardId && !it.isDeleted && it.isActive }
+        if (reward == null) {
+            _pointsOperationError.value = "הפרס אינו זמין למימוש"
+            return Result.failure(IllegalArgumentException("הפרס אינו זמין למימוש"))
+        }
+
+        val child = _members.value.find { it.id == childMemberId } ?: _currentMember.value
+        if (child.earnedPoints < reward.pointsCost) {
+            val msg = "אין מספיק נקודות למימוש הפרס \"${reward.title}\" (נדרשות ${reward.pointsCost} נק׳, ברשותך ${child.earnedPoints} נק׳)"
+            _pointsOperationError.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
+
+        val nowMillis = System.currentTimeMillis()
+        val familyId = _activeFamilyId.value.ifBlank { "fam_israeli_8492" }
+        val redemptionId = "red_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+
+        val request = RewardRedemptionRequest(
+            id = redemptionId,
+            operationId = redemptionId,
+            familyId = familyId,
+            rewardId = reward.id,
+            rewardTitle = reward.title,
+            rewardIconEmoji = reward.iconEmoji,
+            pointsCost = reward.pointsCost,
+            childUid = child.id,
+            childName = child.name,
+            status = RedemptionStatus.PENDING_PARENT_APPROVAL,
+            requestedAtMillis = nowMillis
+        )
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                db.collection("families")
+                    .document(familyId)
+                    .collection("redemptions")
+                    .document(redemptionId)
+                    .set(buildRewardRedemptionFirestoreMap(request))
+                    .await()
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "שגיאה בשליחת בקשת מימוש הפרס"
+                _pointsOperationError.value = msg
+                return Result.failure(e)
+            }
+        }
+
+        _pointsOperationError.value = null
+        _rewardRedemptions.value = listOf(request) + _rewardRedemptions.value.filterNot { it.id == redemptionId }
+
+        pushAlert(
+            title = "🎁 בקשה חדשה למימוש פרס",
+            message = "${child.name} מבקש/ת לממש את הפרס \"${reward.title}\" (${reward.pointsCost} נק׳). ממתין לאישור הורה.",
+            targetName = "הורים",
+            targetEmoji = reward.iconEmoji,
+            reason = AlertReason.TASK_COMPLETED
+        )
+        return Result.success(request)
+    }
+
+    fun requestRewardRedemption(
+        rewardId: String,
+        childMemberId: String = _currentMember.value.id
+    ): Boolean {
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                requestRewardRedemptionAsync(rewardId, childMemberId).isSuccess
+            }
+        }
+        repoScope.launch {
+            requestRewardRedemptionAsync(rewardId, childMemberId)
+        }
+        return true
+    }
+
+    /**
+     * Parent approves or rejects a pending [RewardRedemptionRequest].
+     * - Under `pointsMutex.withLock`:
+     *   - If `approve == true`: verifies the child STILL has `earnedPoints >= request.pointsCost`
+     *     at the moment of approval (preventing two parallel requests from pushing the child into a negative balance),
+     *     deducts `pointsCost` from `earnedPoints`, increments `spentPoints`, records a [PointsHistoryEntry]
+     *     ([PointsActionType.REWARD_REDEEMED]), and marks the request [RedemptionStatus.APPROVED].
+     *   - If `approve == false`: marks the request [RedemptionStatus.REJECTED] without deducting any points.
+     */
+    suspend fun decideRewardRedemptionAsParentAsync(
+        redemptionId: String,
+        approve: Boolean,
+        rejectionReason: String = ""
+    ): Result<RewardRedemptionRequest> = pointsMutex.withLock {
+        val caller = _currentMember.value
+        if (!caller.isParent) {
+            val msg = "רק הורה רשאי לאשר או לדחות מימוש פרס 🔒"
+            _pointsOperationError.value = msg
+            return@withLock Result.failure(SecurityException(msg))
+        }
+
+        val request = _rewardRedemptions.value.find { it.id == redemptionId }
+        if (request == null) {
+            _pointsOperationError.value = "בקשת המימוש לא נמצאה"
+            return@withLock Result.failure(IllegalArgumentException("בקשת המימוש לא נמצאה"))
+        }
+
+        if (request.status != RedemptionStatus.PENDING_PARENT_APPROVAL) {
+            val msg = "בקשת מימוש זו כבר טופלה"
+            _pointsOperationError.value = msg
+            return@withLock Result.failure(IllegalStateException(msg))
+        }
+
+        val nowMillis = System.currentTimeMillis()
+        val familyId = request.familyId.ifBlank { _activeFamilyId.value.ifBlank { "fam_israeli_8492" } }
+        val actorUid = currentUid().ifBlank { caller.id }
+        val actorName = caller.name.ifBlank { "הורה" }
+
+        if (!approve) {
+            val rejected = request.copy(
+                status = RedemptionStatus.REJECTED,
+                decidedAtMillis = nowMillis,
+                decidedByParentUid = actorUid,
+                decidedByParentName = actorName,
+                rejectionReason = rejectionReason.trim().ifBlank { null }
+            )
+            val db = firestoreProvider()
+            val authUser = authProvider()?.currentUser
+            if (db != null && authUser != null) {
+                try {
+                    db.collection("families")
+                        .document(familyId)
+                        .collection("redemptions")
+                        .document(redemptionId)
+                        .set(buildRewardRedemptionFirestoreMap(rejected), SetOptions.merge())
+                        .await()
+                } catch (e: Exception) {
+                    val msg = e.localizedMessage ?: "שגיאה בדחיית בקשת המימוש"
+                    _pointsOperationError.value = msg
+                    return@withLock Result.failure(e)
+                }
+            }
+            _pointsOperationError.value = null
+            _rewardRedemptions.value = _rewardRedemptions.value.map { if (it.id == redemptionId) rejected else it }
+            pushAlert(
+                title = "בקשת מימוש הפרס נדחתה",
+                message = "$actorName דחה/תה את הבקשה למימוש הפרס \"${request.rewardTitle}\". הנקודות לא הופחתו.",
+                targetName = request.childName,
+                targetEmoji = "ℹ️",
+                reason = AlertReason.TASK_REMINDER
+            )
+            return@withLock Result.success(rejected)
+        }
+
+        // Parent approval path: re-verify child balance atomically so parallel redemptions can never go negative
+        val child = _members.value.find { it.id == request.childUid }
+        if (child == null) {
+            _pointsOperationError.value = "חשבון הילד/ה לא נמצא"
+            return@withLock Result.failure(IllegalStateException("חשבון הילד/ה לא נמצא"))
+        }
+
+        val prevBal = child.earnedPoints.coerceAtLeast(0)
+        if (prevBal < request.pointsCost) {
+            val msg = "לא ניתן לאשר את מימוש הפרס \"${request.rewardTitle}\" (${request.pointsCost} נק׳) — היתרה הנוכחית של ${child.name} היא $prevBal נק׳ בלבד"
+            _pointsOperationError.value = msg
+            return@withLock Result.failure(IllegalStateException(msg))
+        }
+
+        val newBal = prevBal - request.pointsCost
+        val newSpent = child.spentPoints + request.pointsCost
+        val histOpId = "pts_red_$redemptionId"
+        val approvedRequest = request.copy(
+            status = RedemptionStatus.APPROVED,
+            decidedAtMillis = nowMillis,
+            decidedByParentUid = actorUid,
+            decidedByParentName = actorName
+        )
+        val historyEntry = PointsHistoryEntry(
+            id = histOpId,
+            operationId = histOpId,
+            familyId = familyId,
+            memberId = child.id,
+            memberName = child.name,
+            actionType = PointsActionType.REWARD_REDEEMED,
+            pointsDelta = -request.pointsCost,
+            previousBalance = prevBal,
+            newBalance = newBal,
+            reason = "מימוש פרס באישור הורה: ${request.rewardTitle}",
+            performedByUid = actorUid,
+            performedByName = actorName,
+            timestampMillis = nowMillis,
+            rewardId = request.rewardId,
+            redemptionId = request.id
+        )
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                val familyRef = db.collection("families").document(familyId)
+                val childRef = familyRef.collection("members").document(child.id)
+                val redRef = familyRef.collection("redemptions").document(redemptionId)
+                val histRef = familyRef.collection("points_history").document(histOpId)
+
+                db.runTransaction { tx ->
+                    val childSnap = tx.get(childRef)
+                    val redSnap = tx.get(redRef)
+                    if (redSnap.exists()) {
+                        val cloudStatus = RedemptionStatus.fromFirestoreValue(redSnap.getString("status"))
+                        if (cloudStatus != RedemptionStatus.PENDING_PARENT_APPROVAL) {
+                            throw IllegalStateException("בקשת מימוש זו כבר טופלה")
+                        }
+                    }
+                    val cloudPrev = if (childSnap.exists()) {
+                        (childSnap.getLong("earnedPoints") ?: prevBal.toLong()).toInt().coerceAtLeast(0)
+                    } else {
+                        prevBal
+                    }
+                    if (cloudPrev < request.pointsCost) {
+                        throw IllegalStateException("לא ניתן לאשר מימוש — היתרה של ${child.name} בענן היא $cloudPrev נק׳ בלבד")
+                    }
+                    val cloudNew = cloudPrev - request.pointsCost
+                    val cloudSpent = ((childSnap.getLong("spentPoints") ?: child.spentPoints.toLong()).toInt() + request.pointsCost)
+
+                    tx.set(
+                        childRef,
+                        mapOf(
+                            "earnedPoints" to cloudNew,
+                            "spentPoints" to cloudSpent,
+                            "lastPointsOperationId" to histOpId,
+                            "updatedAt" to nowMillis
+                        ),
+                        SetOptions.merge()
+                    )
+                    tx.set(redRef, buildRewardRedemptionFirestoreMap(approvedRequest), SetOptions.merge())
+                    tx.set(
+                        histRef,
+                        mapOf(
+                            "id" to historyEntry.id,
+                            "operationId" to historyEntry.operationId,
+                            "familyId" to familyId,
+                            "memberId" to child.id,
+                            "memberName" to child.name,
+                            "actionType" to PointsActionType.REWARD_REDEEMED.firestoreValue,
+                            "pointsDelta" to -request.pointsCost,
+                            "previousBalance" to cloudPrev,
+                            "newBalance" to cloudNew,
+                            "reason" to historyEntry.reason,
+                            "performedByUid" to actorUid,
+                            "performedByName" to actorName,
+                            "timestampMillis" to nowMillis,
+                            "rewardId" to request.rewardId,
+                            "redemptionId" to request.id,
+                            "serverTimestamp" to FieldValue.serverTimestamp()
+                        )
+                    )
+                }.await()
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "שגיאה באישור מימוש הפרס"
+                _pointsOperationError.value = msg
+                return@withLock Result.failure(e)
+            }
+        }
+
+        _pointsOperationError.value = null
+        _rewardRedemptions.value = _rewardRedemptions.value.map { if (it.id == redemptionId) approvedRequest else it }
+        _members.value = _members.value.map { m ->
+            if (m.id == child.id) {
+                val updated = m.copy(earnedPoints = newBal, spentPoints = newSpent)
+                if (_currentMember.value.id == m.id) {
+                    _currentMember.value = updated
+                }
+                updated
+            } else {
+                m
+            }
+        }
+        persistMemberPointsBalanceLocally(familyId, child.id, newBal)
+        appendPointsHistoryEntryLocally(familyId, historyEntry)
+
+        pushAlert(
+            title = "🎉 מימוש הפרס אושר!",
+            message = "$actorName אישר/ה ל-${child.name} את הפרס \"${request.rewardTitle}\" (-${request.pointsCost} נק׳).",
+            targetName = child.name,
+            targetEmoji = request.rewardIconEmoji,
+            reason = AlertReason.TASK_COMPLETED
+        )
+        return@withLock Result.success(approvedRequest)
+    }
+
+    fun decideRewardRedemptionAsParent(
+        redemptionId: String,
+        approve: Boolean,
+        rejectionReason: String = ""
+    ): Boolean {
+        if (!_currentMember.value.isParent) {
+            _pointsOperationError.value = "רק הורה רשאי לאשר או לדחות מימוש פרס 🔒"
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                decideRewardRedemptionAsParentAsync(redemptionId, approve, rejectionReason).isSuccess
+            }
+        }
+        repoScope.launch {
+            decideRewardRedemptionAsParentAsync(redemptionId, approve, rejectionReason)
+        }
+        return true
+    }
 }
+

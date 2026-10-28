@@ -2429,3 +2429,613 @@ test("Task Execution Time & Reminders: Preserves 4 notification events, dispatch
   assert.strictEqual(deleteSyncSpecs[0].action, "DELETE");
   assert.strictEqual(deleteSyncSpecs[0].targetUid, CHILD_2_UID);
 });
+
+test("Task Collaboration Proposals (Volunteer & Swap): Two-Stage Child + Parent Approval and Direct Child Reassignment Protection", async () => {
+  const parentDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const child1Db = testEnv.authenticatedContext(BOB_UID).firestore();
+  const child2Uid = "child_maya_789";
+  const child2Db = testEnv.authenticatedContext(child2Uid).firestore();
+  const famId = "fam_collab_rules";
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const adminDb = context.firestore();
+    await adminDb.collection("families").doc(famId).set({
+      id: famId,
+      familyId: famId,
+      familyName: "משפחת שיתוף",
+      ownerUid: ALICE_UID,
+      createdById: ALICE_UID,
+      adminUids: [ALICE_UID],
+      memberIds: [ALICE_UID, BOB_UID, child2Uid],
+      memberUids: [ALICE_UID, BOB_UID, child2Uid],
+    });
+    await adminDb.collection("families").doc(famId).collection("members").doc(ALICE_UID).set({
+      id: ALICE_UID,
+      uid: ALICE_UID,
+      familyId: famId,
+      name: "אמא",
+      role: "PARENT",
+      earnedPoints: 0,
+      spentPoints: 0,
+    });
+    await adminDb.collection("families").doc(famId).collection("members").doc(BOB_UID).set({
+      id: BOB_UID,
+      uid: BOB_UID,
+      familyId: famId,
+      name: "רועי",
+      role: "CHILD",
+      earnedPoints: 40,
+      spentPoints: 0,
+    });
+    await adminDb.collection("families").doc(famId).collection("members").doc(child2Uid).set({
+      id: child2Uid,
+      uid: child2Uid,
+      familyId: famId,
+      name: "מאיה",
+      role: "CHILD",
+      earnedPoints: 30,
+      spentPoints: 0,
+    });
+    await adminDb.collection("families").doc(famId).collection("tasks").doc("task_roey_dishes").set({
+      id: "task_roey_dishes",
+      familyId: famId,
+      title: "פינוי מדיח",
+      assignedToMemberId: BOB_UID,
+      assignedUid: BOB_UID,
+      points: 20,
+      isCompleted: false,
+      approvedByParent: false,
+    });
+    await adminDb.collection("families").doc(famId).collection("tasks").doc("task_maya_room").set({
+      id: "task_maya_room",
+      familyId: famId,
+      title: "סידור חדר",
+      assignedToMemberId: child2Uid,
+      assignedUid: child2Uid,
+      points: 15,
+      isCompleted: false,
+      approvedByParent: false,
+    });
+  });
+
+  // 1. Child CANNOT directly reassign a task or alter assignedToMemberId -> MUST FAIL
+  await assertFails(
+    child2Db.collection("families").doc(famId).collection("tasks").doc("task_roey_dishes").update({
+      assignedToMemberId: child2Uid,
+      updatedAt: 1700020000000,
+    })
+  );
+
+  // 2. Child CANNOT create a proposal pre-approved as PENDING_PARENT_APPROVAL or APPROVED_BY_PARENT -> MUST FAIL
+  await assertFails(
+    child2Db.collection("families").doc(famId).collection("task_proposals").doc("prop_fake_approved").set({
+      id: "prop_fake_approved",
+      operationId: "prop_fake_approved",
+      familyId: famId,
+      type: "VOLUNTEER_FOR_TASK",
+      requesterChildId: child2Uid,
+      requesterChildName: "מאיה",
+      targetChildId: BOB_UID,
+      targetChildName: "רועי",
+      primaryTaskId: "task_roey_dishes",
+      primaryTaskTitle: "פינוי מדיח",
+      primaryTaskPoints: 20,
+      status: "APPROVED_BY_PARENT",
+      createdAtMillis: 1700020001000,
+      updatedAtMillis: 1700020001000,
+    })
+  );
+
+  // 3. Stage 1: Child 2 (Maya) proposes to volunteer for Child 1's (Roey's) active task in an atomic batch -> SUCCEEDS
+  const createPropBatch = child2Db.batch();
+  createPropBatch.set(
+    child2Db.collection("families").doc(famId).collection("task_proposals").doc("prop_vol_1"),
+    {
+      id: "prop_vol_1",
+      operationId: "prop_vol_1",
+      familyId: famId,
+      type: "VOLUNTEER_FOR_TASK",
+      requesterChildId: child2Uid,
+      requesterChildName: "מאיה",
+      targetChildId: BOB_UID,
+      targetChildName: "רועי",
+      primaryTaskId: "task_roey_dishes",
+      primaryTaskTitle: "פינוי מדיח",
+      primaryTaskPoints: 20,
+      status: "PENDING_CHILD_APPROVAL",
+      note: "אני אעזור לרועי היום",
+      createdAtMillis: 1700020002000,
+      updatedAtMillis: 1700020002000,
+    }
+  );
+  createPropBatch.update(
+    child2Db.collection("families").doc(famId).collection("tasks").doc("task_roey_dishes"),
+    {
+      pendingProposalId: "prop_vol_1",
+      updatedAt: 1700020002000,
+    }
+  );
+  await assertSucceeds(createPropBatch.commit());
+
+  // 4. Requester child (Maya) CANNOT approve the proposal on behalf of target child (Roey) -> MUST FAIL
+  await assertFails(
+    child2Db.collection("families").doc(famId).collection("task_proposals").doc("prop_vol_1").update({
+      status: "PENDING_PARENT_APPROVAL",
+      childRespondedAtMillis: 1700020003000,
+      updatedAtMillis: 1700020003000,
+    })
+  );
+
+  // 5. Parent CANNOT approve the proposal before the target child approves it -> MUST FAIL
+  await assertFails(
+    parentDb.collection("families").doc(famId).collection("task_proposals").doc("prop_vol_1").update({
+      status: "APPROVED_BY_PARENT",
+      parentDecidedByUid: ALICE_UID,
+      parentDecidedAtMillis: 1700020003500,
+      updatedAtMillis: 1700020003500,
+    })
+  );
+
+  // 6. Stage 2: Target child (Roey) approves the proposal -> transitions to PENDING_PARENT_APPROVAL -> SUCCEEDS
+  await assertSucceeds(
+    child1Db.collection("families").doc(famId).collection("task_proposals").doc("prop_vol_1").update({
+      status: "PENDING_PARENT_APPROVAL",
+      childRespondedAtMillis: 1700020004000,
+      updatedAtMillis: 1700020004000,
+    })
+  );
+
+  // 7. Target child CANNOT skip parent approval and set APPROVED_BY_PARENT -> MUST FAIL
+  await assertFails(
+    child1Db.collection("families").doc(famId).collection("task_proposals").doc("prop_vol_1").update({
+      status: "APPROVED_BY_PARENT",
+      updatedAtMillis: 1700020004500,
+    })
+  );
+
+  // 8. Stage 3: Parent approves the proposal and atomically reassigns the task while preserving originalAssignedToMemberId -> SUCCEEDS
+  const parentApprovePropBatch = parentDb.batch();
+  parentApprovePropBatch.update(
+    parentDb.collection("families").doc(famId).collection("task_proposals").doc("prop_vol_1"),
+    {
+      status: "APPROVED_BY_PARENT",
+      parentDecidedByUid: ALICE_UID,
+      parentDecidedByName: "אמא",
+      parentDecidedAtMillis: 1700020005000,
+      updatedAtMillis: 1700020005000,
+    }
+  );
+  parentApprovePropBatch.update(
+    parentDb.collection("families").doc(famId).collection("tasks").doc("task_roey_dishes"),
+    {
+      assignedToMemberId: child2Uid,
+      assignedUid: child2Uid,
+      originalAssignedToMemberId: BOB_UID,
+      originalAssignedMemberName: "רועי",
+      transferProposalId: "prop_vol_1",
+      pendingProposalId: null,
+      updatedAt: 1700020005000,
+    }
+  );
+  await assertSucceeds(parentApprovePropBatch.commit());
+});
+
+test("Flexible Points Splitting, Parent Points Transfers, Helping Bonus, Reward Catalog CRUD, and Two-Stage Redemptions", async () => {
+  const parentDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const child1Db = testEnv.authenticatedContext(BOB_UID).firestore();
+  const child2Uid = "child_maya_789";
+  const child2Db = testEnv.authenticatedContext(child2Uid).firestore();
+  const famId = "fam_split_and_rewards";
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const adminDb = context.firestore();
+    await adminDb.collection("families").doc(famId).set({
+      id: famId,
+      familyId: famId,
+      familyName: "משפחת נקודות ופרסים",
+      ownerUid: ALICE_UID,
+      createdById: ALICE_UID,
+      adminUids: [ALICE_UID],
+      memberIds: [ALICE_UID, BOB_UID, child2Uid],
+      memberUids: [ALICE_UID, BOB_UID, child2Uid],
+    });
+    await adminDb.collection("families").doc(famId).collection("members").doc(ALICE_UID).set({
+      id: ALICE_UID,
+      uid: ALICE_UID,
+      familyId: famId,
+      name: "אבא",
+      role: "PARENT",
+      earnedPoints: 0,
+      spentPoints: 0,
+    });
+    await adminDb.collection("families").doc(famId).collection("members").doc(BOB_UID).set({
+      id: BOB_UID,
+      uid: BOB_UID,
+      familyId: famId,
+      name: "רועי",
+      role: "CHILD",
+      earnedPoints: 40,
+      spentPoints: 0,
+    });
+    await adminDb.collection("families").doc(famId).collection("members").doc(child2Uid).set({
+      id: child2Uid,
+      uid: child2Uid,
+      familyId: famId,
+      name: "מאיה",
+      role: "CHILD",
+      earnedPoints: 30,
+      spentPoints: 0,
+    });
+    await adminDb.collection("families").doc(famId).collection("tasks").doc("task_split_20").set({
+      id: "task_split_20",
+      familyId: famId,
+      title: "פינוי מדיח",
+      assignedToMemberId: child2Uid,
+      assignedUid: child2Uid,
+      originalAssignedToMemberId: BOB_UID,
+      originalAssignedMemberName: "רועי",
+      points: 20,
+      isCompleted: true,
+      approvedByParent: false,
+    });
+  });
+
+  // 1. Flexible Points Split exceeding task points (e.g. 15 + 10 = 25 > 20) -> MUST FAIL
+  const invalidSplitBatch = parentDb.batch();
+  invalidSplitBatch.update(
+    parentDb.collection("families").doc(famId).collection("tasks").doc("task_split_20"),
+    {
+      isCompleted: true,
+      approvedByParent: true,
+      rewardedOperationId: "pts_task_task_split_20",
+      updatedAt: 1700030001000,
+    }
+  );
+  invalidSplitBatch.update(
+    parentDb.collection("families").doc(famId).collection("members").doc(child2Uid),
+    {
+      earnedPoints: 45,
+      lastPointsOperationId: "pts_task_task_split_20",
+      updatedAt: 1700030001000,
+    }
+  );
+  invalidSplitBatch.update(
+    parentDb.collection("families").doc(famId).collection("members").doc(BOB_UID),
+    {
+      earnedPoints: 50,
+      lastPointsOperationId: "pts_task_task_split_20_orig",
+      updatedAt: 1700030001000,
+    }
+  );
+  invalidSplitBatch.set(
+    parentDb.collection("families").doc(famId).collection("points_history").doc("pts_task_task_split_20"),
+    {
+      id: "pts_task_task_split_20",
+      operationId: "pts_task_task_split_20",
+      familyId: famId,
+      memberId: child2Uid,
+      memberName: "מאיה",
+      actionType: "TASK_SPLIT_EARNED",
+      pointsDelta: 15,
+      previousBalance: 30,
+      newBalance: 45,
+      reason: "חלוקת נקודות לא תקינה",
+      performedByUid: ALICE_UID,
+      performedByName: "אבא",
+      timestampMillis: 1700030001000,
+      taskId: "task_split_20",
+    }
+  );
+  invalidSplitBatch.set(
+    parentDb.collection("families").doc(famId).collection("points_history").doc("pts_task_task_split_20_orig"),
+    {
+      id: "pts_task_task_split_20_orig",
+      operationId: "pts_task_task_split_20_orig",
+      familyId: famId,
+      memberId: BOB_UID,
+      memberName: "רועי",
+      actionType: "TASK_SPLIT_EARNED",
+      pointsDelta: 10,
+      previousBalance: 40,
+      newBalance: 50,
+      reason: "חלוקת נקודות לא תקינה",
+      performedByUid: ALICE_UID,
+      performedByName: "אבא",
+      timestampMillis: 1700030001001,
+      taskId: "task_split_20",
+    }
+  );
+  await assertFails(invalidSplitBatch.commit());
+
+  // 2. Valid Flexible Points Split (15 to Maya + 5 to Roey = 20) + Chained Helping Bonus (+5 to Maya) -> SUCCEEDS
+  const validSplitBatch = parentDb.batch();
+  validSplitBatch.update(
+    parentDb.collection("families").doc(famId).collection("tasks").doc("task_split_20"),
+    {
+      isCompleted: true,
+      approvedByParent: true,
+      rewardedOperationId: "pts_task_task_split_20",
+      updatedAt: 1700030002000,
+    }
+  );
+  validSplitBatch.update(
+    parentDb.collection("families").doc(famId).collection("members").doc(child2Uid),
+    {
+      earnedPoints: 50, // 30 + 15 split + 5 bonus
+      lastPointsOperationId: "pts_task_task_split_20_bonus",
+      updatedAt: 1700030002000,
+    }
+  );
+  validSplitBatch.update(
+    parentDb.collection("families").doc(famId).collection("members").doc(BOB_UID),
+    {
+      earnedPoints: 45, // 40 + 5 split
+      lastPointsOperationId: "pts_task_task_split_20_orig",
+      updatedAt: 1700030002000,
+    }
+  );
+  validSplitBatch.set(
+    parentDb.collection("families").doc(famId).collection("points_history").doc("pts_task_task_split_20"),
+    {
+      id: "pts_task_task_split_20",
+      operationId: "pts_task_task_split_20",
+      familyId: famId,
+      memberId: child2Uid,
+      memberName: "מאיה",
+      actionType: "TASK_SPLIT_EARNED",
+      pointsDelta: 15,
+      previousBalance: 30,
+      newBalance: 45,
+      reason: "חלוקת נקודות ממשימה (15/20 למבצעת)",
+      performedByUid: ALICE_UID,
+      performedByName: "אבא",
+      timestampMillis: 1700030002000,
+      taskId: "task_split_20",
+      relatedMemberId: BOB_UID,
+    }
+  );
+  validSplitBatch.set(
+    parentDb.collection("families").doc(famId).collection("points_history").doc("pts_task_task_split_20_orig"),
+    {
+      id: "pts_task_task_split_20_orig",
+      operationId: "pts_task_task_split_20_orig",
+      familyId: famId,
+      memberId: BOB_UID,
+      memberName: "רועי",
+      actionType: "TASK_SPLIT_EARNED",
+      pointsDelta: 5,
+      previousBalance: 40,
+      newBalance: 45,
+      reason: "חלוקת נקודות ממשימה (5/20 לבעלים המקורי)",
+      performedByUid: ALICE_UID,
+      performedByName: "אבא",
+      timestampMillis: 1700030002001,
+      taskId: "task_split_20",
+      relatedMemberId: child2Uid,
+    }
+  );
+  validSplitBatch.set(
+    parentDb.collection("families").doc(famId).collection("points_history").doc("pts_task_task_split_20_bonus"),
+    {
+      id: "pts_task_task_split_20_bonus",
+      operationId: "pts_task_task_split_20_bonus",
+      familyId: famId,
+      memberId: child2Uid,
+      memberName: "מאיה",
+      actionType: "HELPING_BONUS",
+      pointsDelta: 5,
+      previousBalance: 45,
+      newBalance: 50,
+      reason: "בונוס מיוחד מהורה על עזרה",
+      performedByUid: ALICE_UID,
+      performedByName: "אבא",
+      timestampMillis: 1700030002002,
+      taskId: "task_split_20",
+      relatedMemberId: BOB_UID,
+    }
+  );
+  await assertSucceeds(validSplitBatch.commit());
+
+  // 3. Parent Points Transfer between children (Roey 45 -> 35, Maya 50 -> 60) -> SUCCEEDS, while Child transfer FAILS
+  const childTransferBatch = child1Db.batch();
+  childTransferBatch.update(child1Db.collection("families").doc(famId).collection("members").doc(BOB_UID), {
+    earnedPoints: 35,
+    lastPointsOperationId: "pts_tx_child_out",
+    updatedAt: 1700030003000,
+  });
+  childTransferBatch.set(
+    child1Db.collection("families").doc(famId).collection("points_history").doc("pts_tx_child_out"),
+    {
+      id: "pts_tx_child_out",
+      operationId: "pts_tx_child_out",
+      familyId: famId,
+      memberId: BOB_UID,
+      actionType: "TRANSFER_OUT",
+      pointsDelta: -10,
+      previousBalance: 45,
+      newBalance: 35,
+      reason: "העברה ע״י ילד",
+      performedByUid: BOB_UID,
+      relatedMemberId: child2Uid,
+    }
+  );
+  await assertFails(childTransferBatch.commit());
+
+  const parentTransferBatch = parentDb.batch();
+  parentTransferBatch.update(parentDb.collection("families").doc(famId).collection("members").doc(BOB_UID), {
+    earnedPoints: 35,
+    lastPointsOperationId: "pts_tx_valid_out",
+    updatedAt: 1700030004000,
+  });
+  parentTransferBatch.update(parentDb.collection("families").doc(famId).collection("members").doc(child2Uid), {
+    earnedPoints: 60,
+    lastPointsOperationId: "pts_tx_valid_in",
+    updatedAt: 1700030004000,
+  });
+  parentTransferBatch.set(
+    parentDb.collection("families").doc(famId).collection("points_history").doc("pts_tx_valid_out"),
+    {
+      id: "pts_tx_valid_out",
+      operationId: "pts_tx_valid_out",
+      familyId: famId,
+      memberId: BOB_UID,
+      memberName: "רועי",
+      actionType: "TRANSFER_OUT",
+      pointsDelta: -10,
+      previousBalance: 45,
+      newBalance: 35,
+      reason: "העברה אל מאיה: עזרה בשיעורים",
+      performedByUid: ALICE_UID,
+      performedByName: "אבא",
+      timestampMillis: 1700030004000,
+      relatedMemberId: child2Uid,
+    }
+  );
+  parentTransferBatch.set(
+    parentDb.collection("families").doc(famId).collection("points_history").doc("pts_tx_valid_in"),
+    {
+      id: "pts_tx_valid_in",
+      operationId: "pts_tx_valid_in",
+      familyId: famId,
+      memberId: child2Uid,
+      memberName: "מאיה",
+      actionType: "TRANSFER_IN",
+      pointsDelta: 10,
+      previousBalance: 50,
+      newBalance: 60,
+      reason: "קבלה מ-רועי: עזרה בשיעורים",
+      performedByUid: ALICE_UID,
+      performedByName: "אבא",
+      timestampMillis: 1700030004001,
+      relatedMemberId: BOB_UID,
+    }
+  );
+  await assertSucceeds(parentTransferBatch.commit());
+
+  // 4. Reward Catalog CRUD: Parent creates valid reward (cost 50), Child cannot create or edit rewards -> SUCCEEDS / FAILS
+  await assertFails(
+    parentDb.collection("families").doc(famId).collection("rewards").doc("rew_zero_cost").set({
+      id: "rew_zero_cost",
+      familyId: famId,
+      title: "פרס חינם",
+      pointsCost: 0,
+      isActive: true,
+      isDeleted: false,
+    })
+  );
+  await assertFails(
+    child2Db.collection("families").doc(famId).collection("rewards").doc("rew_child_created").set({
+      id: "rew_child_created",
+      familyId: famId,
+      title: "פרס של ילד",
+      pointsCost: 10,
+      isActive: true,
+      isDeleted: false,
+    })
+  );
+  await assertSucceeds(
+    parentDb.collection("families").doc(famId).collection("rewards").doc("rew_cinema_50").set({
+      id: "rew_cinema_50",
+      familyId: famId,
+      title: "יציאה לסרט",
+      pointsCost: 50,
+      iconEmoji: "🍿",
+      description: "כרטיס קולנוע ופופקורן",
+      isActive: true,
+      isDeleted: false,
+    })
+  );
+
+  // 5. Two-Stage Reward Redemption:
+  //    - Roey (35 pts) CANNOT request rew_cinema_50 (50 pts) -> MUST FAIL
+  await assertFails(
+    child1Db.collection("families").doc(famId).collection("redemptions").doc("red_roey_insufficient").set({
+      id: "red_roey_insufficient",
+      operationId: "red_roey_insufficient",
+      familyId: famId,
+      rewardId: "rew_cinema_50",
+      rewardTitle: "יציאה לסרט",
+      pointsCost: 50,
+      childUid: BOB_UID,
+      childName: "רועי",
+      status: "PENDING_PARENT_APPROVAL",
+      requestedAtMillis: 1700030005000,
+    })
+  );
+
+  //    - Maya (60 pts) CANNOT create a pre-approved redemption (status: APPROVED) -> MUST FAIL
+  await assertFails(
+    child2Db.collection("families").doc(famId).collection("redemptions").doc("red_maya_self_approved").set({
+      id: "red_maya_self_approved",
+      operationId: "red_maya_self_approved",
+      familyId: famId,
+      rewardId: "rew_cinema_50",
+      rewardTitle: "יציאה לסרט",
+      pointsCost: 50,
+      childUid: child2Uid,
+      childName: "מאיה",
+      status: "APPROVED",
+      requestedAtMillis: 1700030005500,
+    })
+  );
+
+  //    - Maya (60 pts) creates a valid PENDING_PARENT_APPROVAL redemption request -> SUCCEEDS
+  await assertSucceeds(
+    child2Db.collection("families").doc(famId).collection("redemptions").doc("red_maya_valid_1").set({
+      id: "red_maya_valid_1",
+      operationId: "red_maya_valid_1",
+      familyId: famId,
+      rewardId: "rew_cinema_50",
+      rewardTitle: "יציאה לסרט",
+      pointsCost: 50,
+      childUid: child2Uid,
+      childName: "מאיה",
+      status: "PENDING_PARENT_APPROVAL",
+      requestedAtMillis: 1700030006000,
+    })
+  );
+
+  //    - Parent atomically approves redemption: marks APPROVED, deducts 50 from earnedPoints (60 -> 10),
+  //      increments spentPoints (0 -> 50), and writes REWARD_REDEEMED history entry -> SUCCEEDS
+  const approveRedemptionBatch = parentDb.batch();
+  approveRedemptionBatch.update(
+    parentDb.collection("families").doc(famId).collection("redemptions").doc("red_maya_valid_1"),
+    {
+      status: "APPROVED",
+      decidedByParentUid: ALICE_UID,
+      decidedByParentName: "אבא",
+      decidedAtMillis: 1700030007000,
+    }
+  );
+  approveRedemptionBatch.update(
+    parentDb.collection("families").doc(famId).collection("members").doc(child2Uid),
+    {
+      earnedPoints: 10,
+      spentPoints: 50,
+      lastPointsOperationId: "pts_red_red_maya_valid_1",
+      updatedAt: 1700030007000,
+    }
+  );
+  approveRedemptionBatch.set(
+    parentDb.collection("families").doc(famId).collection("points_history").doc("pts_red_red_maya_valid_1"),
+    {
+      id: "pts_red_red_maya_valid_1",
+      operationId: "pts_red_red_maya_valid_1",
+      familyId: famId,
+      memberId: child2Uid,
+      memberName: "מאיה",
+      actionType: "REWARD_REDEEMED",
+      pointsDelta: -50,
+      previousBalance: 60,
+      newBalance: 10,
+      reason: "מימוש פרס באישור הורה: יציאה לסרט",
+      performedByUid: ALICE_UID,
+      performedByName: "אבא",
+      timestampMillis: 1700030007000,
+      rewardId: "rew_cinema_50",
+      redemptionId: "red_maya_valid_1",
+    }
+  );
+  await assertSucceeds(approveRedemptionBatch.commit());
+});
+

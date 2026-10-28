@@ -522,7 +522,11 @@ data class RewardItem(
     val title: String = "",
     val pointsCost: Int = 50,
     val iconEmoji: String = "🎁",
-    val description: String = ""
+    val description: String = "",
+    val isActive: Boolean = true,
+    val isDeleted: Boolean = false,
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val updatedAtMillis: Long = System.currentTimeMillis()
 )
 
 /**
@@ -587,6 +591,10 @@ data class FamilyTask(
     val completedByMemberId: String? = null,
     val familyId: String = "",
     val approvedByParent: Boolean = false,
+    val originalAssignedToMemberId: String? = null,
+    val originalAssignedMemberName: String? = null,
+    val transferProposalId: String? = null,
+    val pendingProposalId: String? = null,
     val createdAtMillis: Long = System.currentTimeMillis(),
     val updatedAtMillis: Long = System.currentTimeMillis()
 ) {
@@ -601,6 +609,25 @@ data class FamilyTask(
      */
     val isFullyApprovedCompletion: Boolean
         get() = isCompleted && approvedByParent
+
+    /**
+     * True when this task was originally assigned to another child and reassigned via an approved
+     * volunteer offer or child task swap, enabling flexible parent point splitting upon completion.
+     */
+    val wasTransferredOrSwapped: Boolean
+        get() = !originalAssignedToMemberId.isNullOrBlank() && originalAssignedToMemberId != assignedToMemberId
+
+    /**
+     * True when this task is currently locked in a pending volunteer or swap proposal.
+     */
+    val hasActiveProposal: Boolean
+        get() = !pendingProposalId.isNullOrBlank()
+
+    /**
+     * True when this task is active (not completed, not approved) and not currently in another active proposal.
+     */
+    fun isEligibleForChildProposal(): Boolean =
+        !isCompleted && !approvedByParent && pendingProposalId.isNullOrBlank()
 
     /**
      * True when this task has an explicit execution time, a non-NONE reminder offset, and is not completed.
@@ -1249,7 +1276,12 @@ enum class PointsActionType(
     ADD("ADD", "הוספה", "Addition"),
     DEDUCT("DEDUCT", "הפחתה", "Deduction"),
     RESET("RESET", "איפוס", "Reset"),
-    TASK_EARNED("TASK_EARNED", "צבירה ממשימה", "Task Earned");
+    TASK_EARNED("TASK_EARNED", "צבירה ממשימה", "Task Earned"),
+    TASK_SPLIT_EARNED("TASK_SPLIT_EARNED", "חלוקת נקודות ממשימה", "Split Task Points"),
+    TRANSFER_OUT("TRANSFER_OUT", "העברה לבן משפחה", "Transfer Out"),
+    TRANSFER_IN("TRANSFER_IN", "קבלה מבן משפחה", "Transfer In"),
+    HELPING_BONUS("HELPING_BONUS", "בונוס על עזרה", "Helping Bonus"),
+    REWARD_REDEEMED("REWARD_REDEEMED", "מימוש פרס", "Reward Redeemed");
 
     fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
 
@@ -1279,5 +1311,201 @@ data class PointsHistoryEntry(
     val performedByUid: String,
     val performedByName: String,
     val timestampMillis: Long = System.currentTimeMillis(),
-    val taskId: String? = null
+    val taskId: String? = null,
+    val performedTaskByMemberId: String? = null,
+    val performedTaskByMemberName: String? = null,
+    val relatedMemberId: String? = null,
+    val relatedMemberName: String? = null,
+    val rewardId: String? = null,
+    val redemptionId: String? = null,
+    val proposalId: String? = null
 )
+
+/**
+ * Type of child-initiated task collaboration request stored in `/families/{familyId}/task_proposals/{proposalId}`.
+ */
+enum class TaskProposalType(
+    val firestoreValue: String,
+    val labelHe: String,
+    val labelEn: String
+) {
+    VOLUNTEER_FOR_TASK("VOLUNTEER_FOR_TASK", "הצעה לביצוע משימה", "Volunteer for Task"),
+    SWAP_TASKS("SWAP_TASKS", "החלפת משימות", "Task Swap");
+
+    fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
+
+    companion object {
+        fun fromFirestoreValue(raw: String?): TaskProposalType {
+            return entries.find { it.firestoreValue.equals(raw?.trim(), ignoreCase = true) }
+                ?: VOLUNTEER_FOR_TASK
+        }
+    }
+}
+
+/**
+ * Two-stage approval workflow status for child task volunteering and task swaps:
+ * 1. Child requester proposes -> [PENDING_CHILD_APPROVAL]
+ * 2. Target child approves -> [PENDING_PARENT_APPROVAL] (or rejects -> [REJECTED_BY_CHILD])
+ * 3. Parent approves -> [APPROVED_BY_PARENT] (or rejects -> [REJECTED_BY_PARENT])
+ */
+enum class TaskProposalStatus(
+    val firestoreValue: String,
+    val labelHe: String,
+    val labelEn: String
+) {
+    PENDING_CHILD_APPROVAL("PENDING_CHILD_APPROVAL", "ממתין לאישור הילד/ה", "Pending Child Approval"),
+    REJECTED_BY_CHILD("REJECTED_BY_CHILD", "נדחה ע\"י הילד/ה", "Rejected by Child"),
+    PENDING_PARENT_APPROVAL("PENDING_PARENT_APPROVAL", "ממתין לאישור הורה", "Pending Parent Approval"),
+    APPROVED_BY_PARENT("APPROVED_BY_PARENT", "אושר ע\"י הורה", "Approved by Parent"),
+    REJECTED_BY_PARENT("REJECTED_BY_PARENT", "נדחה ע\"י הורה", "Rejected by Parent"),
+    CANCELLED("CANCELLED", "בוטל", "Cancelled");
+
+    val isPending: Boolean
+        get() = this == PENDING_CHILD_APPROVAL || this == PENDING_PARENT_APPROVAL
+
+    fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
+
+    companion object {
+        fun fromFirestoreValue(raw: String?): TaskProposalStatus {
+            return entries.find { it.firestoreValue.equals(raw?.trim(), ignoreCase = true) }
+                ?: PENDING_CHILD_APPROVAL
+        }
+    }
+}
+
+/**
+ * Represents a child's offer to perform another child's task ([TaskProposalType.VOLUNTEER_FOR_TASK])
+ * or a proposal to swap tasks between two children ([TaskProposalType.SWAP_TASKS]).
+ * Stored in `/families/{familyId}/task_proposals/{proposalId}`.
+ */
+data class TaskCollaborationProposal(
+    val id: String = "prop_${UUID.randomUUID().toString().replace("-", "").take(12)}",
+    val operationId: String = id,
+    val familyId: String = "",
+    val type: TaskProposalType = TaskProposalType.VOLUNTEER_FOR_TASK,
+    val requesterChildId: String,
+    val requesterChildName: String = "",
+    val targetChildId: String,
+    val targetChildName: String = "",
+    val primaryTaskId: String,
+    val primaryTaskTitle: String = "",
+    val primaryTaskPoints: Int = 0,
+    val offeredSwapTaskId: String? = null,
+    val offeredSwapTaskTitle: String? = null,
+    val offeredSwapTaskPoints: Int? = null,
+    val status: TaskProposalStatus = TaskProposalStatus.PENDING_CHILD_APPROVAL,
+    val note: String = "",
+    val childRespondedAtMillis: Long? = null,
+    val parentDecidedByUid: String? = null,
+    val parentDecidedByName: String? = null,
+    val parentDecidedAtMillis: Long? = null,
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val updatedAtMillis: Long = System.currentTimeMillis()
+) {
+    val proposerMemberId: String
+        get() = requesterChildId
+
+    val targetOwnerMemberId: String
+        get() = targetChildId
+
+    /**
+     * Role-based visibility:
+     * - Parents see all proposals in the family.
+     * - Children see only proposals where they are the requester or the target child.
+     */
+    fun isVisibleToMember(member: FamilyMember, authUid: String = ""): Boolean {
+        if (member.isParent) return true
+        val candidateIds = buildSet {
+            if (member.id.isNotBlank()) add(member.id)
+            if (authUid.isNotBlank()) add(authUid)
+        }
+        return requesterChildId in candidateIds || targetChildId in candidateIds
+    }
+
+    /**
+     * True when this proposal requires an immediate decision from [member]:
+     * - For a target CHILD: when status is [TaskProposalStatus.PENDING_CHILD_APPROVAL].
+     * - For a PARENT: when status is [TaskProposalStatus.PENDING_PARENT_APPROVAL].
+     */
+    fun isAwaitingActionFromMember(member: FamilyMember, authUid: String = ""): Boolean {
+        if (member.isParent) {
+            return status == TaskProposalStatus.PENDING_PARENT_APPROVAL
+        }
+        val candidateIds = buildSet {
+            if (member.id.isNotBlank()) add(member.id)
+            if (authUid.isNotBlank()) add(authUid)
+        }
+        return status == TaskProposalStatus.PENDING_CHILD_APPROVAL && targetChildId in candidateIds
+    }
+}
+
+/**
+ * Status of a child's reward redemption request stored in `/families/{familyId}/redemptions/{redemptionId}`.
+ * Points are deducted ONLY when a parent transitions the request to [APPROVED].
+ */
+enum class RedemptionStatus(
+    val firestoreValue: String,
+    val labelHe: String,
+    val labelEn: String
+) {
+    PENDING_PARENT_APPROVAL("PENDING_PARENT_APPROVAL", "ממתין לאישור הורה", "Pending Parent Approval"),
+    APPROVED("APPROVED", "אושר ומומש", "Approved"),
+    REJECTED("REJECTED", "נדחה", "Rejected"),
+    CANCELLED("CANCELLED", "בוטל", "Cancelled");
+
+    val isPending: Boolean
+        get() = this == PENDING_PARENT_APPROVAL
+
+    fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
+
+    companion object {
+        fun fromFirestoreValue(raw: String?): RedemptionStatus {
+            return entries.find { it.firestoreValue.equals(raw?.trim(), ignoreCase = true) }
+                ?: PENDING_PARENT_APPROVAL
+        }
+    }
+}
+
+/**
+ * Immutable/audited reward redemption request and history record.
+ * Captures a snapshot of [rewardTitle] and [pointsCost] at request time so later catalog edits or deletions
+ * never corrupt historical redemptions.
+ * Stored in `/families/{familyId}/redemptions/{redemptionId}`.
+ */
+data class RewardRedemptionRequest(
+    val id: String = "red_${UUID.randomUUID().toString().replace("-", "").take(12)}",
+    val operationId: String = id,
+    val familyId: String = "",
+    val rewardId: String,
+    val rewardTitle: String,
+    val rewardIconEmoji: String = "🎁",
+    val pointsCost: Int,
+    val childUid: String,
+    val childName: String = "",
+    val status: RedemptionStatus = RedemptionStatus.PENDING_PARENT_APPROVAL,
+    val requestedAtMillis: Long = System.currentTimeMillis(),
+    val decidedAtMillis: Long? = null,
+    val decidedByParentUid: String? = null,
+    val decidedByParentName: String? = null,
+    val rejectionReason: String? = null
+) {
+    val requestedByMemberId: String
+        get() = childUid
+
+    val requestedByMemberName: String
+        get() = childName
+
+    fun isVisibleToMember(member: FamilyMember, authUid: String = ""): Boolean {
+        if (member.isParent) return true
+        val candidateIds = buildSet {
+            if (member.id.isNotBlank()) add(member.id)
+            if (authUid.isNotBlank()) add(authUid)
+        }
+        return childUid in candidateIds
+    }
+
+    fun isAwaitingActionFromMember(member: FamilyMember): Boolean {
+        return member.isParent && status == RedemptionStatus.PENDING_PARENT_APPROVAL
+    }
+}
+

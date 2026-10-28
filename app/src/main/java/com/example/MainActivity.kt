@@ -108,6 +108,9 @@ fun FamilyTasksApp(
     val pointsHistory by viewModel.pointsHistory.collectAsStateWithLifecycle()
     val isProcessingPointsOperation by viewModel.isProcessingPointsOperation.collectAsStateWithLifecycle()
     val pointsOperationError by viewModel.pointsOperationError.collectAsStateWithLifecycle()
+    val rewards by viewModel.rewards.collectAsStateWithLifecycle()
+    val taskProposals by viewModel.taskProposals.collectAsStateWithLifecycle()
+    val rewardRedemptions by viewModel.rewardRedemptions.collectAsStateWithLifecycle()
 
     // Google Auth & Cloud Family Group states
     val isGoogleSignedIn by viewModel.isGoogleSignedIn.collectAsStateWithLifecycle()
@@ -403,7 +406,28 @@ fun FamilyTasksApp(
                                             taskSyncStates = taskSyncStates,
                                             taskOperationError = taskOperationError,
                                             onApproveTask = { viewModel.approveTaskCompletion(it) },
-                                            onDismissTaskError = { viewModel.clearTaskOperationError() }
+                                            onDismissTaskError = { viewModel.clearTaskOperationError() },
+                                            taskProposals = taskProposals,
+                                            onProposeVolunteer = { taskId, note ->
+                                                viewModel.proposeVolunteerForTask(taskId, note)
+                                            },
+                                            onProposeSwap = { offeredTaskId, targetTaskId, note ->
+                                                viewModel.proposeTaskSwap(offeredTaskId, targetTaskId, note)
+                                            },
+                                            onChildRespondProposal = { proposalId, approve ->
+                                                viewModel.respondToTaskProposalAsChild(proposalId, approve)
+                                            },
+                                            onParentDecideProposal = { proposalId, approve ->
+                                                viewModel.decideTaskProposalAsParent(proposalId, approve)
+                                            },
+                                            onApproveTaskWithSplit = { taskId, performerPts, originalPts, bonusPts ->
+                                                viewModel.approveTaskCompletionWithSplit(
+                                                    taskId = taskId,
+                                                    performerPoints = performerPts,
+                                                    originalOwnerPoints = originalPts,
+                                                    bonusPointsForPerformer = bonusPts
+                                                )
+                                            }
                                         )
                                     }
 
@@ -635,7 +659,13 @@ fun FamilyTasksApp(
                                                 viewModel.resetMemberPoints(memberId, reason, opId)
                                             },
                                             onClearError = { viewModel.clearPointsOperationError() },
-                                            onNavigateBack = { viewModel.navigateTo(AppScreen.SETTINGS) }
+                                            onNavigateBack = { viewModel.navigateTo(AppScreen.SETTINGS) },
+                                            onTransferPoints = { fromId, toId, amount, reason ->
+                                                viewModel.transferPointsBetweenMembers(fromId, toId, amount, reason)
+                                            },
+                                            onGrantHelpingBonus = { memberId, amount, reason ->
+                                                viewModel.grantHelpingBonusPoints(memberId, amount, reason)
+                                            }
                                         )
                                     }
                                         }
@@ -692,9 +722,29 @@ fun FamilyTasksApp(
                             currentMember = currentMember,
                             isHebrew = isHebrew,
                             onClaimReward = { reward ->
-                                viewModel.redeemReward(reward)
+                                viewModel.requestRewardRedemption(reward)
                             },
-                            onDismiss = { showRewardsSheet = false }
+                            onDismiss = { showRewardsSheet = false },
+                            rewards = rewards,
+                            redemptions = rewardRedemptions,
+                            onRequestRedemption = { reward ->
+                                viewModel.requestRewardRedemption(reward)
+                            },
+                            onParentDecideRedemption = { redemptionId, approve ->
+                                viewModel.decideRewardRedemptionAsParent(redemptionId, approve)
+                            },
+                            onCreateReward = { title, pointsCost, iconEmoji, description ->
+                                viewModel.createRewardInCatalog(title, pointsCost, iconEmoji, description)
+                            },
+                            onUpdateReward = { rewardId, title, pointsCost, iconEmoji, description, isActive ->
+                                viewModel.updateRewardInCatalog(rewardId, title, pointsCost, iconEmoji, description, isActive)
+                            },
+                            onToggleRewardActive = { rewardId, isActive ->
+                                viewModel.setRewardActiveState(rewardId, isActive)
+                            },
+                            onDeleteReward = { rewardId ->
+                                viewModel.deleteRewardFromCatalog(rewardId)
+                            }
                         )
                     }
 

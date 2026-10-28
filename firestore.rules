@@ -117,6 +117,34 @@ service cloud.firestore {
         );
     }
 
+    // Allows a child to link or clear ONLY pendingProposalId on an active (uncompleted, unapproved) task
+    // when creating, rejecting, or cancelling a task collaboration proposal. Never allows changing task ownership or points.
+    function isChildTaskProposalLinkOnly(familyId) {
+      let changedKeys = request.resource.data.diff(resource.data).affectedKeys();
+      let newPropId = request.resource.data.get('pendingProposalId', null);
+      let oldPropId = resource.data.get('pendingProposalId', null);
+      return resource.data.get('isCompleted', false) == false
+        && resource.data.get('approvedByParent', false) == false
+        && changedKeys.hasOnly(['pendingProposalId', 'updatedAt', 'updatedAtMillis'])
+        && (
+          (
+            newPropId is string
+            && newPropId.size() > 0
+            && (oldPropId == null || oldPropId == '')
+            && existsAfter(/databases/$(database)/documents/families/$(familyId)/task_proposals/$(newPropId))
+            && getAfter(/databases/$(database)/documents/families/$(familyId)/task_proposals/$(newPropId)).data.get('requesterChildId', '') == request.auth.uid
+            && getAfter(/databases/$(database)/documents/families/$(familyId)/task_proposals/$(newPropId)).data.get('status', '') == 'PENDING_CHILD_APPROVAL'
+          )
+          || (
+            (newPropId == null || newPropId == '')
+            && oldPropId is string
+            && oldPropId.size() > 0
+            && existsAfter(/databases/$(database)/documents/families/$(familyId)/task_proposals/$(oldPropId))
+            && getAfter(/databases/$(database)/documents/families/$(familyId)/task_proposals/$(oldPropId)).data.get('status', '') in ['REJECTED_BY_CHILD', 'CANCELLED']
+          )
+        );
+    }
+
     // Validates that a CHILD member update on their own member doc is strictly for reward redemption
     function isValidChildRewardSpend() {
       return request.resource.data.get('spentPoints', -1) is int
@@ -292,8 +320,24 @@ service cloud.firestore {
         && (resource.data.get('googleEmail', '') == '' || request.resource.data.get('googleEmail', '') == resource.data.googleEmail);
     }
 
+    // Helper for chained task approval + helping bonus in a single atomic batch
+    function isChainedTaskBonusHistory(familyId, memberId, opId, afterHist) {
+      let taskId = afterHist.data.get('taskId', '');
+      let baseTaskPath = /databases/$(database)/documents/families/$(familyId)/points_history/$(('pts_task_' + taskId));
+      let baseHist = getAfter(baseTaskPath);
+      return taskId is string
+        && taskId.size() > 0
+        && opId == ('pts_task_' + taskId + '_bonus')
+        && existsAfter(baseTaskPath)
+        && baseHist.data.get('memberId', '') == memberId
+        && baseHist.data.get('previousBalance', -1) == resource.data.get('earnedPoints', 0)
+        && baseHist.data.get('newBalance', -1) == afterHist.data.get('previousBalance', -1)
+        && (baseHist.data.get('pointsDelta', 0) + afterHist.data.get('pointsDelta', 0)) == (request.resource.data.get('earnedPoints', -1) - resource.data.get('earnedPoints', 0));
+    }
+
     // Requires any change to a member's earnedPoints to be committed in the same transaction/batch
-    // as a newly created, matching /families/{familyId}/points_history/{opId} entry.
+    // as a newly created, matching /families/{familyId}/points_history/{opId} entry
+    // (including chained base+bonus task approval entries in a single batch).
     function hasMatchingAtomicPointsHistory(familyId, memberId, opId) {
       let histPath = /databases/$(database)/documents/families/$(familyId)/points_history/$(opId);
       let afterHist = getAfter(histPath);
@@ -303,28 +347,52 @@ service cloud.firestore {
         && afterHist.data.get('familyId', '') == familyId
         && afterHist.data.get('operationId', opId) == opId
         && afterHist.data.get('memberId', '') == memberId
-        && afterHist.data.get('previousBalance', -1) == resource.data.get('earnedPoints', 0)
         && afterHist.data.get('newBalance', -1) == request.resource.data.get('earnedPoints', -1)
-        && afterHist.data.get('pointsDelta', 0) == (request.resource.data.get('earnedPoints', -1) - resource.data.get('earnedPoints', 0))
-        && afterHist.data.get('performedByUid', '') == request.auth.uid;
+        && afterHist.data.get('performedByUid', '') == request.auth.uid
+        && (
+          (
+            afterHist.data.get('previousBalance', -1) == resource.data.get('earnedPoints', 0)
+            && afterHist.data.get('pointsDelta', 0) == (request.resource.data.get('earnedPoints', -1) - resource.data.get('earnedPoints', 0))
+          )
+          || (
+            afterHist.data.get('actionType', '') == 'HELPING_BONUS'
+            && isChainedTaskBonusHistory(familyId, memberId, opId, afterHist)
+          )
+        );
     }
 
-    // Allows a parent to update earnedPoints ONLY via an atomic points transaction that preserves all
-    // non-points fields and creates a matching points_history record.
+    // Allows a parent to update earnedPoints (and spentPoints on REWARD_REDEEMED) ONLY via an atomic points
+    // transaction that preserves all non-points fields and creates a matching points_history record.
     function isParentAtomicPointsUpdate(familyId, memberId) {
+      let oldEarned = resource.data.get('earnedPoints', 0);
+      let newEarned = request.resource.data.get('earnedPoints', -1);
+      let oldSpent = resource.data.get('spentPoints', 0);
+      let newSpent = request.resource.data.get('spentPoints', 0);
+      let opId = request.resource.data.get('lastPointsOperationId', '');
       return (
-          request.resource.data.get('earnedPoints', 0) != resource.data.get('earnedPoints', 0)
-          || request.resource.data.get('lastPointsOperationId', '') != resource.data.get('lastPointsOperationId', '')
+          newEarned != oldEarned
+          || opId != resource.data.get('lastPointsOperationId', '')
         )
         && request.resource.data.get('role', '') == resource.data.get('role', '')
         && request.resource.data.get('familyIdentity', '') == resource.data.get('familyIdentity', '')
-        && request.resource.data.get('spentPoints', 0) == resource.data.get('spentPoints', 0)
-        && request.resource.data.get('earnedPoints', -1) is int
-        && request.resource.data.get('earnedPoints', -1) >= 0
-        && request.resource.data.get('lastPointsOperationId', '') is string
-        && request.resource.data.get('lastPointsOperationId', '').size() > 0
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['earnedPoints', 'lastPointsOperationId', 'updatedAt'])
-        && hasMatchingAtomicPointsHistory(familyId, memberId, request.resource.data.lastPointsOperationId);
+        && newEarned is int
+        && newEarned >= 0
+        && newSpent is int
+        && newSpent >= oldSpent
+        && (
+          (
+            newSpent == oldSpent
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['earnedPoints', 'lastPointsOperationId', 'updatedAt'])
+          )
+          || (
+            newSpent == oldSpent + (oldEarned - newEarned)
+            && newEarned < oldEarned
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['earnedPoints', 'spentPoints', 'lastPointsOperationId', 'updatedAt'])
+          )
+        )
+        && opId is string
+        && opId.size() > 0
+        && hasMatchingAtomicPointsHistory(familyId, memberId, opId);
     }
 
     // Allows a parent to update non-points member profile metadata (or normalize legacy V1.5 role/identity)
@@ -432,6 +500,54 @@ service cloud.firestore {
         )
         && beforeTask.data.get('points', beforeTask.data.get('pointsValue', -1)) == delta
         && afterTask.data.get('points', afterTask.data.get('pointsValue', -1)) == delta;
+    }
+
+    // Verifies that a TASK_SPLIT_EARNED points_history entry is deterministically keyed as
+    // 'pts_task_' + taskId (performer share) or 'pts_task_' + taskId + '_orig' (original owner share),
+    // references a real task transitioning from unapproved to completed+approved, and ensures the split
+    // never exceeds the task's base points value.
+    function isValidTaskSplitHistoryCreate(familyId, entryId, taskId) {
+      let taskPath = /databases/$(database)/documents/families/$(familyId)/tasks/$(taskId);
+      let beforeTask = get(taskPath);
+      let afterTask = getAfter(taskPath);
+      let memberId = request.resource.data.get('memberId', '');
+      let delta = request.resource.data.get('pointsDelta', 0);
+      let taskPts = afterTask.data.get('points', afterTask.data.get('pointsValue', 0));
+      let perfHistPath = /databases/$(database)/documents/families/$(familyId)/points_history/$(('pts_task_' + taskId));
+      let origHistPath = /databases/$(database)/documents/families/$(familyId)/points_history/$(('pts_task_' + taskId + '_orig'));
+      return (entryId == ('pts_task_' + taskId) || entryId == ('pts_task_' + taskId + '_orig'))
+        && exists(taskPath)
+        && existsAfter(taskPath)
+        && beforeTask != null
+        && afterTask != null
+        && !(beforeTask.data.get('isCompleted', false) == true && beforeTask.data.get('approvedByParent', false) == true)
+        && beforeTask.data.get('rewardedOperationId', '') == ''
+        && afterTask.data.get('isCompleted', false) == true
+        && afterTask.data.get('approvedByParent', false) == true
+        && delta > 0
+        && delta <= taskPts
+        && (
+          (
+            entryId == ('pts_task_' + taskId)
+            && (
+              afterTask.data.get('assignedToMemberId', '') == memberId
+              || afterTask.data.get('assignedUid', '') == memberId
+              || afterTask.data.get('assignedMemberId', '') == memberId
+            )
+            && (
+              !existsAfter(origHistPath)
+              || (delta + getAfter(origHistPath).data.get('pointsDelta', 0)) <= taskPts
+            )
+          )
+          || (
+            entryId == ('pts_task_' + taskId + '_orig')
+            && afterTask.data.get('originalAssignedToMemberId', '') == memberId
+            && (
+              !existsAfter(perfHistPath)
+              || (delta + getAfter(perfHistPath).data.get('pointsDelta', 0)) <= taskPts
+            )
+          )
+        );
     }
 
     // =========================================================================
@@ -639,7 +755,17 @@ service cloud.firestore {
           && request.resource.data.get('operationId', entryId) == entryId
           && request.resource.data.get('memberId', '') is string
           && request.resource.data.get('memberId', '').size() > 0
-          && request.resource.data.get('actionType', '') in ['ADD', 'DEDUCT', 'RESET', 'TASK_EARNED']
+          && request.resource.data.get('actionType', '') in [
+            'ADD',
+            'DEDUCT',
+            'RESET',
+            'TASK_EARNED',
+            'TASK_SPLIT_EARNED',
+            'TRANSFER_OUT',
+            'TRANSFER_IN',
+            'HELPING_BONUS',
+            'REWARD_REDEEMED'
+          ]
           && request.resource.data.get('pointsDelta', 0) is int
           && request.resource.data.get('previousBalance', -1) is int
           && request.resource.data.get('previousBalance', -1) >= 0
@@ -655,6 +781,10 @@ service cloud.firestore {
               && request.resource.data.pointsDelta > 0
               && request.resource.data.newBalance == request.resource.data.previousBalance + request.resource.data.pointsDelta
             ) || (
+              request.resource.data.actionType == 'HELPING_BONUS'
+              && request.resource.data.pointsDelta > 0
+              && request.resource.data.newBalance == request.resource.data.previousBalance + request.resource.data.pointsDelta
+            ) || (
               request.resource.data.actionType == 'TASK_EARNED'
               && request.resource.data.pointsDelta > 0
               && request.resource.data.newBalance == request.resource.data.previousBalance + request.resource.data.pointsDelta
@@ -662,11 +792,45 @@ service cloud.firestore {
               && request.resource.data.get('taskId', '').size() > 0
               && isValidTaskEarnedHistoryCreate(familyId, entryId, request.resource.data.taskId)
             ) || (
+              request.resource.data.actionType == 'TASK_SPLIT_EARNED'
+              && request.resource.data.pointsDelta > 0
+              && request.resource.data.newBalance == request.resource.data.previousBalance + request.resource.data.pointsDelta
+              && request.resource.data.get('taskId', '') is string
+              && request.resource.data.get('taskId', '').size() > 0
+              && isValidTaskSplitHistoryCreate(familyId, entryId, request.resource.data.taskId)
+            ) || (
               request.resource.data.actionType == 'DEDUCT'
               && !entryId.matches('^pts_task_.*')
               && request.resource.data.pointsDelta < 0
               && request.resource.data.newBalance == request.resource.data.previousBalance + request.resource.data.pointsDelta
               && request.resource.data.newBalance >= 0
+            ) || (
+              request.resource.data.actionType == 'TRANSFER_OUT'
+              && !entryId.matches('^pts_task_.*')
+              && request.resource.data.pointsDelta < 0
+              && request.resource.data.newBalance == request.resource.data.previousBalance + request.resource.data.pointsDelta
+              && request.resource.data.newBalance >= 0
+              && request.resource.data.get('relatedMemberId', '') is string
+              && request.resource.data.get('relatedMemberId', '').size() > 0
+              && request.resource.data.get('relatedMemberId', '') != request.resource.data.memberId
+            ) || (
+              request.resource.data.actionType == 'TRANSFER_IN'
+              && !entryId.matches('^pts_task_.*')
+              && request.resource.data.pointsDelta > 0
+              && request.resource.data.newBalance == request.resource.data.previousBalance + request.resource.data.pointsDelta
+              && request.resource.data.get('relatedMemberId', '') is string
+              && request.resource.data.get('relatedMemberId', '').size() > 0
+              && request.resource.data.get('relatedMemberId', '') != request.resource.data.memberId
+            ) || (
+              request.resource.data.actionType == 'REWARD_REDEEMED'
+              && !entryId.matches('^pts_task_.*')
+              && request.resource.data.pointsDelta < 0
+              && request.resource.data.newBalance == request.resource.data.previousBalance + request.resource.data.pointsDelta
+              && request.resource.data.newBalance >= 0
+              && request.resource.data.get('redemptionId', '') is string
+              && request.resource.data.get('redemptionId', '').size() > 0
+              && existsAfter(/databases/$(database)/documents/families/$(familyId)/redemptions/$(request.resource.data.redemptionId))
+              && getAfter(/databases/$(database)/documents/families/$(familyId)/redemptions/$(request.resource.data.redemptionId)).data.get('status', '') == 'APPROVED'
             ) || (
               request.resource.data.actionType == 'RESET'
               && !entryId.matches('^pts_task_.*')
@@ -676,9 +840,32 @@ service cloud.firestore {
           )
           && exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId))
           && existsAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId))
-          && get(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('earnedPoints', 0) == request.resource.data.previousBalance
-          && getAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('earnedPoints', -1) == request.resource.data.newBalance
-          && getAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('lastPointsOperationId', '') == entryId;
+          && (
+            (
+              get(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('earnedPoints', 0) == request.resource.data.previousBalance
+              && getAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('earnedPoints', -1) == request.resource.data.newBalance
+              && getAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('lastPointsOperationId', '') == entryId
+            )
+            || (
+              // Chained task approval + helping bonus in the same atomic batch for the same performer
+              request.resource.data.actionType in ['TASK_EARNED', 'TASK_SPLIT_EARNED']
+              && entryId == ('pts_task_' + request.resource.data.get('taskId', ''))
+              && get(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('earnedPoints', 0) == request.resource.data.previousBalance
+              && existsAfter(/databases/$(database)/documents/families/$(familyId)/points_history/$(entryId + '_bonus'))
+              && getAfter(/databases/$(database)/documents/families/$(familyId)/points_history/$(entryId + '_bonus')).data.get('previousBalance', -1) == request.resource.data.newBalance
+              && getAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('earnedPoints', -1) == getAfter(/databases/$(database)/documents/families/$(familyId)/points_history/$(entryId + '_bonus')).data.get('newBalance', -1)
+              && getAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('lastPointsOperationId', '') == (entryId + '_bonus')
+            )
+            || (
+              request.resource.data.actionType == 'HELPING_BONUS'
+              && entryId == ('pts_task_' + request.resource.data.get('taskId', '') + '_bonus')
+              && existsAfter(/databases/$(database)/documents/families/$(familyId)/points_history/$(('pts_task_' + request.resource.data.get('taskId', ''))))
+              && get(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('earnedPoints', 0) == getAfter(/databases/$(database)/documents/families/$(familyId)/points_history/$(('pts_task_' + request.resource.data.get('taskId', '')))).data.get('previousBalance', -1)
+              && getAfter(/databases/$(database)/documents/families/$(familyId)/points_history/$(('pts_task_' + request.resource.data.get('taskId', '')))).data.get('newBalance', -1) == request.resource.data.previousBalance
+              && getAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('earnedPoints', -1) == request.resource.data.newBalance
+              && getAfter(/databases/$(database)/documents/families/$(familyId)/members/$(request.resource.data.memberId)).data.get('lastPointsOperationId', '') == entryId
+            )
+          );
 
         allow update, delete: if false;
       }
@@ -695,21 +882,104 @@ service cloud.firestore {
             resource.data.get('rewardedOperationId', '') == ''
             || request.resource.data.get('rewardedOperationId', '') == resource.data.get('rewardedOperationId', '')
           )
-        ) || (isChild(familyId) && isChildTaskCompletionOnly());
+        ) || (
+          isChild(familyId)
+          && (isChildTaskCompletionOnly() || isChildTaskProposalLinkOnly(familyId))
+        );
         allow delete: if isParent(familyId);
       }
 
+      // -----------------------------------------------------------------------
+      // 2b-2. Task Collaboration Proposals (/families/{familyId}/task_proposals/{proposalId})
+      // - Stage 1 (Create): Child proposes to volunteer for another child's active task or swap tasks -> status 'PENDING_CHILD_APPROVAL'.
+      // - Stage 2 (Child Response): Target child approves ('PENDING_PARENT_APPROVAL') or rejects ('REJECTED_BY_CHILD').
+      //   Requester child (or parent) may also cancel a pending proposal ('CANCELLED').
+      // - Stage 3 (Parent Decision): Only a PARENT can transition 'PENDING_PARENT_APPROVAL' -> 'APPROVED_BY_PARENT' or 'REJECTED_BY_PARENT'.
+      // -----------------------------------------------------------------------
+      match /task_proposals/{proposalId} {
+        allow get, list: if isFamilyMember(familyId);
+
+        allow create: if isFamilyMember(familyId)
+          && request.resource.data.get('familyId', '') == familyId
+          && request.resource.data.get('id', proposalId) == proposalId
+          && request.resource.data.get('type', '') in ['VOLUNTEER_FOR_TASK', 'SWAP_TASKS']
+          && request.resource.data.get('requesterChildId', '') == request.auth.uid
+          && request.resource.data.get('targetChildId', '') is string
+          && request.resource.data.get('targetChildId', '').size() > 0
+          && request.resource.data.get('targetChildId', '') != request.auth.uid
+          && request.resource.data.get('primaryTaskId', '') is string
+          && request.resource.data.get('primaryTaskId', '').size() > 0
+          && request.resource.data.get('status', '') == 'PENDING_CHILD_APPROVAL'
+          && exists(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.primaryTaskId))
+          && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.primaryTaskId)).data.get('isCompleted', false) == false
+          && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.primaryTaskId)).data.get('approvedByParent', false) == false
+          && (
+            request.resource.data.type == 'VOLUNTEER_FOR_TASK'
+            || (
+              request.resource.data.type == 'SWAP_TASKS'
+              && request.resource.data.get('offeredSwapTaskId', '') is string
+              && request.resource.data.get('offeredSwapTaskId', '').size() > 0
+              && request.resource.data.get('offeredSwapTaskId', '') != request.resource.data.primaryTaskId
+              && exists(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.offeredSwapTaskId))
+              && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.offeredSwapTaskId)).data.get('isCompleted', false) == false
+              && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.offeredSwapTaskId)).data.get('approvedByParent', false) == false
+            )
+          );
+
+        allow update: if (
+          // Target child approves (moves to PENDING_PARENT_APPROVAL) or rejects (REJECTED_BY_CHILD)
+          isFamilyMember(familyId)
+          && resource.data.get('targetChildId', '') == request.auth.uid
+          && resource.data.get('status', '') == 'PENDING_CHILD_APPROVAL'
+          && request.resource.data.get('status', '') in ['PENDING_PARENT_APPROVAL', 'REJECTED_BY_CHILD']
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'childRespondedAtMillis', 'updatedAtMillis'])
+        ) || (
+          // Requester child cancels their own pending proposal
+          isFamilyMember(familyId)
+          && resource.data.get('requesterChildId', '') == request.auth.uid
+          && resource.data.get('status', '') in ['PENDING_CHILD_APPROVAL', 'PENDING_PARENT_APPROVAL']
+          && request.resource.data.get('status', '') == 'CANCELLED'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAtMillis'])
+        ) || (
+          // Parent final decision (only after target child approved -> PENDING_PARENT_APPROVAL) or parent cancellation
+          isParent(familyId)
+          && request.resource.data.get('requesterChildId', '') == resource.data.get('requesterChildId', '')
+          && request.resource.data.get('targetChildId', '') == resource.data.get('targetChildId', '')
+          && request.resource.data.get('primaryTaskId', '') == resource.data.get('primaryTaskId', '')
+          && (
+            (
+              resource.data.get('status', '') == 'PENDING_PARENT_APPROVAL'
+              && request.resource.data.get('status', '') in ['APPROVED_BY_PARENT', 'REJECTED_BY_PARENT']
+            )
+            || (
+              resource.data.get('status', '') in ['PENDING_CHILD_APPROVAL', 'PENDING_PARENT_APPROVAL']
+              && request.resource.data.get('status', '') == 'CANCELLED'
+            )
+          )
+        );
+
+        allow delete: if isParent(familyId);
+      }
 
       // -----------------------------------------------------------------------
       // 2c. Family Rewards (/families/{familyId}/rewards/{rewardId})
+      // - Readable by all family members.
+      // - Created, edited, activated/deactivated, and soft-deleted exclusively by a PARENT.
       // -----------------------------------------------------------------------
       match /rewards/{rewardId} {
         allow get, list: if isFamilyMember(familyId);
-        allow create, update, delete: if isParent(familyId);
+        allow create, update: if isParent(familyId)
+          && request.resource.data.get('pointsCost', 0) is int
+          && request.resource.data.get('pointsCost', 0) > 0
+          && request.resource.data.get('title', '') is string
+          && request.resource.data.get('title', '').size() > 0;
+        allow delete: if isParent(familyId);
       }
 
       // -----------------------------------------------------------------------
       // 2d. Reward Redemptions (/families/{familyId}/redemptions/{redemptionId})
+      // - Child creates a redemption request in PENDING_PARENT_APPROVAL when earnedPoints >= pointsCost.
+      // - Only a PARENT can approve (APPROVED) or reject (REJECTED) or delete a redemption request.
       // -----------------------------------------------------------------------
       match /redemptions/{redemptionId} {
         allow get, list: if isFamilyMember(familyId);
@@ -717,10 +987,17 @@ service cloud.firestore {
           && request.resource.data.get('childUid', '') == request.auth.uid
           && request.resource.data.get('pointsCost', 0) is int
           && request.resource.data.get('pointsCost', 0) > 0
+          && (!('status' in request.resource.data) || request.resource.data.status == 'PENDING_PARENT_APPROVAL')
           && (
-            get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.get('earnedPoints', 0)
-            - get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.get('spentPoints', 0)
-          ) >= request.resource.data.get('pointsCost', 0);
+            !('rewardId' in request.resource.data)
+            || !exists(/databases/$(database)/documents/families/$(familyId)/rewards/$(request.resource.data.rewardId))
+            || (
+              get(/databases/$(database)/documents/families/$(familyId)/rewards/$(request.resource.data.rewardId)).data.get('isActive', true) == true
+              && get(/databases/$(database)/documents/families/$(familyId)/rewards/$(request.resource.data.rewardId)).data.get('isDeleted', false) == false
+              && get(/databases/$(database)/documents/families/$(familyId)/rewards/$(request.resource.data.rewardId)).data.get('pointsCost', request.resource.data.pointsCost) == request.resource.data.pointsCost
+            )
+          )
+          && get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.get('earnedPoints', 0) >= request.resource.data.get('pointsCost', 0);
         allow update, delete: if isParent(familyId);
       }
 

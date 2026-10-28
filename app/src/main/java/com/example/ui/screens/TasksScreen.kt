@@ -121,6 +121,12 @@ fun TasksScreen(
     taskOperationError: String? = null,
     onApproveTask: (String) -> Unit = {},
     onDismissTaskError: () -> Unit = {},
+    taskProposals: List<TaskCollaborationProposal> = emptyList(),
+    onProposeVolunteer: (taskId: String, note: String) -> Unit = { _, _ -> },
+    onProposeSwap: (offeredTaskId: String, targetTaskId: String, note: String) -> Unit = { _, _, _ -> },
+    onChildRespondProposal: (proposalId: String, approve: Boolean) -> Unit = { _, _ -> },
+    onParentDecideProposal: (proposalId: String, approve: Boolean) -> Unit = { _, _ -> },
+    onApproveTaskWithSplit: (taskId: String, performerPoints: Int, originalOwnerPoints: Int, bonusPoints: Int) -> Unit = { _, _, _, _ -> },
     periods: List<SchedulePeriod> = emptyList(),
     alarms: List<FamilyAlarm> = emptyList(),
     onNavigateToScreen: (AppScreen) -> Unit = {}
@@ -129,6 +135,19 @@ fun TasksScreen(
     var filterTab by remember { mutableIntStateOf(0) } // 0 = All, 1 = Today, 2 = Week, 3 = Completed
     var searchQuery by remember { mutableStateOf("") }
     var selectedTaskForDetail by remember { mutableStateOf<FamilyTask?>(null) }
+    var targetTaskForSwapDialog by remember { mutableStateOf<FamilyTask?>(null) }
+    var taskForParentSplitDialog by remember { mutableStateOf<FamilyTask?>(null) }
+
+    val visibleProposals = remember(taskProposals, currentMember) {
+        taskProposals
+            .filter { it.isVisibleToMember(currentMember) && it.status != TaskProposalStatus.CANCELLED }
+            .sortedWith(
+                compareByDescending<TaskCollaborationProposal> { it.isAwaitingActionFromMember(currentMember) }
+                    .thenByDescending { it.status.isPending }
+                    .thenByDescending { it.updatedAtMillis }
+            )
+            .take(8)
+    }
 
     val todayDate = remember { LocalDate.now() }
     val todayEpoch = remember(todayDate) { todayDate.toEpochDay() }
@@ -752,6 +771,19 @@ fun TasksScreen(
                     }
                 }
 
+                // 5.5 Task Collaboration Proposals (Volunteer & Swap Requests)
+                if (visibleProposals.isNotEmpty()) {
+                    item(key = "task_proposals_section") {
+                        TaskCollaborationProposalsCard(
+                            proposals = visibleProposals,
+                            currentMember = currentMember,
+                            isHebrew = isHebrew,
+                            onChildRespond = onChildRespondProposal,
+                            onParentDecide = onParentDecideProposal
+                        )
+                    }
+                }
+
                 // 6. Tasks List (Presented Early on Screen)
                 if (filteredTasks.isEmpty()) {
                     item {
@@ -772,6 +804,9 @@ fun TasksScreen(
                 } else {
                     items(filteredTasks, key = { it.id }) { task ->
                         val assignedMember = members.find { it.id == task.assignedToMemberId }
+                        val activeProposalForTask = taskProposals.find {
+                            it.status.isPending && (it.primaryTaskId == task.id || it.offeredSwapTaskId == task.id)
+                        }
                         val syncState = taskSyncStates[task.id] ?: when {
                             task.isCompleted && task.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
                             task.isCompleted && !task.approvedByParent -> TaskCompletionSyncState.PENDING_APPROVAL
@@ -782,9 +817,13 @@ fun TasksScreen(
                             assignedMember = assignedMember,
                             currentMember = currentMember,
                             syncState = syncState,
+                            activeProposal = activeProposalForTask,
                             isHebrew = isHebrew,
                             onToggle = { onToggleTask(task.id) },
                             onApprove = { onApproveTask(task.id) },
+                            onOpenSplitApprove = { taskForParentSplitDialog = task },
+                            onVolunteer = { onProposeVolunteer(task.id, "") },
+                            onProposeSwap = { targetTaskForSwapDialog = task },
                             onEdit = { onEditTask(task) },
                             onDelete = { onDeleteTask(task.id) },
                             onSendNudge = { onSendNudge(task) },
@@ -819,6 +858,47 @@ fun TasksScreen(
             onApprove = { onApproveTask(latestTask.id) }
         )
     }
+
+    // Child Swap Task Selection Dialog
+    targetTaskForSwapDialog?.let { targetTask ->
+        val myEligibleSwapTasks = remember(tasks, currentMember.id, targetTask.id) {
+            tasks.filter {
+                it.assignedToMemberId == currentMember.id &&
+                    it.id != targetTask.id &&
+                    it.isEligibleForChildProposal()
+            }
+        }
+        ProposeTaskSwapDialog(
+            targetTask = targetTask,
+            targetOwnerName = members.find { it.id == targetTask.assignedToMemberId }?.name.orEmpty(),
+            myEligibleTasks = myEligibleSwapTasks,
+            isHebrew = isHebrew,
+            onConfirmSwap = { offeredTaskId, note ->
+                onProposeSwap(offeredTaskId, targetTask.id, note)
+                targetTaskForSwapDialog = null
+            },
+            onDismiss = { targetTaskForSwapDialog = null }
+        )
+    }
+
+    // Parent Flexible Points Split Approval Dialog
+    taskForParentSplitDialog?.let { targetTask ->
+        val performerName = members.find { it.id == targetTask.assignedToMemberId }?.name ?: "הילד/ה המבצע/ת"
+        val origOwnerName = targetTask.originalAssignedMemberName?.takeIf { it.isNotBlank() }
+            ?: targetTask.originalAssignedToMemberId?.let { origId -> members.find { it.id == origId }?.name }
+            ?: ""
+        ParentTaskPointsSplitDialog(
+            task = targetTask,
+            performerName = performerName,
+            originalOwnerName = origOwnerName,
+            isHebrew = isHebrew,
+            onConfirmSplit = { performerPts, origPts, bonusPts ->
+                onApproveTaskWithSplit(targetTask.id, performerPts, origPts, bonusPts)
+                taskForParentSplitDialog = null
+            },
+            onDismiss = { taskForParentSplitDialog = null }
+        )
+    }
 }
 
 @Composable
@@ -827,9 +907,13 @@ private fun TaskItemCardModern(
     assignedMember: FamilyMember?,
     currentMember: FamilyMember = FamilyMember(id = "", name = "", role = UserRole.PARENT, colorHex = 0xFF2B6CB0),
     syncState: TaskCompletionSyncState = TaskCompletionSyncState.IDLE,
+    activeProposal: TaskCollaborationProposal? = null,
     isHebrew: Boolean,
     onToggle: () -> Unit,
     onApprove: () -> Unit = {},
+    onOpenSplitApprove: () -> Unit = {},
+    onVolunteer: () -> Unit = {},
+    onProposeSwap: () -> Unit = {},
     onEdit: () -> Unit = {},
     onDelete: () -> Unit = {},
     onSendNudge: () -> Unit = {},
@@ -1106,6 +1190,26 @@ private fun TaskItemCardModern(
                             contentColor = glass.textPrimary
                         )
                     }
+
+                    // Provenance Chip when task was reassigned via Volunteer or Swap
+                    if (task.wasTransferredOrSwapped && !task.originalAssignedMemberName.isNullOrBlank()) {
+                        FamilyStatusChip(
+                            emoji = "🤝",
+                            label = if (isHebrew) "במקום ${task.originalAssignedMemberName}" else "For ${task.originalAssignedMemberName}",
+                            containerColor = glass.primaryAccentSoftBg,
+                            contentColor = glass.primaryAccent
+                        )
+                    }
+
+                    // Active Collaboration Proposal Status Badge on Task
+                    if (activeProposal != null) {
+                        FamilyStatusChip(
+                            emoji = if (activeProposal.type == TaskProposalType.SWAP_TASKS) "🔁" else "🙋",
+                            label = activeProposal.status.getDisplayName(isHebrew),
+                            containerColor = glass.warningBg,
+                            contentColor = glass.warningText
+                        )
+                    }
                 }
             }
 
@@ -1221,6 +1325,71 @@ private fun TaskItemCardModern(
             }
         }
 
+        // Child Collaboration Action Row: Volunteer for Another Child's Task or Propose Swap
+        val canChildCollaborate = !currentMember.isParent &&
+            task.assignedToMemberId.isNotBlank() &&
+            task.assignedToMemberId != currentMember.id &&
+            task.isEligibleForChildProposal() &&
+            activeProposal == null
+        if (canChildCollaborate) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = glass.primaryAccentSoftBg,
+                    border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.4f)),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onVolunteer() }
+                        .testTag("volunteer_task_btn_${task.id}")
+                ) {
+                    Box(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (isHebrew) "🙋 אני רוצה לבצע את המשימה" else "🙋 I want to do this task",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = glass.primaryAccent
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = SoftLavender.copy(alpha = if (glass.isDark) 0.24f else 0.14f),
+                    border = BorderStroke(1.dp, SoftLavender.copy(alpha = 0.45f)),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onProposeSwap() }
+                        .testTag("propose_swap_btn_${task.id}")
+                ) {
+                    Box(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (isHebrew) "🔁 הצע החלפת משימות" else "🔁 Propose Swap",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (glass.isDark) Color(0xFFDDD6FE) else PastelPurpleDark
+                            ),
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+        }
+
         // Parent Approval Action Bar when a child has marked the task completed
         if (currentMember.isParent && isPendingApproval && !isSaving) {
             Spacer(modifier = Modifier.height(10.dp))
@@ -1230,38 +1399,602 @@ private fun TaskItemCardModern(
                 border = BorderStroke(1.dp, glass.warningText.copy(alpha = 0.45f)),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text(
-                        text = if (isHebrew)
-                            "סומן כבוצע ע\"י ${assignedMember?.name ?: "הילד/ה"} וממתין לאישורך"
-                        else
-                            "Completed by ${assignedMember?.name ?: "child"} — awaiting approval",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            color = glass.warningText,
-                            fontWeight = FontWeight.Bold
-                        ),
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    FamilyPrimaryButton(
-                        text = if (isHebrew) "אשר ביצוע ✓" else "Approve ✓",
-                        onClick = onApprove,
-                        containerColor = GoogleGreen,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        modifier = Modifier
-                            .height(34.dp)
-                            .testTag("approve_task_${task.id}")
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (isHebrew)
+                                    "סומן כבוצע ע\"י ${assignedMember?.name ?: "הילד/ה"} וממתין לאישורך"
+                                else
+                                    "Completed by ${assignedMember?.name ?: "child"} — awaiting approval",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = glass.warningText,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            )
+                            if (task.wasTransferredOrSwapped && !task.originalAssignedMemberName.isNullOrBlank()) {
+                                Text(
+                                    text = if (isHebrew)
+                                        "שויך במקור ל-${task.originalAssignedMemberName} • ניתן לחלק נקודות או להעניק בונוס"
+                                    else
+                                        "Originally assigned to ${task.originalAssignedMemberName}",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        color = glass.primaryAccent,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (task.wasTransferredOrSwapped) {
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = glass.primaryAccentSoftBg,
+                                    border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.45f)),
+                                    modifier = Modifier
+                                        .height(34.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .clickable { onOpenSplitApprove() }
+                                        .testTag("split_points_task_${task.id}")
+                                ) {
+                                    Box(
+                                        modifier = Modifier.padding(horizontal = 10.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = if (isHebrew) "חלוקת נקודות ⚖️" else "Split ⚖️",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = glass.primaryAccent
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                            FamilyPrimaryButton(
+                                text = if (isHebrew) "אשר ביצוע ✓" else "Approve ✓",
+                                onClick = onApprove,
+                                containerColor = GoogleGreen,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .height(34.dp)
+                                    .testTag("approve_task_${task.id}")
+                            )
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun TaskCollaborationProposalsCard(
+    proposals: List<TaskCollaborationProposal>,
+    currentMember: FamilyMember,
+    isHebrew: Boolean,
+    onChildRespond: (proposalId: String, approve: Boolean) -> Unit,
+    onParentDecide: (proposalId: String, approve: Boolean) -> Unit
+) {
+    val glass = LocalSoftGlassColors.current
+    FamilyGlassCard(
+        cornerRadius = 22.dp,
+        isTintedBlue = true,
+        elevation = 4.dp,
+        contentPadding = PaddingValues(14.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("task_proposals_banner")
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = if (isHebrew) "🤝 הצעות שיתוף והחלפת משימות" else "🤝 Task Volunteering & Swap Requests",
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontWeight = FontWeight.ExtraBold,
+                        color = glass.textPrimary
+                    )
+                )
+                FamilyStatusChip(
+                    label = "${proposals.count { it.status.isPending }} ${if (isHebrew) "פעילות" else "active"}",
+                    containerColor = glass.primaryAccentSoftBg,
+                    contentColor = glass.primaryAccent
+                )
+            }
+
+            proposals.forEach { proposal ->
+                val isAwaitingMyChildResponse = !currentMember.isParent &&
+                    proposal.status == TaskProposalStatus.PENDING_CHILD_APPROVAL &&
+                    proposal.targetChildId == currentMember.id
+                val isAwaitingParentDecision = currentMember.isParent &&
+                    proposal.status == TaskProposalStatus.PENDING_PARENT_APPROVAL
+
+                val statusColor = when (proposal.status) {
+                    TaskProposalStatus.APPROVED_BY_PARENT -> GoogleGreen
+                    TaskProposalStatus.REJECTED_BY_CHILD, TaskProposalStatus.REJECTED_BY_PARENT, TaskProposalStatus.CANCELLED -> GoogleRed
+                    else -> Color(0xFFE8710A)
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = glass.cardBackground,
+                    border = BorderStroke(1.dp, statusColor.copy(alpha = 0.35f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("proposal_card_${proposal.id}")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = if (proposal.type == TaskProposalType.SWAP_TASKS) {
+                                    if (isHebrew) "🔁 הצעת החלפת משימות" else "🔁 Task Swap Proposal"
+                                } else {
+                                    if (isHebrew) "🙋 הצעה לביצוע משימה" else "🙋 Volunteer Proposal"
+                                },
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = glass.primaryAccent
+                                )
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = statusColor.copy(alpha = 0.14f)
+                            ) {
+                                Text(
+                                    text = proposal.status.getDisplayName(isHebrew),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = statusColor
+                                    ),
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+
+                        val desc = if (proposal.type == TaskProposalType.SWAP_TASKS) {
+                            if (isHebrew) {
+                                "${proposal.requesterChildName} מציע/ה להחליף את \"${proposal.offeredSwapTaskTitle.orEmpty()}\" (${proposal.offeredSwapTaskPoints ?: 0} נק׳) תמורת \"${proposal.primaryTaskTitle}\" (${proposal.primaryTaskPoints} נק׳) של ${proposal.targetChildName}"
+                            } else {
+                                "${proposal.requesterChildName} proposes swapping \"${proposal.offeredSwapTaskTitle.orEmpty()}\" for \"${proposal.primaryTaskTitle}\" (${proposal.targetChildName})"
+                            }
+                        } else {
+                            if (isHebrew) {
+                                "${proposal.requesterChildName} מבקש/ת לבצע את \"${proposal.primaryTaskTitle}\" (+${proposal.primaryTaskPoints} נק׳) במקום ${proposal.targetChildName}"
+                            } else {
+                                "${proposal.requesterChildName} wants to perform \"${proposal.primaryTaskTitle}\" instead of ${proposal.targetChildName}"
+                            }
+                        }
+
+                        Text(
+                            text = desc,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = glass.textPrimary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        )
+
+                        if (isAwaitingMyChildResponse) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                FamilyPrimaryButton(
+                                    text = if (isHebrew) "אשר העברה להורה ✓" else "Approve ✓",
+                                    onClick = { onChildRespond(proposal.id, true) },
+                                    containerColor = GoogleGreen,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(36.dp)
+                                        .testTag("child_approve_proposal_${proposal.id}")
+                                )
+                                OutlinedButton(
+                                    onClick = { onChildRespond(proposal.id, false) },
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = BorderStroke(1.dp, GoogleRed.copy(alpha = 0.5f)),
+                                    modifier = Modifier
+                                        .height(36.dp)
+                                        .testTag("child_reject_proposal_${proposal.id}")
+                                ) {
+                                    Text(
+                                        text = if (isHebrew) "דחה" else "Reject",
+                                        color = GoogleRed,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+                        }
+
+                        if (isAwaitingParentDecision) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                FamilyPrimaryButton(
+                                    text = if (isHebrew) "אשר שינוי שיוך (הורה) ✓" else "Parent Approve ✓",
+                                    onClick = { onParentDecide(proposal.id, true) },
+                                    containerColor = GoogleGreen,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(36.dp)
+                                        .testTag("parent_approve_proposal_${proposal.id}")
+                                )
+                                OutlinedButton(
+                                    onClick = { onParentDecide(proposal.id, false) },
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = BorderStroke(1.dp, GoogleRed.copy(alpha = 0.5f)),
+                                    modifier = Modifier
+                                        .height(36.dp)
+                                        .testTag("parent_reject_proposal_${proposal.id}")
+                                ) {
+                                    Text(
+                                        text = if (isHebrew) "דחה" else "Reject",
+                                        color = GoogleRed,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProposeTaskSwapDialog(
+    targetTask: FamilyTask,
+    targetOwnerName: String,
+    myEligibleTasks: List<FamilyTask>,
+    isHebrew: Boolean,
+    onConfirmSwap: (offeredTaskId: String, note: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val glass = LocalSoftGlassColors.current
+    var selectedOfferedTaskId by remember(myEligibleTasks) {
+        mutableStateOf(myEligibleTasks.firstOrNull()?.id.orEmpty())
+    }
+    var noteText by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = glass.cardBackground,
+        shape = RoundedCornerShape(24.dp),
+        modifier = Modifier.testTag("propose_task_swap_dialog"),
+        title = {
+            Text(
+                text = if (isHebrew) "🔁 הצעת החלפת משימות" else "🔁 Propose Task Swap",
+                style = MaterialTheme.typography.titleMedium.copy(
+                    fontWeight = FontWeight.ExtraBold,
+                    color = glass.textPrimary
+                )
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = if (isHebrew) {
+                        "המשימה המבוקשת של $targetOwnerName: \"${targetTask.title}\" (+${targetTask.points} נק׳)"
+                    } else {
+                        "Requested task from $targetOwnerName: \"${targetTask.title}\" (+${targetTask.points} pts)"
+                    },
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = glass.primaryAccent
+                    )
+                )
+
+                if (myEligibleTasks.isEmpty()) {
+                    Text(
+                        text = if (isHebrew) {
+                            "אין לך כרגע משימות פעילות פנויות להציע להחלפה. עדיין באפשרותך להציע לבצע את המשימה באמצעות הכפתור \"🙋 אני רוצה לבצע את המשימה\"."
+                        } else {
+                            "You have no active tasks available to swap right now."
+                        },
+                        style = MaterialTheme.typography.bodySmall.copy(color = glass.dangerText)
+                    )
+                } else {
+                    Text(
+                        text = if (isHebrew) "בחר/י משימה שלך להחלפה:" else "Choose one of your tasks to offer:",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = glass.textPrimary
+                        )
+                    )
+                    myEligibleTasks.forEach { myTask ->
+                        val isSelected = selectedOfferedTaskId == myTask.id
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = if (isSelected) glass.primaryAccentSoftBg else glass.screenBackground,
+                            border = BorderStroke(
+                                width = if (isSelected) 1.5.dp else 1.dp,
+                                color = if (isSelected) glass.primaryAccent else glass.cardBorder
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { selectedOfferedTaskId = myTask.id }
+                                .testTag("swap_offer_option_${myTask.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "${myTask.category.defaultEmoji} ${myTask.title}",
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+                                        color = glass.textPrimary
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    text = "+${myTask.points} ⭐",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = glass.primaryAccent
+                                    )
+                                )
+                            }
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = noteText,
+                        onValueChange = { noteText = it },
+                        label = { Text(if (isHebrew) "הערה קצרה (אופציונלי)" else "Short note (optional)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (myEligibleTasks.isNotEmpty()) {
+                FamilyPrimaryButton(
+                    text = if (isHebrew) "שלח הצעת החלפה 🔁" else "Send Swap Proposal 🔁",
+                    enabled = selectedOfferedTaskId.isNotBlank(),
+                    onClick = { onConfirmSwap(selectedOfferedTaskId, noteText) },
+                    modifier = Modifier.testTag("confirm_propose_swap_btn")
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(
+                    text = if (isHebrew) "ביטול" else "Cancel",
+                    color = glass.textSecondary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    )
+}
+
+@Composable
+private fun ParentTaskPointsSplitDialog(
+    task: FamilyTask,
+    performerName: String,
+    originalOwnerName: String,
+    isHebrew: Boolean,
+    onConfirmSplit: (performerPoints: Int, originalOwnerPoints: Int, bonusPoints: Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val glass = LocalSoftGlassColors.current
+    var splitMode by remember { mutableIntStateOf(0) } // 0 = 100% performer, 1 = 100% original owner, 2 = custom split
+    var customPerformerText by remember(task.points) {
+        mutableStateOf(((task.points + 1) / 2).toString())
+    }
+    var customOrigText by remember(task.points) {
+        mutableStateOf((task.points / 2).toString())
+    }
+    var bonusPointsText by remember { mutableStateOf("0") }
+    var errorMsg by remember { mutableStateOf<String?>(null) }
+
+    val performerPoints = when (splitMode) {
+        0 -> task.points
+        1 -> 0
+        else -> customPerformerText.trim().toIntOrNull() ?: 0
+    }
+    val originalOwnerPoints = when (splitMode) {
+        0 -> 0
+        1 -> task.points
+        else -> customOrigText.trim().toIntOrNull() ?: 0
+    }
+    val bonusPoints = bonusPointsText.trim().toIntOrNull()?.coerceAtLeast(0) ?: 0
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = glass.cardBackground,
+        shape = RoundedCornerShape(24.dp),
+        modifier = Modifier.testTag("parent_points_split_dialog"),
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = if (isHebrew) "⚖️ אישור וחלוקת נקודות למשימה" else "⚖️ Approve & Split Task Points",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.ExtraBold,
+                        color = glass.textPrimary
+                    )
+                )
+                Text(
+                    text = "${task.title} • ${task.points} ${if (isHebrew) "נקודות במשימה" else "task points"}",
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        color = glass.primaryAccent,
+                        fontWeight = FontWeight.Bold
+                    )
+                )
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = splitMode == 0,
+                    onClick = {
+                        splitMode = 0
+                        errorMsg = null
+                    },
+                    label = {
+                        Text(
+                            text = if (isHebrew) "100% למבצע/ת ($performerName: +${task.points} נק׳)" else "100% to Performer ($performerName)",
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("split_mode_performer_100")
+                )
+
+                if (originalOwnerName.isNotBlank()) {
+                    FilterChip(
+                        selected = splitMode == 1,
+                        onClick = {
+                            splitMode = 1
+                            errorMsg = null
+                        },
+                        label = {
+                            Text(
+                                text = if (isHebrew) "100% לבעלים המקורי ($originalOwnerName: +${task.points} נק׳)" else "100% to Original ($originalOwnerName)",
+                                fontWeight = FontWeight.Bold
+                            )
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("split_mode_original_100")
+                    )
+
+                    FilterChip(
+                        selected = splitMode == 2,
+                        onClick = {
+                            splitMode = 2
+                            errorMsg = null
+                        },
+                        label = {
+                            Text(
+                                text = if (isHebrew) "חלוקה מותאמת אישית בין $performerName ו-$originalOwnerName" else "Custom Split",
+                                fontWeight = FontWeight.Bold
+                            )
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("split_mode_custom")
+                    )
+                }
+
+                if (splitMode == 2) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = customPerformerText,
+                            onValueChange = {
+                                customPerformerText = it.filter { c -> c.isDigit() }
+                                errorMsg = null
+                            },
+                            label = { Text(performerName) },
+                            singleLine = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("split_performer_points_input")
+                        )
+                        OutlinedTextField(
+                            value = customOrigText,
+                            onValueChange = {
+                                customOrigText = it.filter { c -> c.isDigit() }
+                                errorMsg = null
+                            },
+                            label = { Text(originalOwnerName) },
+                            singleLine = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("split_original_points_input")
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = bonusPointsText,
+                    onValueChange = {
+                        bonusPointsText = it.filter { c -> c.isDigit() }
+                        errorMsg = null
+                    },
+                    label = {
+                        Text(
+                            if (isHebrew) "בונוס מיוחד מהורה ל-$performerName (ללא הפחתה)"
+                            else "Extra Parent Helping Bonus for $performerName"
+                        )
+                    },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("split_bonus_points_input")
+                )
+
+                errorMsg?.let { err ->
+                    Text(
+                        text = err,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = GoogleRed,
+                            fontWeight = FontWeight.Bold
+                        )
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            FamilyPrimaryButton(
+                text = if (isHebrew) "אשר משימה וחלק נקודות ✓" else "Approve & Split ✓",
+                onClick = {
+                    if (performerPoints < 0 || originalOwnerPoints < 0) {
+                        errorMsg = if (isHebrew) "נקודות חייבות להיות חיוביות" else "Points must be non-negative"
+                    } else if (performerPoints + originalOwnerPoints > task.points) {
+                        errorMsg = if (isHebrew) {
+                            "סך החלוקה (${performerPoints + originalOwnerPoints}) עולה על נקודות המשימה (${task.points})"
+                        } else {
+                            "Split total exceeds task points (${task.points})"
+                        }
+                    } else {
+                        onConfirmSplit(performerPoints, originalOwnerPoints, bonusPoints)
+                    }
+                },
+                modifier = Modifier.testTag("confirm_split_points_btn")
+            )
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(
+                    text = if (isHebrew) "ביטול" else "Cancel",
+                    color = glass.textSecondary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    )
 }
 
 @Composable
@@ -1347,4 +2080,5 @@ fun TaskCardItem(
         onCardClick = onEdit
     )
 }
+
 
