@@ -63,20 +63,32 @@ fun FamilyTasksApp(
     }
 
     DisposableEffect(lifecycleOwner, context) {
+        com.example.notifications.FcmTokenManager.setAppForegroundState(true)
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                fullScreenPermissionRefreshTick++
-                com.example.notifications.FamilyAlarmScheduler.restoreAlarmsOnBoot(context)
-                viewModel.resyncAlarmsForActiveMember()
-                viewModel.resyncTaskRemindersForActiveMember()
-                com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestoreAsync(
-                    context = context,
-                    reason = "foreground_resume"
-                )
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_START -> {
+                    com.example.notifications.FcmTokenManager.setAppForegroundState(true)
+                }
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> {
+                    com.example.notifications.FcmTokenManager.setAppForegroundState(true)
+                    fullScreenPermissionRefreshTick++
+                    com.example.notifications.FamilyAlarmScheduler.restoreAlarmsOnBoot(context)
+                    viewModel.resyncAlarmsForActiveMember()
+                    viewModel.resyncTaskRemindersForActiveMember()
+                    com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestoreAsync(
+                        context = context,
+                        reason = "foreground_resume"
+                    )
+                }
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> {
+                    com.example.notifications.FcmTokenManager.setAppForegroundState(false)
+                }
+                else -> {}
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
+            com.example.notifications.FcmTokenManager.setAppForegroundState(false)
             lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
@@ -608,6 +620,9 @@ fun FamilyTasksApp(
                                             },
                                             onFormatInvitationShareText = { invite ->
                                                 viewModel.getWhatsAppInviteShareText(invite, isHebrew)
+                                            },
+                                            onUpdateMemberAvatar = { memberId, avatarId ->
+                                                viewModel.updateMemberAvatar(memberId, avatarId)
                                             }
                                         )
                                     }
@@ -649,6 +664,9 @@ fun FamilyTasksApp(
                                             onShowToast = { viewModel.showToastMessage(it) },
                                             onOpenPointsManagement = {
                                                 viewModel.navigateTo(AppScreen.POINTS_MANAGEMENT)
+                                            },
+                                            onUpdateMemberAvatar = { memberId, avatarId ->
+                                                viewModel.updateMemberAvatar(memberId, avatarId)
                                             }
                                         )
                                     }
@@ -696,7 +714,10 @@ fun FamilyTasksApp(
                             ) {
                                 InAppNotificationBanner(
                                     alert = notif,
-                                    onDismiss = { viewModel.dismissBannerAlert() }
+                                    onDismiss = { viewModel.dismissBannerAlert() },
+                                    onBannerClick = {
+                                        viewModel.navigateTo(AppScreen.HOME)
+                                    }
                                 )
                             }
                         }
@@ -865,6 +886,9 @@ fun FamilyTasksApp(
                             onSignOutGoogle = {
                                 isExplicitDemoMode = false
                                 viewModel.signOutGoogleAccount()
+                            },
+                            onUpdateMemberAvatar = { memberId, avatarId ->
+                                viewModel.updateMemberAvatar(memberId, avatarId)
                             }
                         )
                     }

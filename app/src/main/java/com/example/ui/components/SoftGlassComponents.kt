@@ -880,56 +880,82 @@ fun FamilyMemberAvatar(
     isHighlighted: Boolean = false
 ) {
     val glass = LocalSoftGlassColors.current
-    val memberColor = Color(member.colorHex)
-    Surface(
-        shape = CircleShape,
-        color = Color.Transparent,
-        border = BorderStroke(
-            width = if (isHighlighted) 1.8.dp else 1.1.dp,
-            brush = Brush.verticalGradient(
-                colors = if (isHighlighted) {
-                    listOf(
-                        if (glass.isDark) Color.White.copy(alpha = 0.85f) else glass.primaryAccent,
-                        glass.primaryAccent
-                    )
-                } else {
-                    listOf(
-                        Color.White.copy(alpha = if (glass.isDark) 0.45f else 0.90f),
-                        memberColor.copy(alpha = 0.65f)
-                    )
-                }
-            )
-        ),
-        modifier = modifier
-            .size(size)
-            .shadow(
-                elevation = if (isHighlighted) 5.dp else 2.dp,
-                shape = CircleShape,
-                ambientColor = memberColor.copy(alpha = 0.35f),
-                spotColor = memberColor.copy(alpha = 0.45f)
-            )
-            .background(
-                Brush.radialGradient(
-                    colors = if (glass.isDark) {
+    val avatarOption = member.resolvedAvatarOption
+    val primaryColor = Color(avatarOption?.primaryColorHex ?: member.colorHex)
+    val secondaryColor = Color(avatarOption?.secondaryColorHex ?: member.colorHex)
+    val displayEmoji = member.displayAvatarEmoji
+
+    Box(
+        modifier = modifier.size(size),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = Color.Transparent,
+            border = BorderStroke(
+                width = if (isHighlighted) 1.8.dp else 1.1.dp,
+                brush = Brush.verticalGradient(
+                    colors = if (isHighlighted) {
                         listOf(
-                            memberColor.copy(alpha = 0.42f),
-                            memberColor.copy(alpha = 0.22f)
+                            if (glass.isDark) Color.White.copy(alpha = 0.85f) else glass.primaryAccent,
+                            glass.primaryAccent
                         )
                     } else {
                         listOf(
-                            Color.White,
-                            memberColor.copy(alpha = 0.24f)
+                            Color.White.copy(alpha = if (glass.isDark) 0.45f else 0.90f),
+                            primaryColor.copy(alpha = 0.65f)
                         )
                     }
-                ),
-                CircleShape
-            )
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            Text(
-                text = member.avatarEmoji,
-                fontSize = (size.value * 0.48f).sp
-            )
+                )
+            ),
+            modifier = Modifier
+                .fillMaxSize()
+                .shadow(
+                    elevation = if (isHighlighted) 5.dp else 2.dp,
+                    shape = CircleShape,
+                    ambientColor = primaryColor.copy(alpha = 0.35f),
+                    spotColor = secondaryColor.copy(alpha = 0.45f)
+                )
+                .background(
+                    Brush.radialGradient(
+                        colors = if (glass.isDark) {
+                            listOf(
+                                primaryColor.copy(alpha = 0.46f),
+                                secondaryColor.copy(alpha = 0.24f)
+                            )
+                        } else {
+                            listOf(
+                                Color.White,
+                                primaryColor.copy(alpha = 0.28f)
+                            )
+                        }
+                    ),
+                    CircleShape
+                )
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = displayEmoji,
+                    fontSize = (size.value * 0.48f).sp
+                )
+            }
+        }
+
+        if (avatarOption != null && avatarOption.badgeEmoji.isNotBlank() && size >= 32.dp) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .size((size.value * 0.36f).coerceIn(13f, 20f).dp)
+                    .clip(CircleShape)
+                    .background(if (glass.isDark) Color(0xFF152036) else Color.White)
+                    .border(0.8.dp, primaryColor.copy(alpha = 0.55f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = avatarOption.badgeEmoji,
+                    fontSize = (size.value * 0.21f).coerceIn(7.5f, 11.5f).sp
+                )
+            }
         }
     }
 }

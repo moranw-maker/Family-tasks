@@ -879,6 +879,7 @@ class FamilyRepository(
         restorePersistedPointsState(_activeFamilyId.value, allowOverwritingMemberBalances = true)
         seedLocalRoomIfNeeded()
         observeAuthAndAttachFirestore()
+        observeIncomingPushEvents()
     }
 
     private fun currentUid(): String {
@@ -1507,14 +1508,22 @@ class FamilyRepository(
                         }
                     }
 
+                    val resolvedAvatarId = memberSnap?.getString("avatarId")?.trim()?.takeIf { it.isNotBlank() }
+                        ?: userSnap.getString("avatarId")?.trim()?.takeIf { it.isNotBlank() }
+                        ?: ""
+                    val resolvedAvatarOption = FamilyAvatarCatalog.findById(resolvedAvatarId)
+                    val effectiveRestoredEmoji = resolvedAvatarOption?.emoji ?: resolvedEmoji
+
                     val restoredMember = FamilyMember(
                         id = uid,
                         name = persistedName,
                         nameEn = memberSnap?.getString("nameEn")?.takeIf { it.isNotBlank() } ?: persistedName,
-                        avatarEmoji = resolvedEmoji,
+                        avatarEmoji = effectiveRestoredEmoji,
+                        avatarId = resolvedAvatarOption?.id ?: resolvedAvatarId,
                         role = validatedRole,
                         familyIdentity = validatedIdentity,
-                        colorHex = memberSnap?.getLong("colorHex")
+                        colorHex = resolvedAvatarOption?.primaryColorHex
+                            ?: memberSnap?.getLong("colorHex")
                             ?: if (validatedRole == UserRole.PARENT) {
                                 if (validatedIdentity == FamilyIdentity.FATHER) 0xFF1A73E8 else 0xFF9334E6
                             } else {
@@ -1549,6 +1558,8 @@ class FamilyRepository(
                                 val mRole = UserRole.fromFirestoreValue(mRoleRaw)
                                 val mPoints = (doc.getLong("earnedPoints") ?: 0L).toInt()
                                 val mIdentityRaw = doc.getString("familyIdentity")
+                                val mAvatarId = doc.getString("avatarId")?.trim().orEmpty()
+                                val mAvatarOption = FamilyAvatarCatalog.findById(mAvatarId)
                                 val mEmojiRaw = doc.getString("avatarEmoji")?.takeIf { it.isNotBlank() }
                                 val mIdentity = FamilyIdentity.fromFirestoreValue(
                                     raw = mIdentityRaw,
@@ -1561,10 +1572,12 @@ class FamilyRepository(
                                     id = doc.id,
                                     name = mName,
                                     nameEn = doc.getString("nameEn") ?: mName,
-                                    avatarEmoji = mEmojiRaw ?: mIdentity.defaultEmoji,
+                                    avatarEmoji = mAvatarOption?.emoji ?: mEmojiRaw ?: mIdentity.defaultEmoji,
+                                    avatarId = mAvatarOption?.id ?: mAvatarId,
                                     role = mRole,
                                     familyIdentity = mIdentity,
-                                    colorHex = doc.getLong("colorHex")
+                                    colorHex = mAvatarOption?.primaryColorHex
+                                        ?: doc.getLong("colorHex")
                                         ?: if (mRole == UserRole.PARENT) 0xFF1A73E8L else 0xFF34A853L,
                                     googleEmail = doc.getString("googleEmail") ?: doc.getString("email"),
                                     photoUrl = doc.getString("photoUrl"),
@@ -3229,24 +3242,18 @@ class FamilyRepository(
                                     if (isNewLocalKey && isNewGlobalFcmKey) {
                                         val title = "📢 משימה פתוחה להתנדבות!"
                                         val body = "משימה פתוחה חדשה: \"${remoteTask.title}\" (+${remoteTask.points} נק') — מי מתנדב?"
-                                        pushAlert(
+                                        dispatchTaskNotificationOrForegroundBanner(
                                             title = title,
                                             message = body,
                                             targetName = _currentMember.value.name.ifBlank { "ילדי המשפחה" },
                                             targetEmoji = "🙋",
                                             reason = AlertReason.TASK_REMINDER,
-                                            showBanner = true
+                                            shouldNotifyThisUser = true,
+                                            eventKey = openKey,
+                                            taskId = remoteTask.id,
+                                            eventType = FcmTokenManager.EVENT_OPEN_TASK_CREATED,
+                                            isOpenTaskAlert = true
                                         )
-                                        appContext?.let { ctx ->
-                                            NotificationHelper.showIncomingFcmNotification(
-                                                context = ctx,
-                                                title = title,
-                                                message = body,
-                                                eventKey = openKey,
-                                                taskId = remoteTask.id,
-                                                eventType = FcmTokenManager.EVENT_OPEN_TASK_CREATED
-                                            )
-                                        }
                                     }
                                 }
 
@@ -3256,24 +3263,17 @@ class FamilyRepository(
                                     if (notifiedTaskCompletionKeys.add(assignKey) && FcmTokenManager.markEventDispatchedIfNew(assignKey, appContext)) {
                                         val title = "משימה חדשה שובצה עבורך 📋"
                                         val body = "שובצה לך משימה חדשה: \"${remoteTask.title}\" (שעה ${remoteTask.dueTimeFormatted} • +${remoteTask.points} נק')"
-                                        pushAlert(
+                                        dispatchTaskNotificationOrForegroundBanner(
                                             title = title,
                                             message = body,
                                             targetName = assigneeName,
                                             targetEmoji = assigneeEmoji,
                                             reason = AlertReason.TASK_REMINDER,
-                                            showBanner = true
+                                            shouldNotifyThisUser = true,
+                                            eventKey = assignKey,
+                                            taskId = remoteTask.id,
+                                            eventType = FcmTokenManager.EVENT_TASK_ASSIGNED
                                         )
-                                        appContext?.let { ctx ->
-                                            NotificationHelper.showIncomingFcmNotification(
-                                                context = ctx,
-                                                title = title,
-                                                message = body,
-                                                eventKey = assignKey,
-                                                taskId = remoteTask.id,
-                                                eventType = FcmTokenManager.EVENT_TASK_ASSIGNED
-                                            )
-                                        }
                                     }
                                 }
 
@@ -3283,24 +3283,17 @@ class FamilyRepository(
                                     if (notifiedTaskCompletionKeys.add(reassignKey) && FcmTokenManager.markEventDispatchedIfNew(reassignKey, appContext)) {
                                         val title = "משימה הועברה אליך 🔄"
                                         val body = "המשימה \"${remoteTask.title}\" שובצה אליך (שעה ${remoteTask.dueTimeFormatted} • +${remoteTask.points} נק')"
-                                        pushAlert(
+                                        dispatchTaskNotificationOrForegroundBanner(
                                             title = title,
                                             message = body,
                                             targetName = assigneeName,
                                             targetEmoji = assigneeEmoji,
                                             reason = AlertReason.TASK_REMINDER,
-                                            showBanner = true
+                                            shouldNotifyThisUser = true,
+                                            eventKey = reassignKey,
+                                            taskId = remoteTask.id,
+                                            eventType = FcmTokenManager.EVENT_TASK_REASSIGNED
                                         )
-                                        appContext?.let { ctx ->
-                                            NotificationHelper.showIncomingFcmNotification(
-                                                context = ctx,
-                                                title = title,
-                                                message = body,
-                                                eventKey = reassignKey,
-                                                taskId = remoteTask.id,
-                                                eventType = FcmTokenManager.EVENT_TASK_REASSIGNED
-                                            )
-                                        }
                                     }
                                 }
 
@@ -3314,52 +3307,35 @@ class FamilyRepository(
                                             if (FcmTokenManager.markEventDispatchedIfNew(approveKey, appContext)) {
                                                 val title = "משימה הושלמה ואושרה! +${remoteTask.points} נק' 🎉"
                                                 val body = "$assigneeName השלים/ה את המשימה: ${remoteTask.title}"
-                                                pushAlert(
+                                                dispatchTaskNotificationOrForegroundBanner(
                                                     title = title,
                                                     message = body,
                                                     targetName = assigneeName,
                                                     targetEmoji = assigneeEmoji,
                                                     reason = AlertReason.TASK_COMPLETED,
-                                                    showBanner = true
+                                                    shouldNotifyThisUser = true,
+                                                    shouldPostOsNotificationWhenBackground = remoteTask.assignedToMemberId == selfUid,
+                                                    eventKey = approveKey,
+                                                    taskId = remoteTask.id,
+                                                    eventType = FcmTokenManager.EVENT_TASK_APPROVED
                                                 )
-                                                if (remoteTask.assignedToMemberId == selfUid) {
-                                                    appContext?.let { ctx ->
-                                                        NotificationHelper.showIncomingFcmNotification(
-                                                            context = ctx,
-                                                            title = title,
-                                                            message = body,
-                                                            eventKey = approveKey,
-                                                            taskId = remoteTask.id,
-                                                            eventType = FcmTokenManager.EVENT_TASK_APPROVED
-                                                        )
-                                                    }
-                                                }
                                             }
                                         } else {
                                             val submitKey = "submit:${remoteTask.id}:${remoteTask.completedAtMillis ?: remoteTask.updatedAtMillis}"
                                             if (FcmTokenManager.markEventDispatchedIfNew(submitKey, appContext)) {
                                                 val title = "משימה הושלמה וממתינה לאישור הורה ⏳"
                                                 val body = "$assigneeName סימן/ה כבוצע: ${remoteTask.title} (+${remoteTask.points} נק')"
-                                                pushAlert(
+                                                dispatchTaskNotificationOrForegroundBanner(
                                                     title = title,
                                                     message = body,
                                                     targetName = assigneeName,
                                                     targetEmoji = assigneeEmoji,
                                                     reason = AlertReason.TASK_COMPLETED,
-                                                    showBanner = _currentMember.value.isParent
+                                                    shouldNotifyThisUser = _currentMember.value.isParent,
+                                                    eventKey = submitKey,
+                                                    taskId = remoteTask.id,
+                                                    eventType = FcmTokenManager.EVENT_TASK_SUBMITTED_FOR_APPROVAL
                                                 )
-                                                if (_currentMember.value.isParent) {
-                                                    appContext?.let { ctx ->
-                                                        NotificationHelper.showIncomingFcmNotification(
-                                                            context = ctx,
-                                                            title = title,
-                                                            message = body,
-                                                            eventKey = submitKey,
-                                                            taskId = remoteTask.id,
-                                                            eventType = FcmTokenManager.EVENT_TASK_SUBMITTED_FOR_APPROVAL
-                                                        )
-                                                    }
-                                                }
                                             }
                                         }
                                     }
@@ -3369,26 +3345,17 @@ class FamilyRepository(
                                     if (notifiedTaskCompletionKeys.add("${remoteTask.id}:approved") && FcmTokenManager.markEventDispatchedIfNew(approveKey, appContext)) {
                                         val title = "המשימה שלך אושרה! +${remoteTask.points} נק' 🎉"
                                         val body = "כל הכבוד $assigneeName! ביצוע המשימה \"${remoteTask.title}\" אושר וקיבלת +${remoteTask.points} נקודות!"
-                                        pushAlert(
+                                        dispatchTaskNotificationOrForegroundBanner(
                                             title = title,
                                             message = body,
                                             targetName = assigneeName,
                                             targetEmoji = assigneeEmoji,
                                             reason = AlertReason.TASK_COMPLETED,
-                                            showBanner = remoteTask.assignedToMemberId == selfUid
+                                            shouldNotifyThisUser = remoteTask.assignedToMemberId == selfUid,
+                                            eventKey = approveKey,
+                                            taskId = remoteTask.id,
+                                            eventType = FcmTokenManager.EVENT_TASK_APPROVED
                                         )
-                                        if (remoteTask.assignedToMemberId == selfUid) {
-                                            appContext?.let { ctx ->
-                                                NotificationHelper.showIncomingFcmNotification(
-                                                    context = ctx,
-                                                    title = title,
-                                                    message = body,
-                                                    eventKey = approveKey,
-                                                    taskId = remoteTask.id,
-                                                    eventType = FcmTokenManager.EVENT_TASK_APPROVED
-                                                )
-                                            }
-                                        }
                                     }
                                 } else if (!remoteTask.isCompleted) {
                                     notifiedTaskCompletionKeys.remove("${remoteTask.id}:completed")
@@ -3401,6 +3368,7 @@ class FamilyRepository(
                         }
                         _taskSyncStates.value = updatedSyncStates
                         _tasks.value = remoteTasks
+                        reconcileActiveBannerAgainstTasks(remoteTasks)
                         resyncTaskRemindersForActiveMember()
                         repoScope.launch {
                             runCatching {
@@ -3432,6 +3400,12 @@ class FamilyRepository(
                         // Preserve existing local identity for this member if Firestore field was omitted
                         val existingLocalMember = _members.value.find { it.id == doc.id }
                             ?: _currentMember.value.takeIf { it.id == doc.id }
+                        val rawAvatarId = if (doc.contains("avatarId")) {
+                            doc.getString("avatarId")?.trim().orEmpty()
+                        } else {
+                            existingLocalMember?.avatarId.orEmpty()
+                        }
+                        val resolvedAvatarOption = FamilyAvatarCatalog.findById(rawAvatarId)
                         val fallbackParent = existingLocalMember?.familyIdentity?.takeIf { it.isParentIdentity }
                             ?: FamilyIdentity.FATHER
 
@@ -3443,7 +3417,7 @@ class FamilyRepository(
                             memberId = doc.id,
                             fallbackParentIdentity = fallbackParent
                         )
-                        val emoji = rawEmoji ?: parsedIdentity.defaultEmoji
+                        val emoji = resolvedAvatarOption?.emoji ?: rawEmoji ?: parsedIdentity.defaultEmoji
                         val signedInUidForMember = authProvider()?.currentUser?.uid
                         val rawStoredEmail = (doc.getString("googleEmail") ?: doc.getString("email"))
                             ?.trim()?.lowercase()?.takeIf { it.isNotBlank() && it.contains("@") }
@@ -3468,7 +3442,8 @@ class FamilyRepository(
                                 null
                             }
                         val photoUrl = doc.getString("photoUrl")
-                        val colorHex = doc.getLong("colorHex")
+                        val colorHex = resolvedAvatarOption?.primaryColorHex
+                            ?: doc.getLong("colorHex")
                             ?: if (parsedRole == UserRole.PARENT) 0xFF1A73E8L else 0xFF34A853L
 
                         val cancelledAlarmIds = (doc.get("cancelledAlarmIds") as? List<*>)
@@ -3501,6 +3476,7 @@ class FamilyRepository(
                             name = name,
                             nameEn = doc.getString("nameEn") ?: name,
                             avatarEmoji = emoji,
+                            avatarId = resolvedAvatarOption?.id ?: rawAvatarId,
                             role = parsedRole,
                             familyIdentity = parsedIdentity,
                             colorHex = colorHex,
@@ -3522,6 +3498,7 @@ class FamilyRepository(
                         remoteMembers.forEach { member ->
                             persistMemberPointsBalanceLocally(familyId, member.id, member.earnedPoints)
                             persistMemberTargetRewardLocally(familyId, member.id, member.targetRewardId)
+                            persistMemberAvatarLocally(familyId, member.id, member.avatarId)
                         }
                         val signedInUid = authProvider()?.currentUser?.uid
                         val updatedSelf = remoteMembers.find {
@@ -3788,6 +3765,26 @@ class FamilyRepository(
                             ?.takeIf { it.isNotBlank() }
                             ?: doc.getString("assignedMemberId").orEmpty()
                         val assignedMemberName = doc.getString("assignedMemberName").orEmpty()
+                        val rawAssignedIds = (doc.get("assignedMemberIds") as? List<*>)
+                            ?.mapNotNull { (it as? String)?.trim()?.takeIf { s -> s.isNotBlank() } }
+                            .orEmpty()
+                        val rawAssignedNames = (doc.get("assignedMemberNames") as? List<*>)
+                            ?.mapNotNull { (it as? String)?.trim()?.takeIf { s -> s.isNotBlank() } }
+                            .orEmpty()
+                        val effectiveIds = if (rawAssignedIds.isNotEmpty()) {
+                            rawAssignedIds.distinct()
+                        } else if (assignedToId.isNotBlank()) {
+                            listOf(assignedToId)
+                        } else {
+                            emptyList()
+                        }
+                        val effectiveNames = if (rawAssignedNames.isNotEmpty()) {
+                            rawAssignedNames
+                        } else if (assignedMemberName.isNotBlank()) {
+                            assignedMemberName.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                        } else {
+                            emptyList()
+                        }
                         val createdById = doc.getString("createdByMemberId").orEmpty()
                         val createdByName = doc.getString("createdByMemberName").orEmpty()
                         val rawCreatedByRole = doc.getString("createdByRole").orEmpty()
@@ -3806,9 +3803,11 @@ class FamilyRepository(
                             title = title,
                             hour = hour,
                             minute = minute,
-                            assignedMemberId = assignedToId,
-                            assignedToMemberId = assignedToId,
-                            assignedMemberName = assignedMemberName,
+                            assignedMemberId = effectiveIds.firstOrNull() ?: assignedToId,
+                            assignedToMemberId = effectiveIds.firstOrNull() ?: assignedToId,
+                            assignedMemberName = if (effectiveNames.isNotEmpty()) effectiveNames.joinToString(", ") else assignedMemberName,
+                            assignedMemberIds = effectiveIds,
+                            assignedMemberNames = effectiveNames,
                             daysOfWeek = rawDays,
                             isEnabled = isEnabled,
                             ringtoneEmoji = emoji,
@@ -3816,7 +3815,7 @@ class FamilyRepository(
                             createdByMemberId = createdById,
                             createdByMemberName = createdByName,
                             createdByRole = migratedCreatedByRole,
-                            isPersonal = doc.getBoolean("isPersonal") ?: (assignedToId.isNotBlank() && assignedToId == createdById),
+                            isPersonal = doc.getBoolean("isPersonal") ?: (effectiveIds.size == 1 && effectiveIds.first() == createdById),
                             soundType = doc.getString("soundType") ?: "MELODY_ENERGETIC",
                             customSoundUri = doc.getString("customSoundUri").orEmpty(),
                             customSoundTitle = doc.getString("customSoundTitle").orEmpty(),
@@ -5241,7 +5240,7 @@ class FamilyRepository(
 
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 toggleTaskCompletionAsync(taskId).isSuccess
             }
@@ -5690,7 +5689,7 @@ class FamilyRepository(
         }
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 approveTaskCompletionAsync(taskId).isSuccess
             }
@@ -5766,7 +5765,10 @@ class FamilyRepository(
                     targetName = targetLabel,
                     targetEmoji = "🙋",
                     reason = AlertReason.TASK_REMINDER,
-                    showBanner = true
+                    showBanner = true,
+                    taskId = normalizedTask.id,
+                    eventKey = openEventKey,
+                    isOpenTaskAlert = true
                 )
                 // Record on the creating parent's device so an echoed snapshot does not trigger a self-notification.
                 // Child devices receive the OS notification via onFamilyTaskWritten (when closed/background)
@@ -5784,8 +5786,9 @@ class FamilyRepository(
                     title = "משימה חדשה נוספה ליומן 📅",
                     message = "ל-${assignee.name}: ${normalizedTask.title} (שעה ${normalizedTask.dueTimeFormatted})",
                     targetName = assignee.name,
-                    targetEmoji = assignee.avatarEmoji,
-                    reason = AlertReason.TASK_REMINDER
+                    targetEmoji = assignee.displayAvatarEmoji,
+                    reason = AlertReason.TASK_REMINDER,
+                    taskId = normalizedTask.id
                 )
             }
         }
@@ -5802,6 +5805,7 @@ class FamilyRepository(
             return false
         }
         _tasks.value = _tasks.value.map { if (it.id == updatedTask.id) updatedTask else it }
+        reconcileActiveBannerAgainstTasks(_tasks.value)
         resyncTaskRemindersForActiveMember()
         pushTaskToFirestoreOrQueue(updatedTask, isDelete = false)
         return true
@@ -5822,6 +5826,7 @@ class FamilyRepository(
         }
         resyncTaskRemindersForActiveMember()
         if (target != null) {
+            reconcileActiveBannerAgainstTasks(_tasks.value)
             pushTaskToFirestoreOrQueue(target, isDelete = true)
         }
         return true
@@ -5834,8 +5839,10 @@ class FamilyRepository(
             title = "תזכורת מהורה לביצוע משימה 👋",
             message = "${assignee.name}, אל תשכח/י להשלים: \"${task.title}\" (${task.points} נקודות!)",
             targetName = assignee.name,
-            targetEmoji = assignee.avatarEmoji,
-            reason = AlertReason.PARENT_NUDGE
+            targetEmoji = assignee.displayAvatarEmoji,
+            reason = AlertReason.PARENT_NUDGE,
+            showBanner = true,
+            taskId = task.id
         )
     }
 
@@ -6061,35 +6068,55 @@ class FamilyRepository(
             ?: alarm.createdByRole.takeIf { it.isNotBlank() }
             ?: current.role.toFirestoreValue()
 
-        // Child can only create/assign alarms for themselves; parent personal alarms normalize to effectiveCallerId
-        val requestedTargetId = alarm.effectiveAssignedMemberId.ifBlank { effectiveCallerId }
-        val resolvedTargetId = when {
-            !current.isParent -> effectiveCallerId
-            requestedTargetId == current.id || requestedTargetId == effectiveCallerId || alarm.isPersonal -> effectiveCallerId
-            else -> requestedTargetId
+        // Child can only create/assign alarms for themselves; parent can assign to self, one child, or multiple recipients
+        val rawRequestedIds = alarm.effectiveAssignedMemberIds
+        val resolvedTargetIds: List<String> = if (!current.isParent) {
+            listOf(effectiveCallerId)
+        } else {
+            val mapped = rawRequestedIds.map { rawId ->
+                if (rawId == current.id || rawId == effectiveCallerId || (rawRequestedIds.size == 1 && alarm.isPersonal)) {
+                    effectiveCallerId
+                } else {
+                    rawId
+                }
+            }.filter { it.isNotBlank() }.distinct()
+            mapped.ifEmpty { listOf(effectiveCallerId) }
         }
-        val resolvedTargetName = _members.value.find { it.id == resolvedTargetId }?.name
-            ?: alarm.assignedMemberName.takeIf { it.isNotBlank() }
-            ?: current.name
+        val resolvedTargetNames: List<String> = resolvedTargetIds.mapIndexed { idx, targetId ->
+            _members.value.find { it.id == targetId }?.name
+                ?: if (targetId == current.id || targetId == effectiveCallerId) current.name else null
+                ?: alarm.effectiveAssignedMemberNames.getOrNull(idx)?.takeIf { it.isNotBlank() }
+                ?: alarm.assignedMemberName.takeIf { it.isNotBlank() }
+                ?: current.name
+        }
+        val primaryTargetId = resolvedTargetIds.first()
+        val combinedTargetNames = resolvedTargetNames.joinToString(", ")
 
         val deviceModelLabel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
-        val isTargetedToAnotherMember = resolvedTargetId.isNotBlank() &&
-            resolvedTargetId != current.id &&
-            resolvedTargetId != effectiveCallerId &&
-            (authUid.isBlank() || resolvedTargetId != authUid)
+        val includesSelfTarget = resolvedTargetIds.any { targetId ->
+            targetId == current.id || targetId == effectiveCallerId || (authUid.isNotBlank() && targetId == authUid)
+        }
+        val isTargetedOnlyToOtherMembers = !includesSelfTarget && resolvedTargetIds.any { targetId ->
+            targetId.isNotBlank() &&
+                targetId != current.id &&
+                targetId != effectiveCallerId &&
+                (authUid.isBlank() || targetId != authUid)
+        }
 
         val normalizedInput = alarm.copy(
             familyId = _activeFamilyId.value,
             hour = alarm.hour.coerceIn(0, 23),
             minute = alarm.minute.coerceIn(0, 59),
             daysOfWeek = alarm.daysOfWeek.ifEmpty { SchoolDay.allWeekDays },
-            assignedMemberId = resolvedTargetId,
-            assignedToMemberId = resolvedTargetId,
-            assignedMemberName = resolvedTargetName,
+            assignedMemberId = primaryTargetId,
+            assignedToMemberId = primaryTargetId,
+            assignedMemberName = combinedTargetNames,
+            assignedMemberIds = resolvedTargetIds,
+            assignedMemberNames = resolvedTargetNames,
             createdByMemberId = resolvedCreatedById,
             createdByMemberName = resolvedCreatedByName,
             createdByRole = resolvedCreatedByRole,
-            isPersonal = !isTargetedToAnotherMember && (resolvedTargetId == resolvedCreatedById || !current.isParent)
+            isPersonal = resolvedTargetIds.size == 1 && (primaryTargetId == resolvedCreatedById || !current.isParent)
         )
 
         val ctx = appContext
@@ -6101,7 +6128,7 @@ class FamilyRepository(
                     nextTriggerAtMillis = 0L
                 )
             }
-            isTargetedToAnotherMember -> {
+            isTargetedOnlyToOtherMembers -> {
                 // Created/updated by parent for a child's device: cancel on parent's phone and wait for child's device confirmation
                 ctx?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, normalizedInput.id) }
                 normalizedInput.copy(
@@ -6281,6 +6308,8 @@ class FamilyRepository(
                     }
                 } else {
                     val targetId = alarm.effectiveAssignedMemberId
+                    val targetIds = alarm.effectiveAssignedMemberIds
+                    val targetNames = alarm.effectiveAssignedMemberNames
                     val map = mapOf(
                         "id" to alarm.id,
                         "familyId" to familyId,
@@ -6290,6 +6319,8 @@ class FamilyRepository(
                         "assignedMemberId" to targetId,
                         "assignedToMemberId" to targetId,
                         "assignedMemberName" to alarm.assignedMemberName,
+                        "assignedMemberIds" to targetIds,
+                        "assignedMemberNames" to targetNames,
                         "daysOfWeek" to alarm.daysOfWeek.map { it.name },
                         "isEnabled" to alarm.isEnabled,
                         "ringtoneEmoji" to alarm.ringtoneEmoji,
@@ -8014,13 +8045,137 @@ class FamilyRepository(
 
     // --- Notification Banner & History Management ---
 
+    private fun observeIncomingPushEvents() {
+        repoScope.launch {
+            FcmTokenManager.incomingPushEvents.collect { payload ->
+                val canonicalKey = FcmTokenManager.canonicalizeEventKey(payload.eventKey)
+                val alreadyInHistory = _notifications.value.any { existing ->
+                    val existingKey = existing.eventKey.orEmpty()
+                    existingKey.isNotBlank() && (
+                        existingKey == payload.eventKey ||
+                            FcmTokenManager.canonicalizeEventKey(existingKey) == canonicalKey
+                        )
+                }
+                val isOpenTaskEvent = payload.eventType == FcmTokenManager.EVENT_OPEN_TASK_CREATED
+                val reason = when (payload.eventType) {
+                    FcmTokenManager.EVENT_TASK_APPROVED -> AlertReason.TASK_COMPLETED
+                    else -> AlertReason.TASK_REMINDER
+                }
+                if (!alreadyInHistory) {
+                    pushAlert(
+                        title = payload.title,
+                        message = payload.body,
+                        targetName = _currentMember.value.name.ifBlank { "בן משפחה" },
+                        targetEmoji = if (isOpenTaskEvent) "🙋" else _currentMember.value.displayAvatarEmoji,
+                        reason = reason,
+                        showBanner = FcmTokenManager.isAppInForeground,
+                        taskId = payload.taskId.takeIf { it.isNotBlank() },
+                        eventKey = payload.eventKey,
+                        isOpenTaskAlert = isOpenTaskEvent
+                    )
+                } else if (FcmTokenManager.isAppInForeground) {
+                    val matchingAlert = _notifications.value.firstOrNull { existing ->
+                        val existingKey = existing.eventKey.orEmpty()
+                        existingKey == payload.eventKey ||
+                            FcmTokenManager.canonicalizeEventKey(existingKey) == canonicalKey
+                    }
+                    if (matchingAlert != null) {
+                        _activeBannerAlert.value = matchingAlert
+                    }
+                }
+                if (FcmTokenManager.isAppInForeground) {
+                    playForegroundEventSoundOnce(payload.eventKey, payload.eventType)
+                }
+            }
+        }
+    }
+
+    private fun dispatchTaskNotificationOrForegroundBanner(
+        title: String,
+        message: String,
+        targetName: String,
+        targetEmoji: String,
+        reason: AlertReason,
+        shouldNotifyThisUser: Boolean,
+        shouldPostOsNotificationWhenBackground: Boolean = shouldNotifyThisUser,
+        eventKey: String,
+        taskId: String,
+        eventType: String,
+        isOpenTaskAlert: Boolean = false
+    ) {
+        val inForeground = FcmTokenManager.isAppInForeground
+        pushAlert(
+            title = title,
+            message = message,
+            targetName = targetName,
+            targetEmoji = targetEmoji,
+            reason = reason,
+            showBanner = shouldNotifyThisUser && inForeground,
+            taskId = taskId,
+            eventKey = eventKey,
+            isOpenTaskAlert = isOpenTaskAlert
+        )
+        if (shouldNotifyThisUser && inForeground) {
+            playForegroundEventSoundOnce(eventKey, eventType)
+        } else if (shouldPostOsNotificationWhenBackground && !inForeground) {
+            appContext?.let { ctx ->
+                NotificationHelper.showIncomingFcmNotification(
+                    context = ctx,
+                    title = title,
+                    message = message,
+                    eventKey = eventKey,
+                    taskId = taskId,
+                    eventType = eventType
+                )
+            }
+        }
+    }
+
+    private fun playForegroundEventSoundOnce(eventKey: String, eventType: String) {
+        if (!FcmTokenManager.markSoundPlayedIfNew(eventKey)) return
+        val usageType = NotificationHelper.resolveSoundUsageForEvent(eventType)
+        val ctx = appContext
+        if (ctx != null) {
+            val uri = com.example.notifications.FamilySoundManager.resolvePlayableUriOrFallback(ctx, usageType)
+            val cfg = com.example.notifications.FamilySoundManager.getSoundConfigForUsage(ctx, usageType)
+            FcmTokenManager.recordForegroundSoundPlayed(uri.toString())
+            com.example.notifications.FamilySoundManager.playNotificationSoundOneShot(
+                context = ctx,
+                uri = uri,
+                volumePercent = cfg.volumePercent
+            )
+        } else {
+            FcmTokenManager.recordForegroundSoundPlayed("default:${usageType.name}")
+        }
+    }
+
+    /**
+     * Automatically dismisses `_activeBannerAlert` if it references a task that was deleted,
+     * completed, or an open task that was already claimed/assigned or cancelled.
+     */
+    fun reconcileActiveBannerAgainstTasks(currentTasks: List<FamilyTask> = _tasks.value) {
+        val banner = _activeBannerAlert.value ?: return
+        val bannerTaskId = banner.taskId?.takeIf { it.isNotBlank() } ?: return
+        val matchingTask = currentTasks.find { it.id == bannerTaskId }
+        if (matchingTask == null) {
+            _activeBannerAlert.value = null
+            return
+        }
+        if (banner.isOpenTaskAlert && !matchingTask.isUnassignedOpenTask) {
+            _activeBannerAlert.value = null
+        }
+    }
+
     fun pushAlert(
         title: String,
         message: String,
         targetName: String,
         targetEmoji: String,
         reason: AlertReason,
-        showBanner: Boolean = false
+        showBanner: Boolean = false,
+        taskId: String? = null,
+        eventKey: String? = null,
+        isOpenTaskAlert: Boolean = false
     ) {
         val nowStr = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm"))
         val alert = FamilyNotificationAlert(
@@ -8029,7 +8184,10 @@ class FamilyRepository(
             targetMemberName = targetName,
             targetMemberEmoji = targetEmoji,
             reason = reason,
-            timestampFormatted = nowStr
+            timestampFormatted = nowStr,
+            taskId = taskId,
+            eventKey = eventKey,
+            isOpenTaskAlert = isOpenTaskAlert
         )
         _notifications.value = listOf(alert) + _notifications.value
         if (showBanner) {
@@ -8715,6 +8873,8 @@ class FamilyRepository(
             val persistedName = snap.getString("name")?.takeIf { it.isNotBlank() } ?: memberName
             val rawIdentity = snap.getString("familyIdentity")
             val rawEmoji = snap.getString("avatarEmoji")?.takeIf { it.isNotBlank() }
+            val rawAvatarId = snap.getString("avatarId")?.trim().orEmpty()
+            val avatarOption = FamilyAvatarCatalog.findById(rawAvatarId)
             val identity = FamilyIdentity.fromFirestoreValue(
                 raw = rawIdentity,
                 role = role,
@@ -8727,7 +8887,11 @@ class FamilyRepository(
                 FamilyMember(
                     id = uid,
                     name = persistedName,
-                    avatarEmoji = rawEmoji ?: identity.defaultEmoji,
+                    avatarEmoji = avatarOption?.emoji ?: rawEmoji ?: identity.defaultEmoji,
+                    avatarId = avatarOption?.id ?: rawAvatarId,
+                    colorHex = avatarOption?.primaryColorHex
+                        ?: snap.getLong("colorHex")
+                        ?: if (role == UserRole.PARENT) 0xFF1A73E8L else 0xFF34A853L,
                     role = role,
                     familyIdentity = identity,
                     earnedPoints = (snap.getLong("earnedPoints") ?: 0L).toInt()
@@ -8894,7 +9058,7 @@ class FamilyRepository(
         }
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 addMemberPointsAsync(memberId, amount, reason, operationId).isSuccess
             }
@@ -8927,7 +9091,7 @@ class FamilyRepository(
         }
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 deductMemberPointsAsync(memberId, amount, reason, allowNegativeBalance, operationId).isSuccess
             }
@@ -8949,7 +9113,7 @@ class FamilyRepository(
         }
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 resetMemberPointsAsync(memberId, reason, operationId).isSuccess
             }
@@ -9366,6 +9530,21 @@ class FamilyRepository(
         }
     }
 
+    private fun persistMemberAvatarLocally(familyId: String, memberId: String, avatarId: String?) {
+        val ctx = appContext ?: return
+        runCatching {
+            val prefs = ctx.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
+            val key = "avatar_id_${familyId}_$memberId"
+            val editor = prefs.edit()
+            if (avatarId.isNullOrBlank()) {
+                editor.remove(key)
+            } else {
+                editor.putString(key, avatarId.trim())
+            }
+            editor.commit()
+        }
+    }
+
     private fun savePointsHistoryToPrefs(familyId: String, entries: List<PointsHistoryEntry>) {
         val ctx = appContext ?: return
         runCatching {
@@ -9410,12 +9589,13 @@ class FamilyRepository(
         val ctx = appContext ?: return
         runCatching {
             val prefs = ctx.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
-            // 1. Restore member point balances & personal reward goals for this family ONLY if live server state has not already synced
+            // 1. Restore member point balances, personal reward goals & avatars for this family ONLY if live server state has not already synced
             if (allowOverwritingMemberBalances && !syncedServerMemberBalancesForFamilies.contains(familyId)) {
                 var currentUpdated: FamilyMember? = null
                 val restoredMembers = _members.value.map { member ->
                     val balKey = "pts_bal_${familyId}_${member.id}"
                     val goalKey = "target_reward_${familyId}_${member.id}"
+                    val avatarKey = "avatar_id_${familyId}_${member.id}"
                     val savedBal = if (prefs.contains(balKey)) {
                         prefs.getInt(balKey, member.earnedPoints).coerceAtLeast(0)
                     } else {
@@ -9426,8 +9606,22 @@ class FamilyRepository(
                     } else {
                         member.targetRewardId
                     }
-                    if (savedBal != member.earnedPoints || savedGoal != member.targetRewardId) {
-                        val updated = member.copy(earnedPoints = savedBal, targetRewardId = savedGoal)
+                    val savedAvatarId = if (prefs.contains(avatarKey)) {
+                        prefs.getString(avatarKey, null)?.trim().orEmpty()
+                    } else {
+                        member.avatarId
+                    }
+                    val avatarOption = FamilyAvatarCatalog.findById(savedAvatarId)
+                    val resolvedEmoji = avatarOption?.emoji ?: member.avatarEmoji
+                    val resolvedColor = avatarOption?.primaryColorHex ?: member.colorHex
+                    if (savedBal != member.earnedPoints || savedGoal != member.targetRewardId || savedAvatarId != member.avatarId) {
+                        val updated = member.copy(
+                            earnedPoints = savedBal,
+                            targetRewardId = savedGoal,
+                            avatarId = avatarOption?.id ?: savedAvatarId,
+                            avatarEmoji = resolvedEmoji,
+                            colorHex = resolvedColor
+                        )
                         if (_currentMember.value.id == member.id) {
                             currentUpdated = updated
                         }
@@ -9685,7 +9879,7 @@ class FamilyRepository(
         }
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 volunteerForOpenTaskAsync(taskId, note).isSuccess
             }
@@ -9801,7 +9995,7 @@ class FamilyRepository(
     fun proposeVolunteerForTask(taskId: String, note: String = ""): Boolean {
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 proposeVolunteerForTaskAsync(taskId, note).isSuccess
             }
@@ -9946,7 +10140,7 @@ class FamilyRepository(
     fun proposeTaskSwap(offeredTaskId: String, targetTaskId: String, note: String = ""): Boolean {
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 proposeTaskSwapAsync(offeredTaskId, targetTaskId, note).isSuccess
             }
@@ -10064,7 +10258,7 @@ class FamilyRepository(
     fun respondToTaskProposalAsChild(proposalId: String, approve: Boolean): Boolean {
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 respondToTaskProposalAsChildAsync(proposalId, approve).isSuccess
             }
@@ -10418,6 +10612,7 @@ class FamilyRepository(
                 else -> t
             }
         }
+        reconcileActiveBannerAgainstTasks(_tasks.value)
         resyncTaskRemindersForActiveMember()
         repoScope.launch {
             runCatching {
@@ -10460,7 +10655,7 @@ class FamilyRepository(
         }
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 decideTaskProposalAsParentAsync(proposalId, approve).isSuccess
             }
@@ -10523,7 +10718,7 @@ class FamilyRepository(
     fun cancelTaskProposal(proposalId: String): Boolean {
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 cancelTaskProposalAsync(proposalId).isSuccess
             }
@@ -10845,7 +11040,7 @@ class FamilyRepository(
         }
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 approveTaskCompletionWithSplitAsync(
                     taskId = taskId,
@@ -11110,7 +11305,7 @@ class FamilyRepository(
     ): Boolean {
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 transferPointsBetweenMembersAsync(fromMemberId, toMemberId, amount, reason).isSuccess
             }
@@ -11163,7 +11358,7 @@ class FamilyRepository(
     ): Boolean {
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 grantHelpingBonusPointsAsync(memberId, amount, reason, relatedMemberId, taskId).isSuccess
             }
@@ -11268,7 +11463,7 @@ class FamilyRepository(
         }
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 setPersonalRewardGoalAsync(rewardId, targetChildId).isSuccess
             }
@@ -11378,7 +11573,7 @@ class FamilyRepository(
         }
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 createRewardAsync(title, pointsCost, iconEmoji, description, isActive).isSuccess
             }
@@ -11469,7 +11664,7 @@ class FamilyRepository(
         }
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 updateRewardAsync(rewardId, title, pointsCost, iconEmoji, description, isActive).isSuccess
             }
@@ -11500,7 +11695,7 @@ class FamilyRepository(
         }
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 setRewardActiveStateAsync(rewardId, isActive).isSuccess
             }
@@ -11558,7 +11753,7 @@ class FamilyRepository(
         }
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 deleteRewardFromCatalogAsync(rewardId).isSuccess
             }
@@ -11713,7 +11908,7 @@ class FamilyRepository(
     ): Boolean {
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 requestRewardRedemptionAsync(rewardId, childMemberId).isSuccess
             }
@@ -11945,13 +12140,118 @@ class FamilyRepository(
         }
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
-        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
             return kotlinx.coroutines.runBlocking {
                 decideRewardRedemptionAsParentAsync(redemptionId, approve, rejectionReason).isSuccess
             }
         }
         repoScope.launch {
             decideRewardRedemptionAsParentAsync(redemptionId, approve, rejectionReason)
+        }
+        return true
+    }
+
+    // --- Personal Avatar Selection Operations ---
+
+    private val avatarOperationMutex = kotlinx.coroutines.sync.Mutex()
+
+    suspend fun updateMemberAvatarAsync(
+        targetMemberId: String = _currentMember.value.id,
+        avatarId: String
+    ): Result<FamilyMember> = avatarOperationMutex.withLock {
+        val current = _currentMember.value
+        val callerUid = currentUid().ifBlank { current.id }
+        val cleanTargetId = targetMemberId.trim().ifBlank { current.id }
+        val targetMember = _members.value.find { it.id == cleanTargetId }
+            ?: return@withLock Result.failure(IllegalArgumentException("בן המשפחה לא נמצא"))
+
+        val isSelf = cleanTargetId == current.id || cleanTargetId == callerUid
+        if (!isSelf && !current.isParent) {
+            return@withLock Result.failure(SecurityException("ילד יכול לשנות רק את האווטאר של עצמו 🔒"))
+        }
+
+        val avatarOption = FamilyAvatarCatalog.findById(avatarId)
+            ?: return@withLock Result.failure(IllegalArgumentException("האווטאר שנבחר אינו קיים בגלריה"))
+
+        val familyId = _activeFamilyId.value
+        val nowMillis = System.currentTimeMillis()
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+
+        if (db != null && authUser != null) {
+            try {
+                val memberRef = db.collection("families").document(familyId)
+                    .collection("members").document(targetMember.id)
+                memberRef.set(
+                    mapOf(
+                        "avatarId" to avatarOption.id,
+                        "avatarEmoji" to avatarOption.emoji,
+                        "colorHex" to avatarOption.primaryColorHex,
+                        "updatedAt" to nowMillis
+                    ),
+                    SetOptions.merge()
+                ).await()
+
+                if (targetMember.id == authUser.uid) {
+                    runCatching {
+                        db.collection("users").document(authUser.uid)
+                            .set(
+                                mapOf(
+                                    "avatarId" to avatarOption.id,
+                                    "avatarEmoji" to avatarOption.emoji,
+                                    "updatedAt" to nowMillis
+                                ),
+                                SetOptions.merge()
+                            ).await()
+                    }
+                }
+            } catch (e: Exception) {
+                return@withLock Result.failure(e)
+            }
+        }
+
+        val updatedMember = targetMember.copy(
+            avatarId = avatarOption.id,
+            avatarEmoji = avatarOption.emoji,
+            colorHex = avatarOption.primaryColorHex
+        )
+
+        _members.value = _members.value.map { m ->
+            if (m.id == targetMember.id) updatedMember else m
+        }
+        if (_currentMember.value.id == targetMember.id) {
+            _currentMember.value = updatedMember
+        }
+        persistMemberAvatarLocally(familyId, targetMember.id, avatarOption.id)
+        return@withLock Result.success(updatedMember)
+    }
+
+    fun updateMemberAvatar(
+        targetMemberId: String = _currentMember.value.id,
+        avatarId: String
+    ): Boolean {
+        val current = _currentMember.value
+        val callerUid = currentUid().ifBlank { current.id }
+        val cleanTargetId = targetMemberId.trim().ifBlank { current.id }
+        val isSelf = cleanTargetId == current.id || cleanTargetId == callerUid
+        if (!isSelf && !current.isParent) {
+            return false
+        }
+        if (FamilyAvatarCatalog.findById(avatarId) == null) {
+            return false
+        }
+        if (_members.value.none { it.id == cleanTargetId }) {
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if ((db == null || authUser == null) && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                updateMemberAvatarAsync(cleanTargetId, avatarId).isSuccess
+            }
+        }
+        repoScope.launch {
+            updateMemberAvatarAsync(cleanTargetId, avatarId)
         }
         return true
     }

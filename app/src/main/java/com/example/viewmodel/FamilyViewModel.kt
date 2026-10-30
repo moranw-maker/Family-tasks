@@ -869,7 +869,7 @@ class FamilyViewModel(
             _snackbarMessage.value = "רק הורים יכולים למחוק משימות 🔒"
             return
         }
-        _snackbarMessage.value = "המשימה נמחקה"
+        _snackbarMessage.value = "✅ המשימה בוטלה"
     }
 
     fun redeemReward(reward: RewardItem) {
@@ -1451,7 +1451,7 @@ class FamilyViewModel(
     fun cancelTaskProposal(proposalId: String): Boolean {
         val ok = repository.cancelTaskProposal(proposalId)
         if (ok) {
-            _snackbarMessage.value = "ההצעה בוטלה"
+            _snackbarMessage.value = "✅ ההתנדבות בוטלה"
         }
         return ok
     }
@@ -1459,7 +1459,7 @@ class FamilyViewModel(
     fun volunteerForOpenTask(taskId: String, note: String = ""): Boolean {
         val ok = repository.volunteerForOpenTask(taskId, note)
         if (ok) {
-            _snackbarMessage.value = "בקשת ההתנדבות נשלחה לאישור הורה! 🙋"
+            _snackbarMessage.value = "✅ ההתנדבות נשלחה לאישור ההורה"
         }
         return ok
     }
@@ -1638,6 +1638,20 @@ class FamilyViewModel(
 
     fun getRewardGoalProgress(memberId: String = currentMember.value.id): RewardGoalProgressUiModel? {
         return repository.getRewardGoalProgress(memberId)
+    }
+
+    fun updateMemberAvatar(
+        targetMemberId: String = currentMember.value.id,
+        avatarId: String
+    ): Boolean {
+        val ok = repository.updateMemberAvatar(targetMemberId, avatarId)
+        if (ok) {
+            _snackbarMessage.value = "האווטאר עודכן בהצלחה! 🎨"
+        } else {
+            _snackbarMessage.value = repository.taskOperationError.value
+                ?: "ילד יכול לשנות רק את האווטאר של עצמו 🔒"
+        }
+        return ok
     }
 
     fun showToastMessage(msg: String) {

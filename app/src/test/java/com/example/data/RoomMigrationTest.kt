@@ -12,7 +12,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [36])
 class RoomMigrationTest {
 
     @Test
@@ -122,7 +122,12 @@ class RoomMigrationTest {
             context,
             AppDatabase::class.java,
             dbName
-        ).addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3).build()
+        ).addMigrations(
+            AppDatabase.MIGRATION_1_2,
+            AppDatabase.MIGRATION_2_3,
+            AppDatabase.MIGRATION_3_4,
+            AppDatabase.MIGRATION_4_5
+        ).build()
 
         kotlinx.coroutines.runBlocking {
             val taskFromRoom = roomDb.taskDao().getTaskById("task_v1_legacy_101")

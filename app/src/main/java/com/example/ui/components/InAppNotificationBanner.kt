@@ -11,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -24,12 +25,24 @@ import androidx.compose.ui.unit.sp
 import com.example.model.AppNotification
 import com.example.model.NotificationType
 import com.example.ui.theme.*
+import kotlinx.coroutines.delay
+
+const val IN_APP_BANNER_AUTO_DISMISS_MS = 4_000L
 
 @Composable
 fun InAppNotificationBanner(
     alert: AppNotification?,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onBannerClick: ((AppNotification) -> Unit)? = null,
+    autoDismissDurationMs: Long = IN_APP_BANNER_AUTO_DISMISS_MS
 ) {
+    LaunchedEffect(alert?.id, autoDismissDurationMs) {
+        if (alert != null && autoDismissDurationMs > 0L) {
+            delay(autoDismissDurationMs)
+            onDismiss()
+        }
+    }
+
     AnimatedVisibility(
         visible = alert != null,
         enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
@@ -58,7 +71,11 @@ fun InAppNotificationBanner(
                 border = androidx.compose.foundation.BorderStroke(1.5.dp, accentColor.copy(alpha = 0.5f)),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { onDismiss() }
+                    .testTag("in_app_notification_banner_card")
+                    .clickable {
+                        onBannerClick?.invoke(alert)
+                        onDismiss()
+                    }
             ) {
                 Column(
                     modifier = Modifier
@@ -124,7 +141,9 @@ fun InAppNotificationBanner(
 
                         IconButton(
                             onClick = onDismiss,
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier
+                                .size(32.dp)
+                                .testTag("dismiss_banner_alert_button")
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Close,

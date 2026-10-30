@@ -68,7 +68,8 @@ fun SettingsScreen(
     onShowToast: (String) -> Unit = {},
     appTextScale: AppTextScale = AppTextScale.NORMAL,
     onTextScaleChange: (AppTextScale) -> Unit = {},
-    onOpenPointsManagement: () -> Unit = {}
+    onOpenPointsManagement: () -> Unit = {},
+    onUpdateMemberAvatar: (targetMemberId: String, avatarId: String) -> Unit = { _, _ -> }
 ) {
     val isHebrew = appLanguage == AppLanguage.HEBREW
     val glass = LocalSoftGlassColors.current
@@ -79,6 +80,7 @@ fun SettingsScreen(
     var soundConfigRefreshTick by remember { mutableIntStateOf(0) }
     var activeSoundPickerUsage by remember { mutableStateOf<com.example.notifications.SoundUsageType?>(null) }
     var showSoundStudioExpanded by remember { mutableStateOf(true) }
+    var showAvatarPickerForMember by remember { mutableStateOf<FamilyMember?>(null) }
     var showAlarmDiagnosticsPanel by remember {
         mutableStateOf(
             !FamilyAlarmScheduler.canScheduleExactAlarms(context) ||
@@ -155,6 +157,18 @@ fun SettingsScreen(
             }
         )
         return
+    }
+
+    showAvatarPickerForMember?.let { memberForAvatar ->
+        com.example.ui.components.AvatarPickerDialog(
+            targetMember = memberForAvatar,
+            isHebrew = isHebrew,
+            onDismiss = { showAvatarPickerForMember = null },
+            onSaveAvatar = { chosenAvatarId ->
+                onUpdateMemberAvatar(memberForAvatar.id, chosenAvatarId)
+                showAvatarPickerForMember = null
+            }
+        )
     }
 
     SoftGlassScreenBackground(modifier = Modifier.fillMaxSize()) {
@@ -946,6 +960,16 @@ fun SettingsScreen(
                             )
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    FamilySecondaryButton(
+                        text = if (isHebrew) "🎨 בחר אווטאר" else "🎨 Choose Avatar",
+                        onClick = { showAvatarPickerForMember = currentMember },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("open_avatar_picker_btn")
+                    )
 
                     if (currentMember.isParent) {
                         Spacer(modifier = Modifier.height(10.dp))

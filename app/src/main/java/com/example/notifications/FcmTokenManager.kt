@@ -74,11 +74,53 @@ object FcmTokenManager {
     @Volatile
     private var cachedAppContext: Context? = null
 
+    @Volatile
+    var isAppInForeground: Boolean = false
+        private set
+
+    @Volatile
+    var foregroundSoundPlayCountForTesting: Int = 0
+        private set
+
+    @Volatile
+    var lastForegroundSoundUriForTesting: String = ""
+        private set
+
     private val dispatchedEventKeys: MutableSet<String> =
+        Collections.synchronizedSet(LinkedHashSet<String>())
+
+    private val dispatchedSoundKeys: MutableSet<String> =
         Collections.synchronizedSet(LinkedHashSet<String>())
 
     private val _incomingPushEvents = MutableSharedFlow<IncomingPushNotificationPayload>(extraBufferCapacity = 16)
     val incomingPushEvents: SharedFlow<IncomingPushNotificationPayload> = _incomingPushEvents.asSharedFlow()
+
+    fun setAppForegroundState(inForeground: Boolean) {
+        isAppInForeground = inForeground
+    }
+
+    /**
+     * Ensures notification sound is played at most once per canonical [eventKey] when handling
+     * foreground in-app banners.
+     */
+    fun markSoundPlayedIfNew(eventKey: String): Boolean {
+        val clean = eventKey.trim()
+        if (clean.isEmpty()) return true
+        val canonical = canonicalizeEventKey(clean)
+        synchronized(dispatchedSoundKeys) {
+            if (dispatchedSoundKeys.contains(clean) || dispatchedSoundKeys.contains(canonical)) {
+                return false
+            }
+            dispatchedSoundKeys.add(clean)
+            dispatchedSoundKeys.add(canonical)
+            return true
+        }
+    }
+
+    fun recordForegroundSoundPlayed(uriString: String) {
+        foregroundSoundPlayCountForTesting++
+        lastForegroundSoundUriForTesting = uriString
+    }
 
     private fun rememberContext(context: Context?): Context? {
         if (context != null) {
@@ -242,6 +284,12 @@ object FcmTokenManager {
     @JvmOverloads
     fun clearAllDispatchedEventsForTesting(context: Context? = null) {
         val ctx = rememberContext(context)
+        isAppInForeground = false
+        foregroundSoundPlayCountForTesting = 0
+        lastForegroundSoundUriForTesting = ""
+        synchronized(dispatchedSoundKeys) {
+            dispatchedSoundKeys.clear()
+        }
         synchronized(dispatchedEventKeys) {
             dispatchedEventKeys.clear()
             if (ctx != null) {

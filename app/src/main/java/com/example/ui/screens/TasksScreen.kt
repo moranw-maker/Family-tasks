@@ -145,6 +145,40 @@ fun TasksScreen(
     var selectedTaskForDetail by remember { mutableStateOf<FamilyTask?>(null) }
     var targetTaskForSwapDialog by remember { mutableStateOf<FamilyTask?>(null) }
     var taskForParentSplitDialog by remember { mutableStateOf<FamilyTask?>(null) }
+    var staleOpenTaskNotice by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(staleOpenTaskNotice) {
+        if (staleOpenTaskNotice != null) {
+            kotlinx.coroutines.delay(3_500L)
+            staleOpenTaskNotice = null
+        }
+    }
+
+    // Automatically close task detail dialog if the task was deleted or if an open task was claimed by someone else
+    LaunchedEffect(tasks, selectedTaskForDetail?.id) {
+        val currentOpenDetail = selectedTaskForDetail ?: return@LaunchedEffect
+        val latest = tasks.find { it.id == currentOpenDetail.id }
+        if (latest == null) {
+            selectedTaskForDetail = null
+            staleOpenTaskNotice = if (isHebrew) {
+                "משימה זו כבר נלקחה או אינה זמינה עוד"
+            } else {
+                "This task is no longer available"
+            }
+        } else if (
+            currentOpenDetail.isUnassignedOpenTask &&
+            !latest.isUnassignedOpenTask &&
+            latest.assignedToMemberId != currentMember.id &&
+            !currentMember.isParent
+        ) {
+            selectedTaskForDetail = null
+            staleOpenTaskNotice = if (isHebrew) {
+                "משימה זו כבר נלקחה או אינה זמינה עוד"
+            } else {
+                "This task was already assigned to another child"
+            }
+        }
+    }
 
     val visibleProposals = remember(taskProposals, currentMember) {
         taskProposals
@@ -824,6 +858,45 @@ fun TasksScreen(
                     }
                 }
 
+                if (!staleOpenTaskNotice.isNullOrBlank()) {
+                    item(key = "stale_open_task_notice_banner") {
+                        FamilyGlassCard(
+                            cornerRadius = 18.dp,
+                            accentColor = glass.warningText,
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("stale_open_task_notice_banner")
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = staleOpenTaskNotice.orEmpty(),
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = glass.textPrimary,
+                                        fontWeight = FontWeight.Bold
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(
+                                    onClick = { staleOpenTaskNotice = null },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Dismiss",
+                                        tint = glass.textSecondary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 5.4 Open Tasks for Volunteering ("🙋 משימות פתוחות")
                 if (openVolunteeringTasks.isNotEmpty()) {
                     item(key = "open_tasks_volunteering_section") {
@@ -910,26 +983,28 @@ fun TasksScreen(
 
     // Modal Task Details Bottom Sheet / Dialog
     selectedTaskForDetail?.let { activeTask ->
-        val latestTask = tasks.find { it.id == activeTask.id } ?: activeTask
-        val activeAssignee = members.find { it.id == latestTask.assignedToMemberId }
-        val activeSyncState = taskSyncStates[latestTask.id] ?: when {
-            latestTask.isCompleted && latestTask.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
-            latestTask.isCompleted && !latestTask.approvedByParent -> TaskCompletionSyncState.PENDING_APPROVAL
-            else -> TaskCompletionSyncState.IDLE
+        val latestTask = tasks.find { it.id == activeTask.id }
+        if (latestTask != null) {
+            val activeAssignee = members.find { it.id == latestTask.assignedToMemberId }
+            val activeSyncState = taskSyncStates[latestTask.id] ?: when {
+                latestTask.isCompleted && latestTask.approvedByParent -> TaskCompletionSyncState.SAVED_APPROVED
+                latestTask.isCompleted && !latestTask.approvedByParent -> TaskCompletionSyncState.PENDING_APPROVAL
+                else -> TaskCompletionSyncState.IDLE
+            }
+            TaskDetailDialog(
+                task = latestTask,
+                assignedMember = activeAssignee,
+                currentMember = currentMember,
+                isHebrew = isHebrew,
+                onDismiss = { selectedTaskForDetail = null },
+                onToggle = { onToggleTask(latestTask.id) },
+                onEdit = { onEditTask(latestTask) },
+                onDelete = { onDeleteTask(latestTask.id) },
+                onSendNudge = { onSendNudge(latestTask) },
+                syncState = activeSyncState,
+                onApprove = { onApproveTask(latestTask.id) }
+            )
         }
-        TaskDetailDialog(
-            task = latestTask,
-            assignedMember = activeAssignee,
-            currentMember = currentMember,
-            isHebrew = isHebrew,
-            onDismiss = { selectedTaskForDetail = null },
-            onToggle = { onToggleTask(latestTask.id) },
-            onEdit = { onEditTask(latestTask) },
-            onDelete = { onDeleteTask(latestTask.id) },
-            onSendNudge = { onSendNudge(latestTask) },
-            syncState = activeSyncState,
-            onApprove = { onApproveTask(latestTask.id) }
-        )
     }
 
     // Child Swap Task Selection Dialog

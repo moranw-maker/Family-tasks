@@ -670,6 +670,26 @@ object FamilyAlarmCloudSyncWorker {
             ?.takeIf { it.isNotBlank() }
             ?: doc.getString("assignedMemberId").orEmpty()
         val assignedMemberName = doc.getString("assignedMemberName").orEmpty()
+        val rawAssignedIds = (doc.get("assignedMemberIds") as? List<*>)
+            ?.mapNotNull { (it as? String)?.trim()?.takeIf { s -> s.isNotBlank() } }
+            .orEmpty()
+        val rawAssignedNames = (doc.get("assignedMemberNames") as? List<*>)
+            ?.mapNotNull { (it as? String)?.trim()?.takeIf { s -> s.isNotBlank() } }
+            .orEmpty()
+        val effectiveIds = if (rawAssignedIds.isNotEmpty()) {
+            rawAssignedIds.distinct()
+        } else if (assignedToId.isNotBlank()) {
+            listOf(assignedToId)
+        } else {
+            emptyList()
+        }
+        val effectiveNames = if (rawAssignedNames.isNotEmpty()) {
+            rawAssignedNames
+        } else if (assignedMemberName.isNotBlank()) {
+            assignedMemberName.split(",").map { it.trim() }.filter { it.isNotBlank() }
+        } else {
+            emptyList()
+        }
         val createdById = doc.getString("createdByMemberId").orEmpty()
         val createdByName = doc.getString("createdByMemberName").orEmpty()
         val createdByRole = doc.getString("createdByRole").orEmpty()
@@ -685,9 +705,11 @@ object FamilyAlarmCloudSyncWorker {
             title = title,
             hour = hour,
             minute = minute,
-            assignedMemberId = assignedToId,
-            assignedToMemberId = assignedToId,
-            assignedMemberName = assignedMemberName,
+            assignedMemberId = effectiveIds.firstOrNull() ?: assignedToId,
+            assignedToMemberId = effectiveIds.firstOrNull() ?: assignedToId,
+            assignedMemberName = if (effectiveNames.isNotEmpty()) effectiveNames.joinToString(", ") else assignedMemberName,
+            assignedMemberIds = effectiveIds,
+            assignedMemberNames = effectiveNames,
             daysOfWeek = rawDays,
             isEnabled = isEnabled,
             ringtoneEmoji = emoji,
@@ -695,7 +717,7 @@ object FamilyAlarmCloudSyncWorker {
             createdByMemberId = createdById,
             createdByMemberName = createdByName,
             createdByRole = createdByRole,
-            isPersonal = doc.getBoolean("isPersonal") ?: (assignedToId.isNotBlank() && assignedToId == createdById),
+            isPersonal = doc.getBoolean("isPersonal") ?: (effectiveIds.size == 1 && effectiveIds.first() == createdById),
             soundType = doc.getString("soundType") ?: "MELODY_ENERGETIC",
             customSoundUri = doc.getString("customSoundUri").orEmpty(),
             customSoundTitle = doc.getString("customSoundTitle").orEmpty(),

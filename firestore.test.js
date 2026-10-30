@@ -3296,5 +3296,180 @@ test("Personal Reward Goal & Open Tasks for Volunteering: Firestore rules enforc
   assert.strictEqual(openTaskEvent.targetMode, "FAMILY_CHILDREN");
 });
 
+test("Personal Avatars & Multi-Recipient Alarms: Child updates own avatar, parent updates child avatar, cross-child avatar tampering blocked, and multi-recipient alarm ack succeeds", async () => {
+  const famId = "fam_avatars_alarms_test";
+  const child2Uid = "child_maya_901";
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const db = context.firestore();
+    await db.collection("families").doc(famId).set({
+      id: famId,
+      familyName: "משפחת האווטארים",
+      createdById: ALICE_UID,
+      ownerUid: ALICE_UID,
+      adminUids: [ALICE_UID],
+      memberIds: [ALICE_UID, BOB_UID, child2Uid],
+      memberUids: [ALICE_UID, BOB_UID, child2Uid],
+      createdAt: new Date(),
+    });
+    await db.collection("users").doc(ALICE_UID).set({
+      id: ALICE_UID,
+      uid: ALICE_UID,
+      name: "אבא",
+      familyId: famId,
+      role: "PARENT",
+      familyIdentity: "FATHER",
+    });
+    await db.collection("users").doc(BOB_UID).set({
+      id: BOB_UID,
+      uid: BOB_UID,
+      name: "רועי",
+      familyId: famId,
+      role: "CHILD",
+      familyIdentity: "SON",
+    });
+    await db.collection("users").doc(child2Uid).set({
+      id: child2Uid,
+      uid: child2Uid,
+      name: "מאיה",
+      familyId: famId,
+      role: "CHILD",
+      familyIdentity: "DAUGHTER",
+    });
+    await db.collection("families").doc(famId).collection("members").doc(ALICE_UID).set({
+      id: ALICE_UID,
+      uid: ALICE_UID,
+      familyId: famId,
+      name: "אבא",
+      role: "PARENT",
+      familyIdentity: "FATHER",
+      earnedPoints: 0,
+      spentPoints: 0,
+    });
+    await db.collection("families").doc(famId).collection("members").doc(BOB_UID).set({
+      id: BOB_UID,
+      uid: BOB_UID,
+      familyId: famId,
+      name: "רועי",
+      role: "CHILD",
+      familyIdentity: "SON",
+      earnedPoints: 50,
+      spentPoints: 10,
+      avatarId: "boy_curious",
+      avatarEmoji: "👦",
+    });
+    await db.collection("families").doc(famId).collection("members").doc(child2Uid).set({
+      id: child2Uid,
+      uid: child2Uid,
+      familyId: famId,
+      name: "מאיה",
+      role: "CHILD",
+      familyIdentity: "DAUGHTER",
+      earnedPoints: 40,
+      spentPoints: 5,
+      avatarId: "girl_smile",
+      avatarEmoji: "👧",
+    });
+  });
+
+  const parentDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const child1Db = testEnv.authenticatedContext(BOB_UID).firestore();
+  const child2Db = testEnv.authenticatedContext(child2Uid).firestore();
+
+  // 1. Child 1 (Roey) updates his own avatarId, avatarEmoji, and colorHex -> SUCCEEDS
+  await assertSucceeds(
+    child1Db.collection("families").doc(famId).collection("members").doc(BOB_UID).update({
+      avatarId: "space_astronaut",
+      avatarEmoji: "👨‍🚀",
+      colorHex: 0xFF1D4ED8,
+      updatedAt: new Date(),
+    })
+  );
+  await assertSucceeds(
+    child1Db.collection("users").doc(BOB_UID).update({
+      avatarId: "space_astronaut",
+      avatarEmoji: "👨‍🚀",
+      colorHex: 0xFF1D4ED8,
+      updatedAt: new Date(),
+    })
+  );
+
+  // 2. Child 1 tries to change Child 2's avatar -> MUST FAIL
+  await assertFails(
+    child1Db.collection("families").doc(famId).collection("members").doc(child2Uid).update({
+      avatarId: "robot_friendly",
+      avatarEmoji: "🤖",
+      updatedAt: new Date(),
+    })
+  );
+
+  // 3. Child 1 tries to modify earnedPoints or escalate role while updating own avatar -> MUST FAIL
+  await assertFails(
+    child1Db.collection("families").doc(famId).collection("members").doc(BOB_UID).update({
+      avatarId: "hero_lightning",
+      earnedPoints: 999,
+      updatedAt: new Date(),
+    })
+  );
+  await assertFails(
+    child1Db.collection("families").doc(famId).collection("members").doc(BOB_UID).update({
+      avatarId: "hero_lightning",
+      role: "PARENT",
+      updatedAt: new Date(),
+    })
+  );
+
+  // 4. Parent updates Child 2's avatar -> SUCCEEDS
+  await assertSucceeds(
+    parentDb.collection("families").doc(famId).collection("members").doc(child2Uid).update({
+      avatarId: "fantasy_unicorn",
+      avatarEmoji: "🦄",
+      colorHex: 0xFFEC4899,
+      updatedAt: new Date(),
+    })
+  );
+
+  // 5. Parent creates a multi-recipient alarm targeting both Parent + Child 1 + Child 2:
+  //    Child 2 can read the alarm and acknowledge local scheduling on her device
+  await assertSucceeds(
+    parentDb.collection("families").doc(famId).collection("alarms").doc("alarm_multi_morning").set({
+      id: "alarm_multi_morning",
+      familyId: famId,
+      title: "השכמה משפחתית",
+      hour: 6,
+      minute: 50,
+      assignedMemberId: ALICE_UID,
+      assignedToMemberId: ALICE_UID,
+      assignedMemberName: "השעון שלי (אבא), רועי, מאיה",
+      assignedMemberIds: [ALICE_UID, BOB_UID, child2Uid],
+      assignedMemberNames: ["השעון שלי (אבא)", "רועי", "מאיה"],
+      createdByMemberId: ALICE_UID,
+      createdByMemberName: "אבא",
+      createdByRole: "PARENT",
+      isPersonal: false,
+      isEnabled: true,
+      updatedByUid: ALICE_UID,
+    })
+  );
+
+  await assertSucceeds(
+    child2Db.collection("families").doc(famId).collection("alarms").doc("alarm_multi_morning").get()
+  );
+
+  await assertSucceeds(
+    child2Db.collection("families").doc(famId).collection("alarms").doc("alarm_multi_morning").update({
+      scheduleStatus: "SCHEDULED_LOCALLY",
+      acknowledgedByMemberId: child2Uid,
+      acknowledgedByDeviceName: "Pixel_Maya",
+      acknowledgedAtMillis: 1700050000000,
+      nextTriggerAtMillis: 1700075000000,
+      lastScheduleError: "",
+      updatedAt: new Date(),
+      updatedAtMillis: 1700050000000,
+    })
+  );
+});
+
+
 
 

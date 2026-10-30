@@ -429,6 +429,7 @@ data class FamilyMember(
         memberId = id
     ),
     val avatarEmoji: String = familyIdentity.defaultEmoji,
+    val avatarId: String = "",
     val photoUrl: String? = null,
     val colorHex: Long = 0xFF1A73E8,
     val earnedPoints: Int = 0,
@@ -448,20 +449,35 @@ data class FamilyMember(
     val isFather: Boolean get() = role == UserRole.PARENT && familyIdentity == FamilyIdentity.FATHER
     val isMother: Boolean get() = role == UserRole.PARENT && familyIdentity == FamilyIdentity.MOTHER
 
+    /** Resolved built-in catalog avatar if [avatarId] matches a known catalog entry. */
+    val resolvedAvatarOption: FamilyAvatarOption?
+        get() = FamilyAvatarCatalog.findById(avatarId)
+
+    /** Safe display emoji that prefers [resolvedAvatarOption] and falls back to [avatarEmoji] or role default. */
+    val displayAvatarEmoji: String
+        get() = resolvedAvatarOption?.emoji
+            ?: avatarEmoji.takeIf { it.isNotBlank() }
+            ?: familyIdentity.defaultEmoji
+
+    /** Effective accent color hex that prefers [resolvedAvatarOption] when an avatarId is selected. */
+    val effectiveColorHex: Long
+        get() = resolvedAvatarOption?.primaryColorHex ?: colorHex
+
     /** Available points balance after subtracting redeemed rewards. */
     val availablePoints: Int get() = (earnedPoints - spentPoints).coerceAtLeast(0)
 
     fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) name else nameEn.ifBlank { name }
 
     fun getRoleWithIdentityLabel(isHebrew: Boolean): String {
+        val emoji = displayAvatarEmoji
         return if (role == UserRole.PARENT) {
             if (familyIdentity == FamilyIdentity.FATHER) {
-                if (isHebrew) "👨 אבא — הורה (מנהל משפחה)" else "👨 Father — Parent (Admin)"
+                if (isHebrew) "$emoji אבא — הורה (מנהל משפחה)" else "$emoji Father — Parent (Admin)"
             } else {
-                if (isHebrew) "👩 אמא — הורה (מנהל משפחה)" else "👩 Mother — Parent (Admin)"
+                if (isHebrew) "$emoji אמא — הורה (מנהל משפחה)" else "$emoji Mother — Parent (Admin)"
             }
         } else {
-            if (isHebrew) "$avatarEmoji ילד/ה — חבר משפחה" else "$avatarEmoji Child — Family Member"
+            if (isHebrew) "$emoji ילד/ה — חבר משפחה" else "$emoji Child — Family Member"
         }
     }
 }
@@ -995,7 +1011,10 @@ data class FamilyNotificationAlert(
     val isRead: Boolean = false,
     val timestampMillis: Long = System.currentTimeMillis(),
     val taskTitle: String? = null,
-    val pointsGained: Int? = null
+    val pointsGained: Int? = null,
+    val taskId: String? = null,
+    val eventKey: String? = null,
+    val isOpenTaskAlert: Boolean = false
 ) {
     val type: NotificationType get() = reason.notificationType
     val completedByAvatar: String? get() = targetMemberEmoji
@@ -1042,6 +1061,8 @@ data class FamilyAlarm(
     val assignedMemberId: String = "",
     val assignedToMemberId: String = assignedMemberId,
     val assignedMemberName: String = "",
+    val assignedMemberIds: List<String> = emptyList(),
+    val assignedMemberNames: List<String> = emptyList(),
     val daysOfWeek: List<SchoolDay> = SchoolDay.allWeekDays,
     val isEnabled: Boolean = true,
     val ringtoneEmoji: String = "⏰",
@@ -1075,7 +1096,23 @@ data class FamilyAlarm(
     }
 
     val effectiveAssignedMemberId: String
-        get() = assignedToMemberId.ifBlank { assignedMemberId }
+        get() = assignedToMemberId.ifBlank { assignedMemberId }.ifBlank { assignedMemberIds.firstOrNull().orEmpty() }
+
+    val effectiveAssignedMemberIds: List<String>
+        get() {
+            val fromList = assignedMemberIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            if (fromList.isNotEmpty()) return fromList
+            val single = assignedToMemberId.ifBlank { assignedMemberId }.trim()
+            return if (single.isNotEmpty()) listOf(single) else emptyList()
+        }
+
+    val effectiveAssignedMemberNames: List<String>
+        get() {
+            val fromList = assignedMemberNames.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            if (fromList.isNotEmpty()) return fromList
+            val single = assignedMemberName.trim()
+            return if (single.isNotEmpty()) listOf(single) else emptyList()
+        }
 
     val timeFormatted: String
         get() = String.format(java.util.Locale.US, "%02d:%02d", hour.coerceIn(0, 23), minute.coerceIn(0, 59))
@@ -1096,10 +1133,12 @@ data class FamilyAlarm(
         )
 
     fun isTargetedToAnotherMember(): Boolean {
-        val targetId = effectiveAssignedMemberId
-        if (targetId.isBlank() || isPersonal) return false
-        if (createdByMemberId.isNotBlank() && targetId == createdByMemberId) return false
-        return true
+        val targetIds = effectiveAssignedMemberIds
+        if (targetIds.isEmpty()) return false
+        if (isPersonal && targetIds.size == 1 && (createdByMemberId.isBlank() || targetIds.first() == createdByMemberId)) {
+            return false
+        }
+        return targetIds.any { it.isNotBlank() && it != createdByMemberId }
     }
 
     fun isTargetDeviceAcknowledged(): Boolean {
@@ -1111,22 +1150,25 @@ data class FamilyAlarm(
     }
 
     /**
-     * Returns true if this alarm is a parent's personal alarm (created by a parent for themselves,
-     * or assigned to a parent member rather than a child).
+     * Returns true if this alarm is a parent's personal alarm (created by a parent ONLY for themselves,
+     * with no child recipients).
      * Parent personal alarms are strictly private to parents and must NEVER be visible to children.
      */
     fun isParentPersonalAlarm(members: List<FamilyMember> = emptyList()): Boolean {
-        val targetId = effectiveAssignedMemberId
+        val targetIds = effectiveAssignedMemberIds
         val creatorIsParent = createdByRole.equals("PARENT", ignoreCase = true) ||
             (createdByMemberId.isNotBlank() && members.find { it.id == createdByMemberId }?.isParent == true)
-        val targetMember = if (targetId.isNotBlank()) members.find { it.id == targetId } else null
 
-        if (targetMember != null && targetMember.isParent) {
+        // If any recipient is a known child, it is NOT a parent-only personal alarm
+        if (targetIds.any { id -> members.find { it.id == id }?.isChild == true }) {
+            return false
+        }
+        if (targetIds.isNotEmpty() && targetIds.all { id -> members.find { it.id == id }?.isParent == true }) {
             return true
         }
         if (creatorIsParent) {
-            if (isPersonal) return true
-            if (targetId.isNotBlank() && createdByMemberId.isNotBlank() && targetId == createdByMemberId) {
+            if (isPersonal && (targetIds.isEmpty() || targetIds.all { it == createdByMemberId })) return true
+            if (targetIds.isNotEmpty() && createdByMemberId.isNotBlank() && targetIds.all { it == createdByMemberId }) {
                 return true
             }
         }
@@ -1156,27 +1198,35 @@ data class FamilyAlarm(
             if (currentMember.id.isNotBlank()) add(currentMember.id)
             if (authUid.isNotBlank()) add(authUid)
         }
-        val targetId = effectiveAssignedMemberId
+        val targetIds = effectiveAssignedMemberIds
         if (createdByMemberId.isNotBlank() && createdByMemberId in candidateIds) {
             return true
         }
-        if (targetId.isNotBlank() && targetId in candidateIds) {
+        if (targetIds.any { it in candidateIds }) {
             return true
         }
-        if (targetId.isNotBlank()) {
-            val matchedTargetMember = members.find { it.id == targetId }
-            if (matchedTargetMember != null && matchedTargetMember.id !in candidateIds) {
-                val sameChildByName = currentMember.name.isNotBlank() &&
+        if (targetIds.isNotEmpty()) {
+            val matchedAnyByName = targetIds.any { tId ->
+                val matchedTargetMember = members.find { it.id == tId }
+                matchedTargetMember != null &&
+                    currentMember.name.isNotBlank() &&
                     matchedTargetMember.name.trim().equals(currentMember.name.trim(), ignoreCase = true)
-                if (!sameChildByName) return false
             }
-        }
-        if (assignedMemberName.isNotBlank() && currentMember.name.isNotBlank()) {
-            if (assignedMemberName.trim().equals(currentMember.name.trim(), ignoreCase = true)) {
-                return true
+            if (matchedAnyByName) return true
+            // If all targetIds belong to other known members, do not show to this child
+            val allKnownOtherMembers = targetIds.all { tId ->
+                val m = members.find { it.id == tId }
+                m != null && m.id !in candidateIds
             }
+            if (allKnownOtherMembers) return false
         }
-        if (targetId.isBlank() && !isPersonal) {
+        if (effectiveAssignedMemberNames.any { n ->
+                currentMember.name.isNotBlank() && n.trim().equals(currentMember.name.trim(), ignoreCase = true)
+            }
+        ) {
+            return true
+        }
+        if (targetIds.isEmpty() && !isPersonal) {
             return true
         }
         return isTargetedAtDeviceMember(
@@ -1205,10 +1255,10 @@ data class FamilyAlarm(
         if (candidateIds.isEmpty()) return false
 
         val isCreatedByThisChild = createdByMemberId in candidateIds
-        val targetId = effectiveAssignedMemberId
-        val isAssignedToThisChild = targetId.isBlank() ||
-            targetId in candidateIds ||
-            (assignedMemberName.isNotBlank() && assignedMemberName.trim().equals(member.name.trim(), ignoreCase = true))
+        val targetIds = effectiveAssignedMemberIds
+        val isAssignedToThisChild = targetIds.isEmpty() ||
+            targetIds.any { it in candidateIds } ||
+            effectiveAssignedMemberNames.any { it.trim().equals(member.name.trim(), ignoreCase = true) }
         return isCreatedByThisChild && isAssignedToThisChild
     }
 
@@ -1217,7 +1267,8 @@ data class FamilyAlarm(
 
     /**
      * Determines if this alarm should ring on the device belonging to [memberId] / [authUid]:
-     * - Parent-created alarm for child -> rings ONLY on that child's device.
+     * - Parent-created alarm for child -> rings on that child's device.
+     * - Multi-recipient alarm -> rings on every device whose member is in [effectiveAssignedMemberIds].
      * - Child-created alarm for self -> rings ONLY on that child's device.
      * - Parent-created alarm for self -> rings ONLY on that parent's device.
      */
@@ -1232,20 +1283,21 @@ data class FamilyAlarm(
             if (authUid.isNotBlank()) add(authUid)
         }
         if (candidateIds.isEmpty()) return false
+        val targetIds = effectiveAssignedMemberIds
         val targetId = effectiveAssignedMemberId
 
         if (isChildDevice && isParentPersonalAlarm()) {
             return false
         }
 
-        // 1. Direct ID or Auth UID match on target
-        if (targetId.isNotBlank() && targetId in candidateIds) {
+        // 1. Direct ID or Auth UID match on any target in effectiveAssignedMemberIds
+        if (targetIds.any { it.isNotBlank() && it in candidateIds }) {
             return true
         }
 
         // 2. Personal alarm created by this device's user for themselves
         if (createdByMemberId.isNotBlank() && createdByMemberId in candidateIds) {
-            if (isPersonal || targetId.isBlank() || targetId == createdByMemberId) {
+            if (isPersonal || targetIds.isEmpty() || targetId == createdByMemberId) {
                 return true
             }
         }
@@ -1655,5 +1707,480 @@ data class RewardGoalProgressUiModel(
         }
     }
 }
+
+/**
+ * Categories of built-in personal avatars in FamilyTasks — Velvet Edition.
+ */
+enum class AvatarCategory(
+    val titleHe: String,
+    val titleEn: String,
+    val iconEmoji: String
+) {
+    BOYS("בנים", "Boys", "👦"),
+    GIRLS("בנות", "Girls", "👧"),
+    KIDS_GENERAL("ילדים ודמויות", "Kids & People", "🧑"),
+    DOGS("כלבים", "Dogs", "🐶"),
+    CATS("חתולים", "Cats", "🐱"),
+    FOXES("שועלים", "Foxes", "🦊"),
+    PANDAS("פנדות ודובים", "Pandas & Bears", "🐼"),
+    ROBOTS("רובוטים", "Robots", "🤖"),
+    SPACE("חלל ואסטרונאוטים", "Space", "🚀"),
+    FANTASY("חדי־קרן ופנטזיה", "Fantasy", "🦄"),
+    SUPERHEROES("גיבורי־על", "Superheroes", "🦸"),
+    COLORFUL("צבעוניים ושמחים", "Colorful & Fun", "🌈");
+
+    val labelHe: String get() = titleHe
+    val labelEn: String get() = titleEn
+    val emoji: String get() = iconEmoji
+
+    fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) titleHe else titleEn
+}
+
+typealias FamilyAvatarCategory = AvatarCategory
+
+/**
+ * Built-in personal avatar definition with a stable [id] persisted in Firestore (`avatarId`).
+ */
+data class FamilyAvatarOption(
+    val id: String,
+    val emoji: String,
+    val labelHe: String,
+    val labelEn: String,
+    val category: AvatarCategory,
+    val primaryColorHex: Long,
+    val secondaryColorHex: Long,
+    val badgeEmoji: String = ""
+) {
+    val titleHe: String get() = labelHe
+    val titleEn: String get() = labelEn
+
+    fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
+}
+
+/**
+ * Built-in gallery of 38 cheerful, family-friendly personal avatars across 12 categories.
+ * Provides safe lookup by [avatarId] with graceful fallback when [avatarId] is empty or unknown.
+ */
+object FamilyAvatarCatalog {
+
+    val allAvatars: List<FamilyAvatarOption> = listOf(
+        // 1. בנים (Boys)
+        FamilyAvatarOption(
+            id = "avatar_boy_01",
+            emoji = "👦",
+            labelHe = "ילד חיוך",
+            labelEn = "Smiling Boy",
+            category = AvatarCategory.BOYS,
+            primaryColorHex = 0xFF3B82F6,
+            secondaryColorHex = 0xFF1D4ED8
+        ),
+        FamilyAvatarOption(
+            id = "avatar_boy_02",
+            emoji = "👦🏻",
+            labelHe = "ילד אלוף",
+            labelEn = "Champion Boy",
+            category = AvatarCategory.BOYS,
+            primaryColorHex = 0xFF0EA5E9,
+            secondaryColorHex = 0xFF0369A1,
+            badgeEmoji = "⭐"
+        ),
+        FamilyAvatarOption(
+            id = "avatar_boy_03",
+            emoji = "👦🏽",
+            labelHe = "ילד ספורטיבי",
+            labelEn = "Sporty Boy",
+            category = AvatarCategory.BOYS,
+            primaryColorHex = 0xFF2563EB,
+            secondaryColorHex = 0xFF1E40AF,
+            badgeEmoji = "⚽"
+        ),
+
+        // 2. בנות (Girls)
+        FamilyAvatarOption(
+            id = "avatar_girl_01",
+            emoji = "👧",
+            labelHe = "ילדה חיוך",
+            labelEn = "Smiling Girl",
+            category = AvatarCategory.GIRLS,
+            primaryColorHex = 0xFFEC4899,
+            secondaryColorHex = 0xFFBE185D
+        ),
+        FamilyAvatarOption(
+            id = "avatar_girl_02",
+            emoji = "👧🏻",
+            labelHe = "ילדה כוכבת",
+            labelEn = "Star Girl",
+            category = AvatarCategory.GIRLS,
+            primaryColorHex = 0xFFF43F5E,
+            secondaryColorHex = 0xFFE11D48,
+            badgeEmoji = "🌟"
+        ),
+        FamilyAvatarOption(
+            id = "avatar_girl_03",
+            emoji = "👧🏽",
+            labelHe = "ילדה יצירתית",
+            labelEn = "Creative Girl",
+            category = AvatarCategory.GIRLS,
+            primaryColorHex = 0xFFA855F7,
+            secondaryColorHex = 0xFF7E22CE,
+            badgeEmoji = "🎨"
+        ),
+
+        // 3. ילדים ודמויות כלליות (Kids & General)
+        FamilyAvatarOption(
+            id = "avatar_kid_01",
+            emoji = "🧒",
+            labelHe = "ילד/ה הרפתקן/ית",
+            labelEn = "Adventurer Kid",
+            category = AvatarCategory.KIDS_GENERAL,
+            primaryColorHex = 0xFF14B8A6,
+            secondaryColorHex = 0xFF0F766E
+        ),
+        FamilyAvatarOption(
+            id = "avatar_kid_02",
+            emoji = "🤓",
+            labelHe = "גאון המשפחה",
+            labelEn = "Smart Scholar",
+            category = AvatarCategory.KIDS_GENERAL,
+            primaryColorHex = 0xFF6366F1,
+            secondaryColorHex = 0xFF4338CA
+        ),
+        FamilyAvatarOption(
+            id = "avatar_kid_03",
+            emoji = "😎",
+            labelHe = "כוכב מגניב",
+            labelEn = "Cool Star",
+            category = AvatarCategory.KIDS_GENERAL,
+            primaryColorHex = 0xFF3B82F6,
+            secondaryColorHex = 0xFF1D4ED8
+        ),
+        FamilyAvatarOption(
+            id = "avatar_parent_father",
+            emoji = "👨",
+            labelHe = "אבא",
+            labelEn = "Father",
+            category = AvatarCategory.KIDS_GENERAL,
+            primaryColorHex = 0xFF1A73E8,
+            secondaryColorHex = 0xFF1557B0
+        ),
+        FamilyAvatarOption(
+            id = "avatar_parent_mother",
+            emoji = "👩",
+            labelHe = "אמא",
+            labelEn = "Mother",
+            category = AvatarCategory.KIDS_GENERAL,
+            primaryColorHex = 0xFF9334E6,
+            secondaryColorHex = 0xFF6B21A8
+        ),
+
+        // 4. כלבים (Dogs)
+        FamilyAvatarOption(
+            id = "avatar_dog_01",
+            emoji = "🐶",
+            labelHe = "גור כלבים מתוק",
+            labelEn = "Cute Puppy",
+            category = AvatarCategory.DOGS,
+            primaryColorHex = 0xFFF59E0B,
+            secondaryColorHex = 0xFFD97706
+        ),
+        FamilyAvatarOption(
+            id = "avatar_dog_02",
+            emoji = "🐕",
+            labelHe = "כלב נאמן",
+            labelEn = "Loyal Dog",
+            category = AvatarCategory.DOGS,
+            primaryColorHex = 0xFFD97706,
+            secondaryColorHex = 0xFFB45309
+        ),
+        FamilyAvatarOption(
+            id = "avatar_dog_03",
+            emoji = "🐩",
+            labelHe = "פודל מלכותי",
+            labelEn = "Royal Poodle",
+            category = AvatarCategory.DOGS,
+            primaryColorHex = 0xFFEC4899,
+            secondaryColorHex = 0xFFDB2777
+        ),
+
+        // 5. חתולים (Cats)
+        FamilyAvatarOption(
+            id = "avatar_cat_01",
+            emoji = "🐱",
+            labelHe = "חתלתול חמוד",
+            labelEn = "Cute Kitten",
+            category = AvatarCategory.CATS,
+            primaryColorHex = 0xFFF97316,
+            secondaryColorHex = 0xFFEA580C
+        ),
+        FamilyAvatarOption(
+            id = "avatar_cat_02",
+            emoji = "😺",
+            labelHe = "חתול מחייך",
+            labelEn = "Smiling Cat",
+            category = AvatarCategory.CATS,
+            primaryColorHex = 0xFFEAB308,
+            secondaryColorHex = 0xFFCA8A04
+        ),
+        FamilyAvatarOption(
+            id = "avatar_cat_03",
+            emoji = "🐾",
+            labelHe = "כפות קטיפה",
+            labelEn = "Velvet Paws",
+            category = AvatarCategory.CATS,
+            primaryColorHex = 0xFFA855F7,
+            secondaryColorHex = 0xFF7E22CE
+        ),
+
+        // 6. שועלים (Foxes)
+        FamilyAvatarOption(
+            id = "avatar_fox_01",
+            emoji = "🦊",
+            labelHe = "שועל כתום",
+            labelEn = "Clever Fox",
+            category = AvatarCategory.FOXES,
+            primaryColorHex = 0xFFEA580C,
+            secondaryColorHex = 0xFFC2410C
+        ),
+        FamilyAvatarOption(
+            id = "avatar_fox_02",
+            emoji = "🦊",
+            labelHe = "שועל היער",
+            labelEn = "Forest Fox",
+            category = AvatarCategory.FOXES,
+            primaryColorHex = 0xFF16A34A,
+            secondaryColorHex = 0xFF15803D,
+            badgeEmoji = "🌲"
+        ),
+        FamilyAvatarOption(
+            id = "avatar_fox_03",
+            emoji = "🦊",
+            labelHe = "שועל הכוכבים",
+            labelEn = "Starlight Fox",
+            category = AvatarCategory.FOXES,
+            primaryColorHex = 0xFF6366F1,
+            secondaryColorHex = 0xFF4338CA,
+            badgeEmoji = "✨"
+        ),
+
+        // 7. פנדות ודובים (Pandas & Bears)
+        FamilyAvatarOption(
+            id = "avatar_panda_01",
+            emoji = "🐼",
+            labelHe = "פנדה חמודה",
+            labelEn = "Cute Panda",
+            category = AvatarCategory.PANDAS,
+            primaryColorHex = 0xFF10B981,
+            secondaryColorHex = 0xFF059669
+        ),
+        FamilyAvatarOption(
+            id = "avatar_panda_02",
+            emoji = "🐻",
+            labelHe = "דובון חם",
+            labelEn = "Cozy Bear",
+            category = AvatarCategory.PANDAS,
+            primaryColorHex = 0xFFB45309,
+            secondaryColorHex = 0xFF92400E
+        ),
+        FamilyAvatarOption(
+            id = "avatar_panda_03",
+            emoji = "🐨",
+            labelHe = "קואלה שמחה",
+            labelEn = "Happy Koala",
+            category = AvatarCategory.PANDAS,
+            primaryColorHex = 0xFF0EA5E9,
+            secondaryColorHex = 0xFF0284C7
+        ),
+
+        // 8. רובוטים (Robots)
+        FamilyAvatarOption(
+            id = "avatar_robot_blue_01",
+            emoji = "🤖",
+            labelHe = "רובוט כחול",
+            labelEn = "Blue Robot",
+            category = AvatarCategory.ROBOTS,
+            primaryColorHex = 0xFF2563EB,
+            secondaryColorHex = 0xFF1D4ED8
+        ),
+        FamilyAvatarOption(
+            id = "avatar_robot_cyber_02",
+            emoji = "🤖",
+            labelHe = "רובוט סגול",
+            labelEn = "Cyber Robot",
+            category = AvatarCategory.ROBOTS,
+            primaryColorHex = 0xFF7C3AED,
+            secondaryColorHex = 0xFF5B21B6,
+            badgeEmoji = "⚡"
+        ),
+        FamilyAvatarOption(
+            id = "avatar_robot_emerald_03",
+            emoji = "🤖",
+            labelHe = "רובוט טורקיז",
+            labelEn = "Emerald Bot",
+            category = AvatarCategory.ROBOTS,
+            primaryColorHex = 0xFF0D9488,
+            secondaryColorHex = 0xFF0F766E,
+            badgeEmoji = "🔷"
+        ),
+
+        // 9. חלל ואסטרונאוטים (Space & Astronauts)
+        FamilyAvatarOption(
+            id = "avatar_space_01",
+            emoji = "🧑🏼‍🚀",
+            labelHe = "אסטרונאוט",
+            labelEn = "Astronaut",
+            category = AvatarCategory.SPACE,
+            primaryColorHex = 0xFF1E3A8A,
+            secondaryColorHex = 0xFF172554
+        ),
+        FamilyAvatarOption(
+            id = "avatar_space_02",
+            emoji = "🚀",
+            labelHe = "חללית מהירה",
+            labelEn = "Space Rocket",
+            category = AvatarCategory.SPACE,
+            primaryColorHex = 0xFF3B82F6,
+            secondaryColorHex = 0xFF1D4ED8
+        ),
+        FamilyAvatarOption(
+            id = "avatar_space_03",
+            emoji = "🪐",
+            labelHe = "כוכב שבתאי",
+            labelEn = "Ringed Planet",
+            category = AvatarCategory.SPACE,
+            primaryColorHex = 0xFF8B5CF6,
+            secondaryColorHex = 0xFF5B21B6
+        ),
+
+        // 10. חדי־קרן ויצורי פנטזיה (Unicorns & Fantasy)
+        FamilyAvatarOption(
+            id = "avatar_fantasy_01",
+            emoji = "🦄",
+            labelHe = "חד־קרן קסום",
+            labelEn = "Magic Unicorn",
+            category = AvatarCategory.FANTASY,
+            primaryColorHex = 0xFFEC4899,
+            secondaryColorHex = 0xFF9333EA
+        ),
+        FamilyAvatarOption(
+            id = "avatar_fantasy_02",
+            emoji = "🐉",
+            labelHe = "דרקון ידידותי",
+            labelEn = "Friendly Dragon",
+            category = AvatarCategory.FANTASY,
+            primaryColorHex = 0xFF10B981,
+            secondaryColorHex = 0xFF047857
+        ),
+        FamilyAvatarOption(
+            id = "avatar_fantasy_03",
+            emoji = "🧚",
+            labelHe = "פיית האור",
+            labelEn = "Light Fairy",
+            category = AvatarCategory.FANTASY,
+            primaryColorHex = 0xFFD946EF,
+            secondaryColorHex = 0xFFA21CAF
+        ),
+
+        // 11. גיבורי־על מקוריים (Original Superheroes)
+        FamilyAvatarOption(
+            id = "avatar_hero_01",
+            emoji = "🦸",
+            labelHe = "גיבור־על כחול",
+            labelEn = "Blue Superhero",
+            category = AvatarCategory.SUPERHEROES,
+            primaryColorHex = 0xFF2563EB,
+            secondaryColorHex = 0xFF1E40AF
+        ),
+        FamilyAvatarOption(
+            id = "avatar_hero_02",
+            emoji = "🦸‍♀️",
+            labelHe = "גיבורת־על",
+            labelEn = "Super Heroine",
+            category = AvatarCategory.SUPERHEROES,
+            primaryColorHex = 0xFFE11D48,
+            secondaryColorHex = 0xFF9F1239
+        ),
+        FamilyAvatarOption(
+            id = "avatar_hero_03",
+            emoji = "⚡",
+            labelHe = "מגן הברק",
+            labelEn = "Lightning Hero",
+            category = AvatarCategory.SUPERHEROES,
+            primaryColorHex = 0xFFF59E0B,
+            secondaryColorHex = 0xFFB45309
+        ),
+
+        // 12. אווטארים צבעוניים ושמחים (Colorful & Happy)
+        FamilyAvatarOption(
+            id = "avatar_colorful_01",
+            emoji = "🌈",
+            labelHe = "קשת בענן",
+            labelEn = "Rainbow",
+            category = AvatarCategory.COLORFUL,
+            primaryColorHex = 0xFF06B6D4,
+            secondaryColorHex = 0xFF3B82F6
+        ),
+        FamilyAvatarOption(
+            id = "avatar_colorful_02",
+            emoji = "🌟",
+            labelHe = "כוכב זוהר",
+            labelEn = "Shining Star",
+            category = AvatarCategory.COLORFUL,
+            primaryColorHex = 0xFFEAB308,
+            secondaryColorHex = 0xFFCA8A04
+        ),
+        FamilyAvatarOption(
+            id = "avatar_colorful_03",
+            emoji = "👑",
+            labelHe = "כתר האלופים",
+            labelEn = "Champion Crown",
+            category = AvatarCategory.COLORFUL,
+            primaryColorHex = 0xFFF59E0B,
+            secondaryColorHex = 0xFFD97706
+        )
+    )
+
+    private val byIdMap: Map<String, FamilyAvatarOption> = allAvatars.associateBy { it.id }
+
+    private val semanticAliasMap: Map<String, String> = mapOf(
+        "boy_curious" to "avatar_boy_01",
+        "boy_champion" to "avatar_boy_02",
+        "boy_sporty" to "avatar_boy_03",
+        "girl_smile" to "avatar_girl_01",
+        "girl_star" to "avatar_girl_02",
+        "girl_creative" to "avatar_girl_03",
+        "space_astronaut" to "avatar_space_01",
+        "space_rocket" to "avatar_space_02",
+        "space_planet" to "avatar_space_03",
+        "robot_friendly" to "avatar_robot_blue_01",
+        "robot_cyber" to "avatar_robot_cyber_02",
+        "robot_emerald" to "avatar_robot_emerald_03",
+        "fantasy_unicorn" to "avatar_fantasy_01",
+        "fantasy_dragon" to "avatar_fantasy_02",
+        "fantasy_fairy" to "avatar_fantasy_03",
+        "hero_blue" to "avatar_hero_01",
+        "hero_girl" to "avatar_hero_02",
+        "hero_lightning" to "avatar_hero_03"
+    )
+
+    fun findById(avatarId: String?): FamilyAvatarOption? {
+        val clean = avatarId?.trim().orEmpty()
+        if (clean.isEmpty()) return null
+        return byIdMap[clean] ?: semanticAliasMap[clean]?.let { byIdMap[it] }
+    }
+
+    fun resolveEmoji(avatarId: String?, fallbackEmoji: String): String {
+        return findById(avatarId)?.emoji ?: fallbackEmoji.ifBlank { "🧒" }
+    }
+
+    fun getByCategory(category: AvatarCategory?): List<FamilyAvatarOption> {
+        if (category == null) return allAvatars
+        return allAvatars.filter { it.category == category }
+    }
+
+    fun byCategory(category: AvatarCategory?): List<FamilyAvatarOption> = getByCategory(category)
+
+    fun avatarsByCategory(category: AvatarCategory?): List<FamilyAvatarOption> = getByCategory(category)
+}
+
 
 

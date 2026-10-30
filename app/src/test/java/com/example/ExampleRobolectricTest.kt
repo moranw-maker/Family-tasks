@@ -3409,8 +3409,8 @@ class ExampleRobolectricTest {
 
         // Enter title, select 10-minute reminder (which auto-enables due time), expand More Options, pick +20 pts & WEEKLY recurrence
         onNodeWithTag("task_title_input").performTextInput("אימון כדורסל")
-        onNodeWithTag("task_reminder_chip_MINUTES_10_BEFORE").performClick()
-        onNodeWithTag("expand_more_options_button").performClick()
+        onNodeWithTag("task_reminder_chip_MINUTES_10_BEFORE").performScrollTo().performClick()
+        onNodeWithTag("expand_more_options_button").performScrollTo().performClick()
         waitForIdle()
 
         onNodeWithTag("more_options_container").assertExists()
@@ -5471,7 +5471,317 @@ class ExampleRobolectricTest {
         assertFalse("Retried FCM after cold restart must be blocked as duplicate", bgFcmRetryAfterRestart)
         assertEquals(1, shadowNotifManager.allNotifications.size)
     }
+
+    @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+    @Test
+    fun `test comprehensive ux upgrade foreground single notification auto dismiss banner personal avatars and multi recipient alarm toggles`() = androidx.compose.ui.test.runComposeUiTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.getSharedPreferences("family_tasks_ui_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+        org.robolectric.Shadows.shadowOf(context as android.app.Application)
+            .grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+        val notifManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val shadowNotifManager = org.robolectric.Shadows.shadowOf(notifManager)
+
+        val repository = FamilyRepository(context = context)
+        val dad = repository.members.value.first { it.id == "m_dad" }
+        val kid1 = repository.members.value.first { it.id == "m_kid1" }
+        val kid2 = repository.members.value.first { it.id == "m_kid2" }
+
+        runBlocking {
+            // =========================================================================
+            // PART 1: Single Notification in Foreground vs OS Notification in Background
+            // =========================================================================
+            com.example.notifications.FcmTokenManager.clearAllDispatchedEventsForTesting(context)
+            notifManager.cancelAll()
+
+            // 1A. App is OPEN in foreground -> FCM message triggers ONLY the in-app banner & single sound,
+            //     and does NOT post a duplicate Android OS Heads-Up notification on top of the app!
+            repository.switchCurrentMember(kid1)
+            com.example.notifications.FcmTokenManager.setAppForegroundState(true)
+
+            val fgHandled = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+                context = context,
+                data = mapOf(
+                    "eventKey" to "task_created:fg_single_test_1",
+                    "canonicalEventKey" to "task_created:fg_single_test_1",
+                    "eventType" to com.example.notifications.FcmTokenManager.EVENT_TASK_ASSIGNED,
+                    "familyId" to "fam_israeli_8492",
+                    "taskId" to "fg_single_test_1",
+                    "targetUid" to kid1.id,
+                    "actorUid" to dad.id,
+                    "title" to "משימה חדשה עבורך 📋",
+                    "body" to "סידור החדר"
+                ),
+                signedInUidOverride = kid1.id
+            )
+            assertTrue("Foreground FCM event must be accepted once", fgHandled)
+            assertEquals(
+                "When app is in foreground, Android OS Heads-Up notification must be suppressed (0 OS notifications) so only the in-app banner appears",
+                0,
+                shadowNotifManager.allNotifications.size
+            )
+            // Verify sound cannot play a second time for the same eventKey
+            assertFalse(
+                "Sound deduplication must prevent playing sound a second time for the same eventKey",
+                com.example.notifications.FcmTokenManager.markSoundPlayedIfNew("task_created:fg_single_test_1")
+            )
+
+            // 1B. App is in BACKGROUND / CLOSED -> FCM message displays standard Android OS Heads-Up notification
+            com.example.notifications.FcmTokenManager.setAppForegroundState(false)
+            val bgHandled = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+                context = context,
+                data = mapOf(
+                    "eventKey" to "task_created:bg_os_test_2",
+                    "canonicalEventKey" to "task_created:bg_os_test_2",
+                    "eventType" to com.example.notifications.FcmTokenManager.EVENT_TASK_ASSIGNED,
+                    "familyId" to "fam_israeli_8492",
+                    "taskId" to "bg_os_test_2",
+                    "targetUid" to kid1.id,
+                    "actorUid" to dad.id,
+                    "title" to "משימה חדשה ברקע 📋",
+                    "body" to "הכנת שיעורים"
+                ),
+                signedInUidOverride = kid1.id
+            )
+            assertTrue("Background FCM event must be accepted", bgHandled)
+            assertEquals(
+                "When app is in background, standard Android OS notification MUST be posted",
+                1,
+                shadowNotifManager.allNotifications.size
+            )
+
+            // =========================================================================
+            // PART 2: Stale Open Task Lifecycle & Banner Auto-Close
+            // =========================================================================
+            com.example.notifications.FcmTokenManager.setAppForegroundState(true)
+            repository.switchCurrentMember(dad)
+            val openTaskForBanner = com.example.model.FamilyTask(
+                id = "open_task_live_banner_1",
+                title = "פינוי מדיח כלים",
+                category = com.example.model.TaskCategory.DISHES,
+                assignedToMemberId = "",
+                isOpenForVolunteering = true,
+                dateEpochDay = java.time.LocalDate.now().toEpochDay(),
+                points = 20
+            )
+            assertTrue(repository.addTask(openTaskForBanner))
+
+            // Switch to Kid 1 and simulate active open-task banner for open_task_live_banner_1
+            repository.switchCurrentMember(kid1)
+            com.example.notifications.FcmTokenManager.emitIncomingPushEvent(
+                com.example.notifications.IncomingPushNotificationPayload(
+                    eventKey = "open_task:open_task_live_banner_1",
+                    eventType = com.example.notifications.FcmTokenManager.EVENT_OPEN_TASK_CREATED,
+                    familyId = "fam_israeli_8492",
+                    taskId = "open_task_live_banner_1",
+                    targetUid = kid1.id,
+                    targetRole = "CHILD",
+                    actorUid = dad.id,
+                    title = "📢 משימה פתוחה להתנדבות!",
+                    body = "פינוי מדיח כלים"
+                )
+            )
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            // Kid 2 volunteers and Dad approves Kid 2 -> open_task_live_banner_1 is no longer unassigned/open
+            repository.switchCurrentMember(kid2)
+            val kid2Vol = repository.volunteerForOpenTaskAsync("open_task_live_banner_1").getOrThrow()
+            repository.switchCurrentMember(dad)
+            assertTrue(repository.selectVolunteerForOpenTaskAsync(kid2Vol.id).isSuccess)
+
+            val updatedTaskAfterApproval = repository.tasks.value.first { it.id == "open_task_live_banner_1" }
+            assertFalse("Task must no longer be open for volunteering after volunteer approval", updatedTaskAfterApproval.isUnassignedOpenTask)
+            assertEquals(kid2.id, updatedTaskAfterApproval.assignedToMemberId)
+
+            // If Kid 1 tries to volunteer now that the task was already taken, it fails cleanly with Hebrew message
+            repository.switchCurrentMember(kid1)
+            val lateVolunteerAttempt = repository.volunteerForOpenTaskAsync("open_task_live_banner_1")
+            assertTrue("Volunteering for an already-taken open task must be rejected", lateVolunteerAttempt.isFailure)
+
+            // =========================================================================
+            // PART 3: Personal Avatar Selection System (38 Avatars across 12 Categories + Permissions)
+            // =========================================================================
+            assertTrue(
+                "Built-in FamilyAvatarCatalog must contain at least 30 distinct avatars (found ${com.example.model.FamilyAvatarCatalog.allAvatars.size})",
+                com.example.model.FamilyAvatarCatalog.allAvatars.size >= 30
+            )
+            assertEquals(
+                "All 12 avatar categories must be populated",
+                12,
+                com.example.model.FamilyAvatarCategory.entries.size
+            )
+            com.example.model.FamilyAvatarCategory.entries.forEach { category ->
+                assertTrue(
+                    "Category ${category.name} must have at least 2 avatars",
+                    com.example.model.FamilyAvatarCatalog.avatarsByCategory(category).size >= 2
+                )
+            }
+
+            // 3A. Child 1 selects their own avatar ("space_astronaut" / "avatar_space_01") -> succeeds & persists
+            repository.switchCurrentMember(kid1)
+            val kid1OwnAvatarRes = repository.updateMemberAvatarAsync(kid1.id, "space_astronaut")
+            assertTrue("Child must be allowed to change their own avatar", kid1OwnAvatarRes.isSuccess)
+            val updatedKid1 = repository.members.value.first { it.id == kid1.id }
+            assertEquals("avatar_space_01", updatedKid1.avatarId)
+            assertEquals("🧑🏼‍🚀", updatedKid1.displayAvatarEmoji)
+            assertNotNull(updatedKid1.resolvedAvatarOption)
+
+            // 3B. Child 1 attempts to change Child 2's avatar -> rejected!
+            val kid1ChangeKid2Res = repository.updateMemberAvatarAsync(kid2.id, "robot_friendly")
+            assertTrue("Child must NOT be allowed to change another member's avatar", kid1ChangeKid2Res.isFailure)
+            assertNotEquals("avatar_robot_blue_01", repository.members.value.first { it.id == kid2.id }.avatarId)
+
+            // 3C. Parent changes Child 2's avatar ("fantasy_unicorn" / "avatar_fantasy_01") -> succeeds!
+            repository.switchCurrentMember(dad)
+            val dadChangeKid2Res = repository.updateMemberAvatarAsync(kid2.id, "fantasy_unicorn")
+            assertTrue("Parent must be allowed to change any child's avatar", dadChangeKid2Res.isSuccess)
+            val updatedKid2 = repository.members.value.first { it.id == kid2.id }
+            assertEquals("avatar_fantasy_01", updatedKid2.avatarId)
+            assertEquals("🦄", updatedKid2.displayAvatarEmoji)
+
+            // 3D. Safe fallback when avatarId is empty or unknown
+            val fallbackMember = updatedKid1.copy(avatarId = "non_existent_avatar_id", avatarEmoji = "👦")
+            assertNull("Unknown avatarId must resolve to null option without crashing", fallbackMember.resolvedAvatarOption)
+            assertEquals("👦", fallbackMember.displayAvatarEmoji)
+
+            // =========================================================================
+            // PART 4: Multi-Recipient Alarm Selection & Scheduling Logic
+            // =========================================================================
+            repository.switchCurrentMember(dad)
+            val multiRecipientAlarm = com.example.model.FamilyAlarm(
+                id = "alarm_multi_kids_test",
+                title = "השכמה לטיול משפחתי",
+                hour = 6,
+                minute = 30,
+                assignedMemberId = kid1.id,
+                assignedToMemberId = kid1.id,
+                assignedMemberName = "${kid1.name}, ${kid2.name}",
+                assignedMemberIds = listOf(kid1.id, kid2.id),
+                assignedMemberNames = listOf(kid1.name, kid2.name),
+                createdByMemberId = dad.id,
+                createdByMemberName = dad.name,
+                createdByRole = "PARENT",
+                isPersonal = false,
+                isEnabled = true
+            )
+            assertTrue(repository.addOrUpdateFamilyAlarm(multiRecipientAlarm))
+            val savedMultiAlarm = repository.familyAlarms.value.first { it.id == "alarm_multi_kids_test" }
+            assertEquals(listOf(kid1.id, kid2.id), savedMultiAlarm.effectiveAssignedMemberIds)
+            assertTrue("Multi-recipient alarm must schedule on Kid 1's device", com.example.notifications.FamilyAlarmScheduler.shouldScheduleOnDevice(savedMultiAlarm, kid1.id))
+            assertTrue("Multi-recipient alarm must schedule on Kid 2's device", com.example.notifications.FamilyAlarmScheduler.shouldScheduleOnDevice(savedMultiAlarm, kid2.id))
+            assertFalse("Multi-recipient alarm for Kid 1 & Kid 2 must NOT schedule on Dad's device when Dad is not in assignedMemberIds", com.example.notifications.FamilyAlarmScheduler.shouldScheduleOnDevice(savedMultiAlarm, dad.id))
+            com.example.notifications.FcmTokenManager.setAppForegroundState(false)
+        }
+
+        // =========================================================================
+        // UI Verification: InAppNotificationBanner 4s Auto-Dismiss + FamilyAlarmEditorScreen Multi-Select Toggle Cards
+        // =========================================================================
+        var bannerDismissCount = 0
+        var bannerClickedAlertId = ""
+        val bannerAlertState = androidx.compose.runtime.mutableStateOf<com.example.model.FamilyNotificationAlert?>(
+            com.example.model.FamilyNotificationAlert(
+                id = "alert_banner_1",
+                title = "📢 משימה פתוחה להתנדבות!",
+                message = "סידור הסלון",
+                timestampFormatted = "12:00",
+                taskId = "task_1",
+                isOpenTaskAlert = true
+            )
+        )
+        var savedEditorAlarm: com.example.model.FamilyAlarm? = null
+
+        setContent {
+            com.example.ui.theme.MyApplicationTheme {
+                androidx.compose.foundation.layout.Column {
+                    com.example.ui.components.InAppNotificationBanner(
+                        alert = bannerAlertState.value,
+                        onDismiss = {
+                            bannerDismissCount++
+                            bannerAlertState.value = null
+                        },
+                        onBannerClick = { clicked ->
+                            bannerClickedAlertId = clicked.id
+                        },
+                        autoDismissDurationMs = com.example.ui.components.IN_APP_BANNER_AUTO_DISMISS_MS
+                    )
+                    com.example.ui.screens.FamilyAlarmEditorScreen(
+                        alarmToEdit = null,
+                        members = listOf(dad, kid1, kid2),
+                        currentMember = dad,
+                        isHebrew = true,
+                        onDismiss = {},
+                        onSave = { alarm, _ -> savedEditorAlarm = alarm }
+                    )
+                }
+            }
+        }
+
+        // Verify banner is initially displayed
+        onNodeWithTag("in_app_notification_banner").assertExists()
+
+        // Advance 2.5 seconds -> replace with a new alert ("alert_banner_2") and verify the old 4s timer does NOT prematurely close the new alert at 4.0s!
+        mainClock.advanceTimeBy(2_500L)
+        bannerAlertState.value = com.example.model.FamilyNotificationAlert(
+            id = "alert_banner_2",
+            title = "משימה שנייה",
+            message = "הוצאת הכלב",
+            timestampFormatted = "12:01",
+            taskId = "task_2"
+        )
+        waitForIdle()
+        // Advance another 2.0 seconds (total 4.5s since first banner, but only 2.0s since second banner) -> second banner must STILL be visible!
+        mainClock.advanceTimeBy(2_000L)
+        assertNotNull("Second banner must NOT be closed prematurely by first banner's timer", bannerAlertState.value)
+        assertEquals(0, bannerDismissCount)
+
+        // Advance remaining 2.1 seconds (total 4.1s for second banner) -> auto-dismiss triggers!
+        mainClock.advanceTimeBy(2_100L)
+        waitForIdle()
+        assertEquals("Banner must auto-dismiss after 4 seconds", 1, bannerDismissCount)
+        assertNull(bannerAlertState.value)
+
+        // Now test alarm recipient multi-select toggle cards in FamilyAlarmEditorScreen:
+        // Initially "השעון שלי" (dad) is selected
+        onNodeWithTag("alarm_recipient_selected_badge_${dad.id}", useUnmergedTree = true).assertExists()
+
+        // Tap kid1 -> selects kid1 while keeping dad selected (multi-select!)
+        onNodeWithTag("alarm_assign_${kid1.id}").performScrollTo().performClick()
+        waitForIdle()
+        onNodeWithTag("alarm_recipient_selected_badge_${dad.id}", useUnmergedTree = true).assertExists()
+        onNodeWithTag("alarm_recipient_selected_badge_${kid1.id}", useUnmergedTree = true).assertExists()
+
+        // Second tap on kid1 -> deselects ONLY kid1 while dad stays selected
+        onNodeWithTag("alarm_assign_${kid1.id}").performScrollTo().performClick()
+        waitForIdle()
+        onNodeWithTag("alarm_recipient_selected_badge_${dad.id}", useUnmergedTree = true).assertExists()
+        onNodeWithTag("alarm_recipient_selected_badge_${kid1.id}", useUnmergedTree = true).assertDoesNotExist()
+
+        // Second tap on "השעון שלי" (dad) -> deselects dad so 0 recipients are selected
+        onNodeWithTag("alarm_assign_personal").performScrollTo().performClick()
+        waitForIdle()
+        onNodeWithTag("alarm_recipient_selected_badge_${dad.id}", useUnmergedTree = true).assertDoesNotExist()
+
+        // Tap Save with 0 recipients selected -> must block save and show Hebrew validation message
+        onNodeWithTag("save_alarm_confirm_button").performClick()
+        waitForIdle()
+        assertNull("Alarm save must be blocked when no recipient is selected", savedEditorAlarm)
+        onNodeWithTag("alarm_no_recipient_error_text").assertExists()
+
+        // Now select BOTH kid1 and kid2 -> error clears and Save succeeds with both recipients
+        onNodeWithTag("alarm_assign_${kid1.id}").performScrollTo().performClick()
+        onNodeWithTag("alarm_assign_${kid2.id}").performScrollTo().performClick()
+        waitForIdle()
+        onNodeWithTag("alarm_no_recipient_error_text").assertDoesNotExist()
+        onNodeWithTag("save_alarm_confirm_button").performClick()
+        waitForIdle()
+
+        assertNotNull("Alarm save must succeed when at least one recipient is selected", savedEditorAlarm)
+        assertEquals(listOf(kid1.id, kid2.id), savedEditorAlarm!!.assignedMemberIds)
+        assertEquals(listOf(kid1.name, kid2.name), savedEditorAlarm!!.assignedMemberNames)
+        context.getSharedPreferences("family_tasks_ui_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+    }
 }
+
+
 
 
 

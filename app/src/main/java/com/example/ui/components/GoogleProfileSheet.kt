@@ -11,7 +11,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -42,10 +45,26 @@ fun GoogleProfileSheet(
     onOpenInviteDialog: () -> Unit,
     onOpenEditFamilyName: () -> Unit,
     onOpenGoogleSignIn: () -> Unit,
-    onSignOutGoogle: () -> Unit
+    onSignOutGoogle: () -> Unit,
+    onUpdateMemberAvatar: (targetMemberId: String, avatarId: String) -> Unit = { _, _ -> }
 ) {
     val activeMembers = remember(allMembers) {
         allMembers.filter { it.invitationAccepted && !it.invitationPending }
+    }
+    var memberForAvatarPicker by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf<FamilyMember?>(null)
+    }
+
+    memberForAvatarPicker?.let { target ->
+        AvatarPickerDialog(
+            targetMember = target,
+            isHebrew = isHebrew,
+            onDismiss = { memberForAvatarPicker = null },
+            onSaveAvatar = { chosenAvatarId ->
+                onUpdateMemberAvatar(target.id, chosenAvatarId)
+                memberForAvatarPicker = null
+            }
+        )
     }
 
     ModalBottomSheet(
@@ -196,6 +215,23 @@ fun GoogleProfileSheet(
                             }
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    OutlinedButton(
+                        onClick = { memberForAvatarPicker = currentMember },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("sheet_choose_avatar_btn")
+                    ) {
+                        Text(
+                            text = if (isHebrew) "🎨 בחר אווטאר" else "🎨 Choose Avatar",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            color = GoogleBlueDark
+                        )
+                    }
                 }
             }
 
@@ -253,15 +289,11 @@ fun GoogleProfileSheet(
                                             .clip(CircleShape)
                                     )
                                 } else {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(38.dp)
-                                            .clip(CircleShape)
-                                            .background(Color(member.colorHex).copy(alpha = 0.2f)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(text = member.avatarEmoji, fontSize = 20.sp)
-                                    }
+                                    FamilyMemberAvatar(
+                                        member = member,
+                                        size = 38.dp,
+                                        isHighlighted = isSelected
+                                    )
                                 }
 
                                 Column {

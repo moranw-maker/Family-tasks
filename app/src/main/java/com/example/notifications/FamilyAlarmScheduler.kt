@@ -1073,6 +1073,8 @@ object FamilyAlarmScheduler {
      * - Persists the active alarms list locally so [FamilyAlarmBootReceiver] can restore them on reboot.
      * - Returns a map of `alarmId -> LocalAlarmScheduleResult` for alarms that belong to this device.
      */
+    private val persistenceLock = Any()
+
     fun syncAlarmsForCurrentDevice(
         context: Context,
         alarms: List<FamilyAlarm>,
@@ -1081,7 +1083,7 @@ object FamilyAlarmScheduler {
         currentMemberName: String = "",
         isChildDevice: Boolean = false,
         authoritativeRemoteSync: Boolean = false
-    ): Map<String, LocalAlarmScheduleResult> {
+    ): Map<String, LocalAlarmScheduleResult> = synchronized(persistenceLock) {
         val appCtx = context.applicationContext ?: context
         val deletedIds = getPersistedDeletedAlarmIds(appCtx)
         val activeAlarms = alarms.filter { !it.isDeleted && it.scheduleStatus != FamilyAlarm.STATUS_DELETED && it.id !in deletedIds }
@@ -1159,7 +1161,7 @@ object FamilyAlarmScheduler {
     /**
      * Restores all persisted alarms after device reboot or exact-alarm permission grant.
      */
-    fun restoreAlarmsOnBoot(context: Context): Int {
+    fun restoreAlarmsOnBoot(context: Context): Int = synchronized(persistenceLock) {
         val appCtx = context.applicationContext ?: context
         val deletedIds = getPersistedDeletedAlarmIds(appCtx)
         val persisted = loadPersistedAlarms(appCtx).filter { it.id !in deletedIds && !it.isDeleted }
@@ -1231,7 +1233,7 @@ object FamilyAlarmScheduler {
         context: Context,
         alarms: List<FamilyAlarm>,
         currentMemberId: String
-    ) {
+    ): Unit = synchronized(persistenceLock) {
         runCatching {
             val arr = JSONArray()
             alarms.forEach { alarm ->
@@ -1244,6 +1246,8 @@ object FamilyAlarmScheduler {
                     put("assignedMemberId", alarm.effectiveAssignedMemberId)
                     put("assignedToMemberId", alarm.effectiveAssignedMemberId)
                     put("assignedMemberName", alarm.assignedMemberName)
+                    put("assignedMemberIds", alarm.effectiveAssignedMemberIds.joinToString(","))
+                    put("assignedMemberNames", alarm.effectiveAssignedMemberNames.joinToString("|"))
                     put("createdByMemberId", alarm.createdByMemberId)
                     put("createdByMemberName", alarm.createdByMemberName)
                     put("createdByRole", alarm.createdByRole)
@@ -1268,7 +1272,7 @@ object FamilyAlarmScheduler {
         }
     }
 
-    private fun upsertPersistedAlarmForBootRestore(context: Context, alarm: FamilyAlarm) {
+    private fun upsertPersistedAlarmForBootRestore(context: Context, alarm: FamilyAlarm): Unit = synchronized(persistenceLock) {
         if (alarm.id == DIAGNOSTIC_ALARM_ID) return
         val appCtx = context.applicationContext ?: context
         val existing = loadPersistedAlarms(appCtx).filterNot { it.id == alarm.id }
@@ -1277,7 +1281,7 @@ object FamilyAlarmScheduler {
         persistAlarmsForBootRestore(appCtx, existing + alarm, currentMemberId)
     }
 
-    private fun removePersistedAlarmFromBootRestore(context: Context, alarmId: String) {
+    private fun removePersistedAlarmFromBootRestore(context: Context, alarmId: String): Unit = synchronized(persistenceLock) {
         if (alarmId.isBlank()) return
         val appCtx = context.applicationContext ?: context
         val existing = loadPersistedAlarms(appCtx)
@@ -1288,7 +1292,7 @@ object FamilyAlarmScheduler {
         }
     }
 
-    fun loadPersistedAlarms(context: Context): List<FamilyAlarm> {
+    fun loadPersistedAlarms(context: Context): List<FamilyAlarm> = synchronized(persistenceLock) {
         return runCatching {
             val deletedIds = getPersistedDeletedAlarmIds(context)
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -1308,6 +1312,23 @@ object FamilyAlarmScheduler {
                 val assignedId = obj.optString("assignedToMemberId", "").ifBlank {
                     obj.optString("assignedMemberId", "")
                 }
+                val assignedIdsCsv = obj.optString("assignedMemberIds", "")
+                val assignedIds = assignedIdsCsv.split(",")
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .ifEmpty { if (assignedId.isNotBlank()) listOf(assignedId) else emptyList() }
+                val assignedNamesRaw = obj.optString("assignedMemberNames", "")
+                val assignedNameSingle = obj.optString("assignedMemberName", "")
+                val assignedNames = assignedNamesRaw.split("|")
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .ifEmpty {
+                        if (assignedNameSingle.isNotBlank()) {
+                            assignedNameSingle.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                        } else {
+                            emptyList()
+                        }
+                    }
                 list.add(
                     FamilyAlarm(
                         id = id,
@@ -1315,9 +1336,11 @@ object FamilyAlarmScheduler {
                         title = obj.optString("title", "שעון מעורר"),
                         hour = obj.optInt("hour", 7),
                         minute = obj.optInt("minute", 0),
-                        assignedMemberId = assignedId,
-                        assignedToMemberId = assignedId,
-                        assignedMemberName = obj.optString("assignedMemberName", ""),
+                        assignedMemberId = assignedIds.firstOrNull() ?: assignedId,
+                        assignedToMemberId = assignedIds.firstOrNull() ?: assignedId,
+                        assignedMemberName = if (assignedNames.isNotEmpty()) assignedNames.joinToString(", ") else assignedNameSingle,
+                        assignedMemberIds = assignedIds,
+                        assignedMemberNames = assignedNames,
                         createdByMemberId = obj.optString("createdByMemberId", ""),
                         createdByMemberName = obj.optString("createdByMemberName", ""),
                         createdByRole = obj.optString("createdByRole", ""),

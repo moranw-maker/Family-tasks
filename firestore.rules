@@ -177,10 +177,16 @@ service cloud.firestore {
     function isParentPersonalAlarmRecord() {
       let targetId = alarmTargetMemberId(resource.data);
       let creatorId = resource.data.get('createdByMemberId', '');
+      let assignedIds = resource.data.get('assignedMemberIds', []);
       return resource.data.get('createdByRole', '') == 'PARENT'
         && (
           resource.data.get('isPersonal', false) == true
-          || (targetId != '' && creatorId != '' && targetId == creatorId)
+          || (
+            targetId != ''
+            && creatorId != ''
+            && targetId == creatorId
+            && (!(assignedIds is list) || assignedIds.size() <= 1)
+          )
         );
     }
 
@@ -190,7 +196,9 @@ service cloud.firestore {
     function isChildTargetDeviceAckOnly() {
       let changedKeys = request.resource.data.diff(resource.data).affectedKeys();
       let targetId = alarmTargetMemberId(resource.data);
+      let assignedIds = resource.data.get('assignedMemberIds', []);
       return (targetId == request.auth.uid
+          || (assignedIds is list && request.auth.uid in assignedIds)
           || (targetId != resource.data.get('createdByMemberId', '') && resource.data.get('isPersonal', false) == false))
         && changedKeys.hasOnly([
           'scheduleStatus',
@@ -403,6 +411,7 @@ service cloud.firestore {
         && isAllowedRoleValue(request.resource.data.get('role', ''))
         && isSameOrMigratedRole(resource.data.get('role', ''), request.resource.data.get('role', ''))
         && isValidFamilyIdentity(request.resource.data)
+        && (!('avatarId' in request.resource.data) || (request.resource.data.avatarId is string && request.resource.data.avatarId.size() <= 64))
         && (
           !('familyIdentity' in resource.data)
           || resource.data.get('familyIdentity', '') == ''
@@ -453,6 +462,7 @@ service cloud.firestore {
           && isAllowedRoleValue(request.resource.data.get('role', ''))
           && isSameOrMigratedRole(resource.data.get('role', ''), request.resource.data.get('role', ''))
           && isValidFamilyIdentity(request.resource.data)
+          && (!('avatarId' in request.resource.data) || (request.resource.data.avatarId is string && request.resource.data.avatarId.size() <= 64))
           && (
             !('familyIdentity' in resource.data)
             || resource.data.get('familyIdentity', '') == ''

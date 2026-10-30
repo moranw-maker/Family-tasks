@@ -10,6 +10,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -50,6 +51,7 @@ import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.AlarmOff
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -67,6 +69,7 @@ import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Snooze
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -1041,9 +1044,17 @@ private fun FamilyAlarmCard(
     val isTargetAcknowledged = alarm.isTargetDeviceAcknowledged()
     val isPendingTargetDevice = alarm.isEnabled && isRemoteTarget && !isTargetAcknowledged
 
-    val targetDisplayName = assignedMember?.name
-        ?: alarm.assignedMemberName.takeIf { it.isNotBlank() }
-        ?: if (isHebrew) "בן משפחה" else "Family Member"
+    val targetIds = alarm.effectiveAssignedMemberIds
+    val targetDisplayName = remember(alarm, assignedMember, isHebrew) {
+        val names = alarm.effectiveAssignedMemberNames.filter { it.isNotBlank() }
+        when {
+            names.size > 1 -> names.joinToString(", ")
+            assignedMember != null -> assignedMember.name
+            names.size == 1 -> names.first()
+            alarm.assignedMemberName.isNotBlank() -> alarm.assignedMemberName
+            else -> if (isHebrew) "בן משפחה" else "Family Member"
+        }
+    }
 
     val repeatDaysText = remember(alarm.daysOfWeek, isHebrew) {
         when {
@@ -1060,8 +1071,10 @@ private fun FamilyAlarmCard(
         }
     }
 
-    val assignmentText = remember(alarm, currentMember.id, targetId, targetDisplayName, isHebrew) {
+    val assignmentText = remember(alarm, currentMember.id, targetId, targetIds, targetDisplayName, isHebrew) {
         when {
+            targetIds.size > 1 ->
+                if (isHebrew) "עבור $targetDisplayName" else "For $targetDisplayName"
             targetId == currentMember.id ->
                 if (isHebrew) "השעון שלי" else "My Alarm"
             targetId.isNotBlank() ->
@@ -1347,9 +1360,15 @@ fun FamilyAlarmEditorScreen(
     val initialTimeFormatted = remember(alarmToEdit) {
         alarmToEdit?.formattedTime24h ?: "07:00"
     }
-    val initialSelectedMemberId = remember(alarmToEdit, currentMember.id) {
-        alarmToEdit?.effectiveAssignedMemberId?.takeIf { it.isNotBlank() }
-            ?: currentMember.id
+    val initialSelectedMemberIds = remember(alarmToEdit, currentMember.id) {
+        val existingIds = alarmToEdit?.effectiveAssignedMemberIds
+            ?.filter { it.isNotBlank() }
+            .orEmpty()
+        if (existingIds.isNotEmpty()) {
+            existingIds.toSet()
+        } else {
+            setOf(currentMember.id)
+        }
     }
     val initialSelectedDays = remember(alarmToEdit) {
         alarmToEdit?.daysOfWeek?.toSet() ?: SchoolDay.allWeekDays
@@ -1398,8 +1417,8 @@ fun FamilyAlarmEditorScreen(
     var timeFormatted by remember(alarmToEdit) { mutableStateOf(initialTimeFormatted) }
     var showTimePickerModal by remember { mutableStateOf(false) }
 
-    var selectedMemberId by remember(alarmToEdit) { mutableStateOf(initialSelectedMemberId) }
-    var showAssignmentDropdown by remember { mutableStateOf(false) }
+    var selectedMemberIds by remember(alarmToEdit) { mutableStateOf(initialSelectedMemberIds) }
+    var recipientValidationError by remember { mutableStateOf<String?>(null) }
 
     var selectedDays by remember(alarmToEdit) { mutableStateOf(initialSelectedDays) }
     var soundType by remember(alarmToEdit) { mutableStateOf(initialSoundType) }
@@ -1418,7 +1437,7 @@ fun FamilyAlarmEditorScreen(
     val hasUnsavedChanges = remember(
         title,
         timeFormatted,
-        selectedMemberId,
+        selectedMemberIds,
         selectedDays,
         soundType,
         customSoundUri,
@@ -1430,7 +1449,7 @@ fun FamilyAlarmEditorScreen(
     ) {
         title != initialTitle ||
             timeFormatted != initialTimeFormatted ||
-            selectedMemberId != initialSelectedMemberId ||
+            selectedMemberIds != initialSelectedMemberIds ||
             selectedDays != initialSelectedDays ||
             soundType != initialSoundType ||
             customSoundUri != initialCustomSoundUri ||
@@ -1451,8 +1470,7 @@ fun FamilyAlarmEditorScreen(
     }
 
     val isTargetRemoteChild = currentMember.isParent &&
-        selectedMemberId.isNotBlank() &&
-        selectedMemberId != currentMember.id
+        selectedMemberIds.any { it.isNotBlank() && it != currentMember.id }
 
     // Dedicated Full-Screen Ringtone Picker Screen
     if (showRingtonePickerScreen) {
@@ -1621,14 +1639,35 @@ fun FamilyAlarmEditorScreen(
 
                         Button(
                             onClick = {
+                                if (selectedMemberIds.isEmpty()) {
+                                    recipientValidationError = if (isHebrew) {
+                                        "יש לבחור לפחות נמען אחד לשעון המעורר."
+                                    } else {
+                                        "יש לבחור לפחות נמען אחד לשעון המעורר."
+                                    }
+                                    return@Button
+                                }
+                                recipientValidationError = null
+
                                 val hr = parsedTime.first
                                 val min = parsedTime.second
-                                val effectiveTargetId = if (!currentMember.isParent) {
-                                    currentMember.id
+                                val orderedCandidates = listOf(currentMember) + childMembers.filter { it.id != currentMember.id }
+                                val selectedIdsList = if (!currentMember.isParent) {
+                                    listOf(currentMember.id)
                                 } else {
-                                    selectedMemberId.ifBlank { currentMember.id }
+                                    orderedCandidates.map { it.id }
+                                        .filter { it in selectedMemberIds }
+                                        .ifEmpty { selectedMemberIds.toList() }
                                 }
-                                val assignedMember = members.find { it.id == effectiveTargetId }
+                                val selectedNamesList = selectedIdsList.map { id ->
+                                    members.find { it.id == id }?.name ?: currentMember.name
+                                }
+                                val effectiveTargetId = selectedIdsList.firstOrNull() ?: currentMember.id
+                                val effectiveTargetName = if (selectedNamesList.size > 1) {
+                                    selectedNamesList.joinToString(", ")
+                                } else {
+                                    selectedNamesList.firstOrNull() ?: currentMember.name
+                                }
                                 val preservedCreatorId = alarmToEdit?.createdByMemberId?.takeIf { it.isNotBlank() } ?: currentMember.id
                                 val preservedCreatorName = alarmToEdit?.createdByMemberName?.takeIf { it.isNotBlank() } ?: currentMember.name
                                 val preservedCreatorRole = alarmToEdit?.createdByRole?.takeIf { it.isNotBlank() }
@@ -1644,14 +1683,16 @@ fun FamilyAlarmEditorScreen(
                                     minute = min,
                                     assignedMemberId = effectiveTargetId,
                                     assignedToMemberId = effectiveTargetId,
-                                    assignedMemberName = assignedMember?.name ?: currentMember.name,
+                                    assignedMemberName = effectiveTargetName,
+                                    assignedMemberIds = selectedIdsList,
+                                    assignedMemberNames = selectedNamesList,
                                     daysOfWeek = SchoolDay.values().filter { it in selectedDays }.ifEmpty { SchoolDay.allWeekDays },
                                     isEnabled = true,
                                     ringtoneEmoji = ringtoneEmoji,
                                     createdByMemberId = preservedCreatorId,
                                     createdByMemberName = preservedCreatorName,
                                     createdByRole = preservedCreatorRole,
-                                    isPersonal = effectiveTargetId == preservedCreatorId,
+                                    isPersonal = selectedIdsList.size == 1 && effectiveTargetId == preservedCreatorId,
                                     soundType = soundType,
                                     customSoundUri = if (soundType == AlarmAudioController.SOUND_CUSTOM_URI) customSoundUri else "",
                                     customSoundTitle = if (soundType == AlarmAudioController.SOUND_CUSTOM_URI) customSoundTitle else "",
@@ -1895,185 +1936,294 @@ fun FamilyAlarmEditorScreen(
                     }
                 }
 
-                // 3. ALARM ASSIGNMENT ("עבור מי השעון?")
-                val selectedTargetLabel = remember(selectedMemberId, currentMember, childMembers, isHebrew) {
-                    if (selectedMemberId == currentMember.id || !currentMember.isParent) {
-                        if (isHebrew) "השעון שלי" else "My Alarm"
-                    } else {
-                        val child = childMembers.find { it.id == selectedMemberId }
-                        if (child != null) {
-                            if (isHebrew) "ילד: ${child.name}" else "Child: ${child.name}"
-                        } else {
-                            if (isHebrew) "השעון שלי" else "My Alarm"
+                // 3. ALARM ASSIGNMENT ("עבור מי השעון?") — Multi-Select Toggle Cards in 2-Column Grid
+                val recipientOptions = remember(currentMember, childMembers, isHebrew) {
+                    buildList {
+                        add(
+                            Triple(
+                                currentMember,
+                                if (isHebrew) "השעון שלי" else "My Alarm",
+                                "alarm_assign_personal"
+                            )
+                        )
+                        if (currentMember.isParent) {
+                            childMembers.forEach { child ->
+                                if (child.id != currentMember.id) {
+                                    add(
+                                        Triple(
+                                            child,
+                                            child.name,
+                                            "alarm_assign_${child.id}"
+                                        )
+                                    )
+                                }
+                            }
                         }
                     }
                 }
 
+                val selectedTargetSummaryLabel = remember(selectedMemberIds, currentMember, childMembers, isHebrew) {
+                    when {
+                        selectedMemberIds.isEmpty() ->
+                            if (isHebrew) "לא נבחר נמען" else "None selected"
+                        selectedMemberIds.size == 1 && currentMember.id in selectedMemberIds ->
+                            if (isHebrew) "השעון שלי" else "My Alarm"
+                        selectedMemberIds.size == 1 -> {
+                            val singleId = selectedMemberIds.first()
+                            val child = childMembers.find { it.id == singleId }
+                            if (child != null) {
+                                if (isHebrew) "ילד: ${child.name}" else "Child: ${child.name}"
+                            } else {
+                                if (isHebrew) "השעון שלי" else "My Alarm"
+                            }
+                        }
+                        else -> {
+                            val names = recipientOptions
+                                .filter { it.first.id in selectedMemberIds }
+                                .map { it.second }
+                            if (names.isNotEmpty()) {
+                                names.joinToString(", ")
+                            } else {
+                                if (isHebrew) "${selectedMemberIds.size} נמענים" else "${selectedMemberIds.size} recipients"
+                            }
+                        }
+                    }
+                }
+
+                val toggleRecipient: (String) -> Unit = { targetMemberId ->
+                    if (targetMemberId in selectedMemberIds) {
+                        selectedMemberIds = selectedMemberIds - targetMemberId
+                    } else {
+                        selectedMemberIds = selectedMemberIds + targetMemberId
+                        recipientValidationError = null
+                        if (targetMemberId != currentMember.id && soundType == AlarmAudioController.SOUND_CUSTOM_URI) {
+                            soundType = AlarmAudioController.SOUND_SYSTEM_ALARM
+                        }
+                    }
+                }
+
+                val glassColors = LocalSoftGlassColors.current
+                val gridColumns = if (this@BoxWithConstraints.maxWidth < 260.dp) 1 else 2
+
                 Surface(
                     shape = softCardShape,
-                    color = Color.White,
+                    color = if (glassColors.isDark) glassColors.cardBackground else Color.White,
                     border = softCardBorder,
                     shadowElevation = 1.dp,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("alarm_recipients_section_card")
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Box(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp)
+                                .testTag("alarm_assignment_dropdown_row"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
                             Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .clickable(enabled = currentMember.isParent && childMembers.isNotEmpty()) {
-                                        showAssignmentDropdown = true
-                                    }
-                                    .padding(vertical = 4.dp)
-                                    .testTag("alarm_assignment_dropdown_row"),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Person,
-                                        contentDescription = null,
-                                        tint = GoogleBlueDark,
-                                        modifier = Modifier.size(18.dp)
+                                Icon(
+                                    imageVector = Icons.Default.Person,
+                                    contentDescription = null,
+                                    tint = GoogleBlueDark,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = if (isHebrew) "עבור מי השעון?" else "Who is this alarm for?",
+                                    style = MaterialTheme.typography.titleSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (glassColors.isDark) glassColors.textPrimary else Color(0xFF15366B)
                                     )
-                                    Text(
-                                        text = if (isHebrew) "עבור מי השעון?" else "Who is this alarm for?",
-                                        style = MaterialTheme.typography.titleSmall.copy(
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color(0xFF15366B)
-                                        )
-                                    )
-                                }
-
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = Color(0xFFEAF3FE),
-                                    border = BorderStroke(1.dp, Color(0xFFCCE0FA))
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                    ) {
-                                        Text(
-                                            text = selectedTargetLabel,
-                                            style = MaterialTheme.typography.labelMedium.copy(
-                                                fontWeight = FontWeight.Bold,
-                                                color = GoogleBlueDark
-                                            )
-                                        )
-                                        if (currentMember.isParent && childMembers.isNotEmpty()) {
-                                            Icon(
-                                                imageVector = Icons.Default.ExpandMore,
-                                                contentDescription = null,
-                                                tint = GoogleBlueDark,
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                        }
-                                    }
-                                }
+                                )
                             }
 
-                            DropdownMenu(
-                                expanded = showAssignmentDropdown,
-                                onDismissRequest = { showAssignmentDropdown = false }
-                            ) {
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            text = if (isHebrew) "השעון שלי" else "My Alarm",
-                                            fontWeight = if (selectedMemberId == currentMember.id) FontWeight.Bold else FontWeight.Normal
-                                        )
-                                    },
-                                    onClick = {
-                                        selectedMemberId = currentMember.id
-                                        showAssignmentDropdown = false
-                                    }
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (selectedMemberIds.isEmpty()) {
+                                    Color(0xFFFEE2E2)
+                                } else {
+                                    Color(0xFFEAF3FE)
+                                },
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (selectedMemberIds.isEmpty()) Color(0xFFFCA5A5) else Color(0xFFCCE0FA)
                                 )
-                                if (currentMember.isParent) {
-                                    childMembers.forEach { child ->
-                                        DropdownMenuItem(
-                                            text = {
-                                                Text(
-                                                    text = if (isHebrew) "ילד: ${child.name} (${child.avatarEmoji})"
-                                                    else "Child: ${child.name} (${child.avatarEmoji})",
-                                                    fontWeight = if (selectedMemberId == child.id) FontWeight.Bold else FontWeight.Normal
-                                                )
+                            ) {
+                                Text(
+                                    text = selectedTargetSummaryLabel,
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (selectedMemberIds.isEmpty()) Color(0xFFB91C1C) else GoogleBlueDark
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier
+                                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                                        .testTag("alarm_selected_recipients_summary")
+                                )
+                            }
+                        }
+
+                        // 2-Column Grid of Multi-Select Toggle Recipient Cards
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("alarm_recipients_grid"),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            recipientOptions.chunked(gridColumns).forEach { rowItems ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    rowItems.forEach { (memberOption, labelText, itemTestTag) ->
+                                        val isRecipientSelected = memberOption.id in selectedMemberIds
+                                        val cardBgColor by animateColorAsState(
+                                            targetValue = when {
+                                                isRecipientSelected && glassColors.isDark -> Color(0xFF1E3A6D)
+                                                isRecipientSelected -> Color(0xFFDCEBFE)
+                                                glassColors.isDark -> glassColors.screenBackground
+                                                else -> Color(0xFFF8FAFF)
                                             },
-                                            onClick = {
-                                                selectedMemberId = child.id
-                                                if (soundType == AlarmAudioController.SOUND_CUSTOM_URI) {
-                                                    soundType = AlarmAudioController.SOUND_SYSTEM_ALARM
-                                                }
-                                                showAssignmentDropdown = false
-                                            }
+                                            label = "recipientCardBg_${memberOption.id}"
                                         )
+                                        val cardBorderColor by animateColorAsState(
+                                            targetValue = when {
+                                                isRecipientSelected -> GoogleBlue
+                                                glassColors.isDark -> glassColors.cardBorder
+                                                else -> Color(0xFFD5E3F7)
+                                            },
+                                            label = "recipientCardBorder_${memberOption.id}"
+                                        )
+
+                                        Surface(
+                                            shape = RoundedCornerShape(16.dp),
+                                            color = cardBgColor,
+                                            border = BorderStroke(
+                                                width = if (isRecipientSelected) 1.8.dp else 1.dp,
+                                                color = cardBorderColor
+                                            ),
+                                            shadowElevation = if (isRecipientSelected) 2.dp else 0.dp,
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .defaultMinSize(minHeight = 58.dp)
+                                                .clip(RoundedCornerShape(16.dp))
+                                                .clickable { toggleRecipient(memberOption.id) }
+                                                .testTag(itemTestTag)
+                                        ) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                    modifier = Modifier.weight(1f)
+                                                ) {
+                                                    com.example.ui.components.FamilyMemberAvatar(
+                                                        member = memberOption,
+                                                        size = 34.dp,
+                                                        isHighlighted = isRecipientSelected
+                                                    )
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(
+                                                            text = labelText,
+                                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                                fontWeight = if (isRecipientSelected) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                                                color = if (isRecipientSelected) {
+                                                                    if (glassColors.isDark) Color.White else Color(0xFF12366E)
+                                                                } else {
+                                                                    if (glassColors.isDark) glassColors.textPrimary else Color(0xFF2D436B)
+                                                                },
+                                                                fontSize = 13.sp
+                                                            ),
+                                                            softWrap = true
+                                                        )
+                                                        if (memberOption.id != currentMember.id) {
+                                                            Text(
+                                                                text = if (isHebrew) "ילד/ה" else "Child",
+                                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                                    fontSize = 10.sp,
+                                                                    color = if (isRecipientSelected) GoogleBlueDark else Color(0xFF6E81A0),
+                                                                    fontWeight = FontWeight.Medium
+                                                                )
+                                                            )
+                                                        }
+                                                    }
+                                                }
+
+                                                if (isRecipientSelected) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(22.dp)
+                                                            .clip(CircleShape)
+                                                            .background(GoogleBlue)
+                                                            .testTag("alarm_recipient_selected_badge_${memberOption.id}"),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Check,
+                                                            contentDescription = if (isHebrew) "מסומן" else "Selected",
+                                                            tint = Color.White,
+                                                            modifier = Modifier.size(14.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if (gridColumns == 2 && rowItems.size == 1 && recipientOptions.size > 1) {
+                                        Spacer(modifier = Modifier.weight(1f))
                                     }
                                 }
                             }
                         }
 
-                        // Compact selector pills when parent has children (keeps quick 1-tap switching & testTags)
-                        if (currentMember.isParent && childMembers.isNotEmpty()) {
-                            FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
-                                modifier = Modifier.fillMaxWidth()
+                        if (!recipientValidationError.isNullOrBlank()) {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color(0xFFFEE2E2),
+                                border = BorderStroke(1.dp, Color(0xFFF87171)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("alarm_no_recipient_error_banner")
                             ) {
-                                val isSelf = selectedMemberId == currentMember.id
-                                FilterChip(
-                                    selected = isSelf,
-                                    onClick = { selectedMemberId = currentMember.id },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = Color(0xFFDCEBFE),
-                                        selectedLabelColor = Color(0xFF12366E)
-                                    ),
-                                    label = {
-                                        Text(
-                                            text = if (isHebrew) "השעון שלי" else "My Alarm",
-                                            fontSize = 12.sp,
-                                            fontWeight = if (isSelf) FontWeight.Bold else FontWeight.Medium
-                                        )
-                                    },
-                                    modifier = Modifier.testTag("alarm_assign_personal")
-                                )
-                                childMembers.forEach { child ->
-                                    val isChildSelected = selectedMemberId == child.id
-                                    FilterChip(
-                                        selected = isChildSelected,
-                                        onClick = {
-                                            selectedMemberId = child.id
-                                            if (soundType == AlarmAudioController.SOUND_CUSTOM_URI) {
-                                                soundType = AlarmAudioController.SOUND_SYSTEM_ALARM
-                                            }
-                                        },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = Color(0xFFDCEBFE),
-                                            selectedLabelColor = Color(0xFF12366E)
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.WarningAmber,
+                                        contentDescription = null,
+                                        tint = Color(0xFFB91C1C),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = recipientValidationError.orEmpty(),
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = Color(0xFFB91C1C)
                                         ),
-                                        label = {
-                                            Text(
-                                                text = if (isHebrew) "ילד: ${child.name}" else "Child: ${child.name}",
-                                                fontSize = 12.sp,
-                                                fontWeight = if (isChildSelected) FontWeight.Bold else FontWeight.Medium
-                                            )
-                                        },
-                                        modifier = Modifier.testTag("alarm_assign_${child.id}")
+                                        modifier = Modifier.testTag("alarm_no_recipient_error_text")
                                     )
                                 }
                             }
-                        } else {
-                            // Ensure testTag("alarm_assign_personal") is always present for single-user / child mode
-                            Box(modifier = Modifier.testTag("alarm_assign_personal"))
                         }
                     }
                 }

@@ -270,17 +270,31 @@ class FamilyMessagingService : FirebaseMessagingService() {
 
             if (resolvedTitle.isBlank() && resolvedBody.isBlank()) return false
 
-            // Display genuine system notification via NotificationHelper
-            NotificationHelper.showIncomingFcmNotification(
-                context = appCtx,
-                title = resolvedTitle,
-                message = resolvedBody,
-                eventKey = eventKey,
-                taskId = taskId,
-                eventType = eventType
-            )
+            // When the app is in the background or closed, display the system Heads-Up notification.
+            // When the app is open in the foreground, suppress the floating system Heads-Up notification
+            // so the user sees only the styled in-app FamilyTasks banner (with single sound playback).
+            if (!FcmTokenManager.isAppInForeground) {
+                NotificationHelper.showIncomingFcmNotification(
+                    context = appCtx,
+                    title = resolvedTitle,
+                    message = resolvedBody,
+                    eventKey = eventKey,
+                    taskId = taskId,
+                    eventType = eventType
+                )
+            } else if (FcmTokenManager.markSoundPlayedIfNew(eventKey)) {
+                val usageType = NotificationHelper.resolveSoundUsageForEvent(eventType)
+                val uri = FamilySoundManager.resolvePlayableUriOrFallback(appCtx, usageType)
+                val cfg = FamilySoundManager.getSoundConfigForUsage(appCtx, usageType)
+                FcmTokenManager.recordForegroundSoundPlayed(uri.toString())
+                FamilySoundManager.playNotificationSoundOneShot(
+                    context = appCtx,
+                    uri = uri,
+                    volumePercent = cfg.volumePercent
+                )
+            }
 
-            // Emit to in-app stream so notification history stays in sync
+            // Emit to in-app stream so notification history (and foreground banner + sound) stays in sync
             FcmTokenManager.emitIncomingPushEvent(
                 IncomingPushNotificationPayload(
                     eventKey = eventKey,

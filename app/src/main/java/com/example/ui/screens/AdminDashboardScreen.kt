@@ -55,11 +55,25 @@ fun AdminDashboardScreen(
     onRevokeInvitation: (code: String) -> Unit = {},
     onGenerateShareText: (name: String, role: UserRole) -> String = { _, _ -> "" },
     onFormatInvitationShareText: ((FamilyInvitation) -> String)? = null,
+    onUpdateMemberAvatar: (targetMemberId: String, avatarId: String) -> Unit = { _, _ -> },
     listState: LazyListState = rememberLazyListState()
 ) {
     val glass = LocalSoftGlassColors.current
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
+    var memberForAvatarPicker by remember { mutableStateOf<FamilyMember?>(null) }
+
+    memberForAvatarPicker?.let { targetMember ->
+        com.example.ui.components.AvatarPickerDialog(
+            targetMember = targetMember,
+            isHebrew = isHebrew,
+            onDismiss = { memberForAvatarPicker = null },
+            onSaveAvatar = { chosenAvatarId ->
+                onUpdateMemberAvatar(targetMember.id, chosenAvatarId)
+                memberForAvatarPicker = null
+            }
+        )
+    }
 
     // V1.6 Requirement 6: Active members NEVER include pending invitations
     val activeMembers = remember(members) {
@@ -452,6 +466,19 @@ fun AdminDashboardScreen(
                                 }
                             }
                         }
+                    }
+
+                    if (currentMember.isParent || member.id == currentMember.id) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        FamilySecondaryButton(
+                            text = if (isHebrew) "🎨 בחר אווטאר" else "🎨 Choose Avatar",
+                            onClick = { memberForAvatarPicker = member },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(34.dp)
+                                .testTag("admin_change_avatar_btn_${member.id}")
+                        )
                     }
                 }
             }
