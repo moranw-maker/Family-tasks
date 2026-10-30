@@ -104,6 +104,7 @@ class FamilyViewModel(
     val tenMinuteClassAlertsEnabled: StateFlow<Boolean> = repository.tenMinuteClassAlertsEnabled
     val timetableViewMode: StateFlow<TimetableViewMode> = repository.timetableViewMode
     val filesViewMode: StateFlow<FilesViewMode> = repository.filesViewMode
+    val tasksViewMode: StateFlow<TasksViewMode> = repository.tasksViewMode
 
     // Navigation & UI States
     private val _currentScreen = MutableStateFlow(AppScreen.HOME)
@@ -603,11 +604,40 @@ class FamilyViewModel(
         _snackbarMessage.value = "התנתקת מחשבון Google"
     }
 
+    /**
+     * Switches task display filter / view mode for [member] without stripping the current user's
+     * role or permissions (`currentMember.role` / `currentMember.isParent`) and without hiding
+     * the Family Management ("ניהול המשפחה") section.
+     */
     fun switchMember(member: FamilyMember) {
-        repository.switchCurrentMember(member)
+        val nextFilter = if (_selectedMemberFilter.value == member.id) null else member.id
+        _selectedMemberFilter.value = nextFilter
+        repository.toggleTasksViewMode()
         val isHe = appLanguage.value == AppLanguage.HEBREW
-        val identityTitle = "${member.familyIdentity.getDisplayName(isHe)} • ${member.role.getDisplayName(isHe)}"
-        _snackbarMessage.value = "פרופיל פעיל: ${member.name} ($identityTitle)"
+        _snackbarMessage.value = if (nextFilter != null) {
+            if (isHe) "סינון תצוגת משימות: ${member.name} (הרשאות הורה נשמרות)"
+            else "Tasks filtered for: ${member.name} (parent permissions preserved)"
+        } else {
+            if (isHe) "תצוגת כל משימות המשפחה"
+            else "Showing all family tasks"
+        }
+    }
+
+    fun setTasksViewMode(mode: TasksViewMode) {
+        repository.setTasksViewMode(mode)
+    }
+
+    fun toggleTasksViewMode(): TasksViewMode {
+        val next = repository.toggleTasksViewMode()
+        val isHe = appLanguage.value == AppLanguage.HEBREW
+        _snackbarMessage.value = if (isHe) {
+            if (next == TasksViewMode.COMPACT) "תצוגת משימות קומפקטית הופעלה ✨"
+            else "תצוגת משימות רגילה הופעלה ✨"
+        } else {
+            if (next == TasksViewMode.COMPACT) "Compact tasks view enabled ✨"
+            else "Standard tasks view enabled ✨"
+        }
+        return next
     }
 
     /**
@@ -771,7 +801,8 @@ class FamilyViewModel(
         recurrence: TaskRecurrence,
         points: Int,
         hasDueTime: Boolean = false,
-        reminderOffset: TaskReminderOffset = TaskReminderOffset.NONE
+        reminderOffset: TaskReminderOffset = TaskReminderOffset.NONE,
+        isOpenForVolunteering: Boolean = false
     ) {
         if (!currentMember.value.isParent) {
             _snackbarMessage.value = "רק הורים יכולים ליצור או לערוך משימות 🔒"
@@ -780,13 +811,15 @@ class FamilyViewModel(
         val effectiveHasDueTime = hasDueTime || reminderOffset != TaskReminderOffset.NONE
         val effectiveReminderOffset = if (effectiveHasDueTime) reminderOffset else TaskReminderOffset.NONE
         val effectiveReminderEnabled = effectiveHasDueTime && effectiveReminderOffset != TaskReminderOffset.NONE
+        val effectiveAssignee = if (isOpenForVolunteering) "" else assignedToMemberId
         val nowMillis = System.currentTimeMillis()
         if (id == null) {
             val newTask = FamilyTask(
                 title = title,
                 description = description,
                 category = category,
-                assignedToMemberId = assignedToMemberId,
+                assignedToMemberId = effectiveAssignee,
+                isOpenForVolunteering = isOpenForVolunteering,
                 dateEpochDay = dateEpochDay,
                 dueTimeFormatted = dueTimeFormatted,
                 hasDueTime = effectiveHasDueTime,
@@ -799,7 +832,11 @@ class FamilyViewModel(
                 updatedAtMillis = nowMillis
             )
             repository.addTask(newTask)
-            _snackbarMessage.value = "משימה חדשה נוספה וסונכרנה ליומן Google ✓"
+            _snackbarMessage.value = if (isOpenForVolunteering) {
+                "משימה פתוחה להתנדבות פורסמה לכל הילדים 📢"
+            } else {
+                "משימה חדשה נוספה וסונכרנה ליומן Google ✓"
+            }
         } else {
             val existing = tasks.value.find { it.id == id }
             if (existing != null) {
@@ -808,7 +845,8 @@ class FamilyViewModel(
                         title = title,
                         description = description,
                         category = category,
-                        assignedToMemberId = assignedToMemberId,
+                        assignedToMemberId = effectiveAssignee,
+                        isOpenForVolunteering = isOpenForVolunteering,
                         dateEpochDay = dateEpochDay,
                         dueTimeFormatted = dueTimeFormatted,
                         hasDueTime = effectiveHasDueTime,
@@ -1418,6 +1456,22 @@ class FamilyViewModel(
         return ok
     }
 
+    fun volunteerForOpenTask(taskId: String, note: String = ""): Boolean {
+        val ok = repository.volunteerForOpenTask(taskId, note)
+        if (ok) {
+            _snackbarMessage.value = "בקשת ההתנדבות נשלחה לאישור הורה! 🙋"
+        }
+        return ok
+    }
+
+    fun selectVolunteerForOpenTask(proposalId: String): Boolean {
+        val ok = repository.selectVolunteerForOpenTask(proposalId)
+        if (ok) {
+            _snackbarMessage.value = "המתנדב/ת נבחר/ה והמשימה שויכה בהצלחה! ✅"
+        }
+        return ok
+    }
+
     fun approveTaskCompletionWithSplit(
         taskId: String,
         performerPoints: Int,
@@ -1564,6 +1618,26 @@ class FamilyViewModel(
             }
         }
         return ok
+    }
+
+    fun setPersonalRewardGoal(
+        rewardId: String?,
+        targetChildId: String = currentMember.value.id
+    ): Boolean {
+        val ok = repository.setPersonalRewardGoal(rewardId, targetChildId)
+        if (ok) {
+            val rewardTitle = rewardId?.let { id -> rewards.value.find { it.id == id }?.title }
+            _snackbarMessage.value = if (!rewardTitle.isNullOrBlank()) {
+                "נקבע יעד חיסכון אישי: \"$rewardTitle\" 🎯"
+            } else {
+                "יעד הפרס האישי נוקה"
+            }
+        }
+        return ok
+    }
+
+    fun getRewardGoalProgress(memberId: String = currentMember.value.id): RewardGoalProgressUiModel? {
+        return repository.getRewardGoalProgress(memberId)
     }
 
     fun showToastMessage(msg: String) {

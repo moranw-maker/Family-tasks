@@ -11,7 +11,7 @@ import com.example.model.Task
 
 @Database(
     entities = [Task::class, OfflineSyncQueueEntity::class],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 @TypeConverters(RoomDateConverter::class)
@@ -88,6 +88,18 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Safe, non-destructive migration contract preserving user data across versions 4 -> 5.
+         * Adds `is_open_for_volunteering` boolean column defaulting to 0 (`false`).
+         */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                runCatching {
+                    db.execSQL("ALTER TABLE `tasks` ADD COLUMN `is_open_for_volunteering` INTEGER NOT NULL DEFAULT 0")
+                }
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -95,10 +107,11 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "family_tasks_local.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { INSTANCE = it }
             }
         }
     }
 }
+

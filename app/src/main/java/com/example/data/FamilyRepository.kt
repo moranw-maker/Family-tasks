@@ -197,6 +197,7 @@ class FamilyRepository(
         private const val KEY_TEXT_SCALE = "pref_text_scale"
         private const val KEY_APP_LANGUAGE = "pref_app_language"
         private const val KEY_FIRST_DAY_OF_WEEK = "pref_first_day_of_week"
+        private const val KEY_TASKS_VIEW_MODE = "pref_tasks_view_mode"
         private val persistedSelectedFolderByFamily = ConcurrentHashMap<String, String?>()
         private val persistedFoldersByFamily = ConcurrentHashMap<String, List<DocumentFolder>>()
         private val persistedDocumentsByFamily = ConcurrentHashMap<String, List<FamilyDocument>>()
@@ -460,6 +461,9 @@ class FamilyRepository(
 
     private val _filesViewMode = MutableStateFlow(FilesViewMode.FOLDERS)
     val filesViewMode: StateFlow<FilesViewMode> = _filesViewMode.asStateFlow()
+
+    private val _tasksViewMode = MutableStateFlow(TasksViewMode.STANDARD)
+    val tasksViewMode: StateFlow<TasksViewMode> = _tasksViewMode.asStateFlow()
 
     // 5. Real-Time Rewards Catalog
     private val _rewards = MutableStateFlow(
@@ -2990,18 +2994,24 @@ class FamilyRepository(
             ?: (data["task_name"] as? String)?.takeIf { it.isNotBlank() }
             ?: return null
         val description = (data["description"] as? String) ?: ""
-        val rawAssigned = (data["assignedUid"] as? String)?.takeIf { it.isNotBlank() }
+        val isOpenForVolunteering = (data["isOpenForVolunteering"] as? Boolean)
+            ?: (data["is_open_for_volunteering"] as? Boolean)
+            ?: false
+        val rawAssignedOrNull = (data["assignedUid"] as? String)?.takeIf { it.isNotBlank() }
             ?: (data["assignedToMemberId"] as? String)?.takeIf { it.isNotBlank() }
             ?: (data["assignedMemberId"] as? String)?.takeIf { it.isNotBlank() }
             ?: (data["assigned_member_id"] as? String)?.takeIf { it.isNotBlank() }
             ?: (data["assigned_family_member"] as? String)?.takeIf { it.isNotBlank() }
-            ?: "m_kid1"
 
-        val resolvedAssignedId = _members.value.find { m ->
-            m.id == rawAssigned ||
-                m.name.equals(rawAssigned, ignoreCase = true) ||
-                (!m.googleEmail.isNullOrBlank() && m.googleEmail.equals(rawAssigned, ignoreCase = true))
-        }?.id ?: rawAssigned
+        val resolvedAssignedId = if (rawAssignedOrNull == null) {
+            if (isOpenForVolunteering) "" else "m_kid1"
+        } else {
+            _members.value.find { m ->
+                m.id == rawAssignedOrNull ||
+                    m.name.equals(rawAssignedOrNull, ignoreCase = true) ||
+                    (!m.googleEmail.isNullOrBlank() && m.googleEmail.equals(rawAssignedOrNull, ignoreCase = true))
+            }?.id ?: rawAssignedOrNull
+        }
 
         val points = ((data["points"] as? Number)?.toInt())
             ?: ((data["pointsValue"] as? Number)?.toInt())
@@ -3056,6 +3066,7 @@ class FamilyRepository(
             description = description,
             category = runCatching { TaskCategory.valueOf(categoryStr) }.getOrDefault(TaskCategory.OTHER),
             assignedToMemberId = resolvedAssignedId,
+            isOpenForVolunteering = isOpenForVolunteering && resolvedAssignedId.isBlank(),
             dateEpochDay = epochDay,
             dueTimeFormatted = dueTime,
             hasDueTime = hasDueTime,
@@ -3186,6 +3197,11 @@ class FamilyRepository(
 
                             if (!hasProcessedInitialTasksSnapshot) {
                                 if (!isPendingServerCommit) {
+                                    if (remoteTask.isUnassignedOpenTask) {
+                                        val initOpenKey = "open_task:${remoteTask.id}"
+                                        notifiedTaskCompletionKeys.add(initOpenKey)
+                                        FcmTokenManager.markEventDispatchedIfNew(initOpenKey, appContext)
+                                    }
                                     if (remoteTask.assignedToMemberId.isNotBlank()) {
                                         notifiedTaskCompletionKeys.add("assign:${remoteTask.id}:${remoteTask.assignedToMemberId}")
                                     }
@@ -3201,10 +3217,43 @@ class FamilyRepository(
                                 val assigneeName = assignee?.name ?: "חבר משפחה"
                                 val assigneeEmoji = assignee?.avatarEmoji ?: "🎉"
 
+                                // Event O: Parent published a new open task for volunteering -> notify children (deduplicated with FCM)
+                                if (prev == null && remoteTask.isUnassignedOpenTask && !_currentMember.value.isParent) {
+                                    val openKey = if (selfUid.isNotBlank()) {
+                                        "open_task:${remoteTask.id}:$selfUid"
+                                    } else {
+                                        "open_task:${remoteTask.id}"
+                                    }
+                                    val isNewLocalKey = notifiedTaskCompletionKeys.add("open_task:${remoteTask.id}")
+                                    val isNewGlobalFcmKey = FcmTokenManager.markEventDispatchedIfNew(openKey, appContext)
+                                    if (isNewLocalKey && isNewGlobalFcmKey) {
+                                        val title = "📢 משימה פתוחה להתנדבות!"
+                                        val body = "משימה פתוחה חדשה: \"${remoteTask.title}\" (+${remoteTask.points} נק') — מי מתנדב?"
+                                        pushAlert(
+                                            title = title,
+                                            message = body,
+                                            targetName = _currentMember.value.name.ifBlank { "ילדי המשפחה" },
+                                            targetEmoji = "🙋",
+                                            reason = AlertReason.TASK_REMINDER,
+                                            showBanner = true
+                                        )
+                                        appContext?.let { ctx ->
+                                            NotificationHelper.showIncomingFcmNotification(
+                                                context = ctx,
+                                                title = title,
+                                                message = body,
+                                                eventKey = openKey,
+                                                taskId = remoteTask.id,
+                                                eventType = FcmTokenManager.EVENT_OPEN_TASK_CREATED
+                                            )
+                                        }
+                                    }
+                                }
+
                                 // Event A: Parent assigned a new task to this user
                                 if (prev == null && remoteTask.assignedToMemberId.isNotBlank() && remoteTask.assignedToMemberId == selfUid) {
                                     val assignKey = "assign:${remoteTask.id}:$selfUid"
-                                    if (notifiedTaskCompletionKeys.add(assignKey) && FcmTokenManager.markEventDispatchedIfNew(assignKey)) {
+                                    if (notifiedTaskCompletionKeys.add(assignKey) && FcmTokenManager.markEventDispatchedIfNew(assignKey, appContext)) {
                                         val title = "משימה חדשה שובצה עבורך 📋"
                                         val body = "שובצה לך משימה חדשה: \"${remoteTask.title}\" (שעה ${remoteTask.dueTimeFormatted} • +${remoteTask.points} נק')"
                                         pushAlert(
@@ -3228,10 +3277,10 @@ class FamilyRepository(
                                     }
                                 }
 
-                                // Event D: Task was reassigned to this user
+                                // Event D: Task was reassigned (or open task was assigned) to this user
                                 if (prev != null && prev.assignedToMemberId != remoteTask.assignedToMemberId && remoteTask.assignedToMemberId == selfUid) {
                                     val reassignKey = "reassign:${remoteTask.id}:$selfUid:${remoteTask.updatedAtMillis}"
-                                    if (notifiedTaskCompletionKeys.add(reassignKey) && FcmTokenManager.markEventDispatchedIfNew(reassignKey)) {
+                                    if (notifiedTaskCompletionKeys.add(reassignKey) && FcmTokenManager.markEventDispatchedIfNew(reassignKey, appContext)) {
                                         val title = "משימה הועברה אליך 🔄"
                                         val body = "המשימה \"${remoteTask.title}\" שובצה אליך (שעה ${remoteTask.dueTimeFormatted} • +${remoteTask.points} נק')"
                                         pushAlert(
@@ -3262,7 +3311,7 @@ class FamilyRepository(
                                     if (completedByOther && notifiedTaskCompletionKeys.add("${remoteTask.id}:completed")) {
                                         if (remoteTask.approvedByParent) {
                                             val approveKey = "approve:${remoteTask.id}"
-                                            if (FcmTokenManager.markEventDispatchedIfNew(approveKey)) {
+                                            if (FcmTokenManager.markEventDispatchedIfNew(approveKey, appContext)) {
                                                 val title = "משימה הושלמה ואושרה! +${remoteTask.points} נק' 🎉"
                                                 val body = "$assigneeName השלים/ה את המשימה: ${remoteTask.title}"
                                                 pushAlert(
@@ -3288,7 +3337,7 @@ class FamilyRepository(
                                             }
                                         } else {
                                             val submitKey = "submit:${remoteTask.id}:${remoteTask.completedAtMillis ?: remoteTask.updatedAtMillis}"
-                                            if (FcmTokenManager.markEventDispatchedIfNew(submitKey)) {
+                                            if (FcmTokenManager.markEventDispatchedIfNew(submitKey, appContext)) {
                                                 val title = "משימה הושלמה וממתינה לאישור הורה ⏳"
                                                 val body = "$assigneeName סימן/ה כבוצע: ${remoteTask.title} (+${remoteTask.points} נק')"
                                                 pushAlert(
@@ -3317,7 +3366,7 @@ class FamilyRepository(
                                 } else if (remoteTask.isCompleted && remoteTask.approvedByParent && prev != null && !prev.approvedByParent) {
                                     // Event C: Parent approved a previously submitted task -> notify the assigned child
                                     val approveKey = "approve:${remoteTask.id}"
-                                    if (notifiedTaskCompletionKeys.add("${remoteTask.id}:approved") && FcmTokenManager.markEventDispatchedIfNew(approveKey)) {
+                                    if (notifiedTaskCompletionKeys.add("${remoteTask.id}:approved") && FcmTokenManager.markEventDispatchedIfNew(approveKey, appContext)) {
                                         val title = "המשימה שלך אושרה! +${remoteTask.points} נק' 🎉"
                                         val body = "כל הכבוד $assigneeName! ביצוע המשימה \"${remoteTask.title}\" אושר וקיבלת +${remoteTask.points} נקודות!"
                                         pushAlert(
@@ -3441,6 +3490,12 @@ class FamilyRepository(
                             }
                         }
 
+                        val targetRewardId = if (doc.contains("targetRewardId")) {
+                            doc.getString("targetRewardId")?.trim()?.takeIf { it.isNotBlank() }
+                        } else {
+                            existingLocalMember?.targetRewardId
+                        }
+
                         FamilyMember(
                             id = doc.id,
                             name = name,
@@ -3453,6 +3508,7 @@ class FamilyRepository(
                             photoUrl = photoUrl,
                             schoolGrade = doc.getString("schoolGrade"),
                             earnedPoints = points,
+                            targetRewardId = targetRewardId,
                             invitationPending = false,
                             invitationAccepted = true,
                             inviteToken = doc.getString("inviteCode") ?: doc.getString("inviteToken"),
@@ -3465,6 +3521,7 @@ class FamilyRepository(
                         syncedServerMemberBalancesForFamilies.add(familyId)
                         remoteMembers.forEach { member ->
                             persistMemberPointsBalanceLocally(familyId, member.id, member.earnedPoints)
+                            persistMemberTargetRewardLocally(familyId, member.id, member.targetRewardId)
                         }
                         val signedInUid = authProvider()?.currentUser?.uid
                         val updatedSelf = remoteMembers.find {
@@ -3945,9 +4002,14 @@ class FamilyRepository(
                                 }
                                 TaskProposalStatus.PENDING_PARENT_APPROVAL -> {
                                     if (current.isParent) {
+                                        val msg = if (prop.isOpenTaskVolunteer) {
+                                            "${prop.requesterChildName} מתנדב/ת לבצע את המשימה הפתוחה \"${prop.primaryTaskTitle}\" (+${prop.primaryTaskPoints} נק')"
+                                        } else {
+                                            "${prop.requesterChildName} ו-${prop.targetChildName} הסכימו על ${prop.type.labelHe} עבור \"${prop.primaryTaskTitle}\""
+                                        }
                                         pushAlert(
-                                            title = "בקשת משימה ממתינה לאישור הורה ⏳",
-                                            message = "${prop.requesterChildName} ו-${prop.targetChildName} הסכימו על ${prop.type.labelHe} עבור \"${prop.primaryTaskTitle}\"",
+                                            title = if (prop.isOpenTaskVolunteer) "🙋 התנדבות חדשה למשימה פתוחה" else "בקשת משימה ממתינה לאישור הורה ⏳",
+                                            message = msg,
                                             targetName = current.name,
                                             targetEmoji = "👨‍👩‍👧‍👦",
                                             reason = AlertReason.TASK_REMINDER,
@@ -3979,6 +4041,7 @@ class FamilyRepository(
                                         )
                                     }
                                 }
+                                TaskProposalStatus.CLOSED_NOT_SELECTED,
                                 TaskProposalStatus.CANCELLED -> Unit
                             }
                         }
@@ -4122,6 +4185,8 @@ class FamilyRepository(
             "assignedUid" to task.assignedToMemberId,
             "assignedToMemberId" to task.assignedToMemberId,
             "assignedMemberId" to task.assignedToMemberId,
+            "isOpenForVolunteering" to task.isOpenForVolunteering,
+            "is_open_for_volunteering" to task.isOpenForVolunteering,
             "points" to task.points,
             "pointsValue" to task.points,
             "isCompleted" to task.isCompleted,
@@ -5664,26 +5729,67 @@ class FamilyRepository(
     }
 
     /**
-     * V1.6 Requirement 1: Only a PARENT can create tasks.
+     * V1.6 Requirement 1 + Part C Open Tasks:
+     * Only a PARENT can create tasks (both assigned tasks and open tasks for volunteering).
+     * When an open task (`isOpenForVolunteering == true`) is created, all active children in the family
+     * are notified using the `FamilyTasks Signature Pulse` notification channel/sound (respecting personal sound preferences)
+     * without duplicate alerts.
      */
     fun addTask(task: FamilyTask): Boolean {
         if (!_currentMember.value.isParent) {
             Log.w(TAG, "Blocked CHILD from creating a task")
+            _taskOperationError.value = "רק הורה רשאי ליצור משימות חדשות או משימות פתוחות להתנדבות 🔒"
             return false
         }
-        _tasks.value = listOf(task) + _tasks.value
-        resyncTaskRemindersForActiveMember()
-        val assignee = _members.value.find { it.id == task.assignedToMemberId }
-        if (assignee != null) {
-            pushAlert(
-                title = "משימה חדשה נוספה ליומן 📅",
-                message = "ל-${assignee.name}: ${task.title} (שעה ${task.dueTimeFormatted})",
-                targetName = assignee.name,
-                targetEmoji = assignee.avatarEmoji,
-                reason = AlertReason.TASK_REMINDER
-            )
+        val normalizedTask = if (task.isOpenForVolunteering) {
+            task.copy(assignedToMemberId = "", isOpenForVolunteering = true)
+        } else {
+            task
         }
-        pushTaskToFirestoreOrQueue(task, isDelete = false)
+        _tasks.value = listOf(normalizedTask) + _tasks.value.filterNot { it.id == normalizedTask.id }
+        resyncTaskRemindersForActiveMember()
+
+        if (normalizedTask.isUnassignedOpenTask) {
+            val openEventKey = "open_task:${normalizedTask.id}"
+            if (notifiedTaskCompletionKeys.add(openEventKey)) {
+                val children = _members.value.filter { !it.isParent && it.invitationAccepted && !it.invitationPending }
+                val targetLabel = if (children.isNotEmpty()) {
+                    children.joinToString(", ") { it.name }
+                } else {
+                    "ילדי המשפחה"
+                }
+                val title = "📢 משימה פתוחה להתנדבות!"
+                val body = "משימה פתוחה חדשה: \"${normalizedTask.title}\" (+${normalizedTask.points} נק') — מי מתנדב?"
+                pushAlert(
+                    title = title,
+                    message = "$body (נשלח אל: $targetLabel)",
+                    targetName = targetLabel,
+                    targetEmoji = "🙋",
+                    reason = AlertReason.TASK_REMINDER,
+                    showBanner = true
+                )
+                // Record on the creating parent's device so an echoed snapshot does not trigger a self-notification.
+                // Child devices receive the OS notification via onFamilyTaskWritten (when closed/background)
+                // or the realtime tasks snapshot listener (when open), deduplicated via FcmTokenManager.
+                val db = firestoreProvider()
+                val authUser = authProvider()?.currentUser
+                if (db != null && authUser != null) {
+                    FcmTokenManager.markEventDispatchedIfNew(openEventKey, appContext)
+                }
+            }
+        } else {
+            val assignee = _members.value.find { it.id == normalizedTask.assignedToMemberId }
+            if (assignee != null) {
+                pushAlert(
+                    title = "משימה חדשה נוספה ליומן 📅",
+                    message = "ל-${assignee.name}: ${normalizedTask.title} (שעה ${normalizedTask.dueTimeFormatted})",
+                    targetName = assignee.name,
+                    targetEmoji = assignee.avatarEmoji,
+                    reason = AlertReason.TASK_REMINDER
+                )
+            }
+        }
+        pushTaskToFirestoreOrQueue(normalizedTask, isDelete = false)
         return true
     }
 
@@ -7961,6 +8067,9 @@ class FamilyRepository(
             prefs.getString(KEY_FIRST_DAY_OF_WEEK, null)?.let { raw ->
                 runCatching { FirstDayOfWeek.valueOf(raw) }.getOrNull()?.let { _firstDayOfWeek.value = it }
             }
+            prefs.getString(KEY_TASKS_VIEW_MODE, null)?.let { raw ->
+                _tasksViewMode.value = TasksViewMode.fromRaw(raw)
+            }
         }
         restorePersistedPointsState(_activeFamilyId.value)
     }
@@ -8001,6 +8110,21 @@ class FamilyRepository(
 
     fun setFilesViewMode(mode: FilesViewMode) {
         _filesViewMode.value = mode
+    }
+
+    fun setTasksViewMode(mode: TasksViewMode) {
+        _tasksViewMode.value = mode
+        saveUiPreference(KEY_TASKS_VIEW_MODE, mode.name)
+    }
+
+    /**
+     * Toggles the tasks display mode ([TasksViewMode.STANDARD] <-> [TasksViewMode.COMPACT])
+     * without changing [currentMember], user role, or parent permissions, and persists the choice.
+     */
+    fun toggleTasksViewMode(): TasksViewMode {
+        val next = _tasksViewMode.value.toggled()
+        setTasksViewMode(next)
+        return next
     }
 
     fun setBiometricLock(enabled: Boolean) {
@@ -8180,6 +8304,8 @@ class FamilyRepository(
                 "assignedUid" to task.assignedToMemberId,
                 "assignedToMemberId" to task.assignedToMemberId,
                 "assignedMemberId" to task.assignedToMemberId,
+                "isOpenForVolunteering" to task.isOpenForVolunteering,
+                "is_open_for_volunteering" to task.isOpenForVolunteering,
                 "dateEpochDay" to task.dateEpochDay,
                 "dueDate" to (task.dateEpochDay * 86_400_000L),
                 "dueTimeFormatted" to task.dueTimeFormatted,
@@ -8226,6 +8352,7 @@ class FamilyRepository(
                 val title = doc.getString("title") ?: return@mapNotNull null
                 val desc = doc.getString("description") ?: ""
                 val assigned = doc.getString("assignedUid") ?: doc.getString("assignedToMemberId") ?: ""
+                val isOpen = doc.getBoolean("isOpenForVolunteering") ?: doc.getBoolean("is_open_for_volunteering") ?: false
                 val epochDay = doc.getLong("dateEpochDay") ?: ((doc.getLong("dueDate") ?: 0L) / 86_400_000L)
                 val pts = (doc.getLong("points") ?: doc.getLong("pointsValue") ?: 10L).toInt()
                 val prioStr = doc.getString("priority") ?: TaskPriority.MEDIUM.name
@@ -8243,6 +8370,7 @@ class FamilyRepository(
                     description = desc,
                     category = runCatching { TaskCategory.valueOf(catStr) }.getOrDefault(TaskCategory.OTHER),
                     assignedToMemberId = assigned,
+                    isOpenForVolunteering = isOpen && assigned.isBlank(),
                     dateEpochDay = epochDay,
                     dueTimeFormatted = dueTime,
                     hasDueTime = hasDueTime,
@@ -8312,6 +8440,8 @@ class FamilyRepository(
                             "assignedUid" to task.assignedToMemberId,
                             "assignedToMemberId" to task.assignedToMemberId,
                             "assignedMemberId" to task.assignedToMemberId,
+                            "isOpenForVolunteering" to task.isOpenForVolunteering,
+                            "is_open_for_volunteering" to task.isOpenForVolunteering,
                             "dateEpochDay" to task.dateEpochDay,
                             "dueDate" to (task.dateEpochDay * 86_400_000L),
                             "dueTimeFormatted" to task.dueTimeFormatted,
@@ -9221,6 +9351,21 @@ class FamilyRepository(
         }
     }
 
+    private fun persistMemberTargetRewardLocally(familyId: String, memberId: String, rewardId: String?) {
+        val ctx = appContext ?: return
+        runCatching {
+            val prefs = ctx.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
+            val key = "target_reward_${familyId}_$memberId"
+            val editor = prefs.edit()
+            if (rewardId.isNullOrBlank()) {
+                editor.remove(key)
+            } else {
+                editor.putString(key, rewardId)
+            }
+            editor.commit()
+        }
+    }
+
     private fun savePointsHistoryToPrefs(familyId: String, entries: List<PointsHistoryEntry>) {
         val ctx = appContext ?: return
         runCatching {
@@ -9265,14 +9410,24 @@ class FamilyRepository(
         val ctx = appContext ?: return
         runCatching {
             val prefs = ctx.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
-            // 1. Restore member point balances for this family ONLY if live server balances have not already synced
+            // 1. Restore member point balances & personal reward goals for this family ONLY if live server state has not already synced
             if (allowOverwritingMemberBalances && !syncedServerMemberBalancesForFamilies.contains(familyId)) {
                 var currentUpdated: FamilyMember? = null
                 val restoredMembers = _members.value.map { member ->
                     val balKey = "pts_bal_${familyId}_${member.id}"
-                    if (prefs.contains(balKey)) {
-                        val savedBal = prefs.getInt(balKey, member.earnedPoints).coerceAtLeast(0)
-                        val updated = member.copy(earnedPoints = savedBal)
+                    val goalKey = "target_reward_${familyId}_${member.id}"
+                    val savedBal = if (prefs.contains(balKey)) {
+                        prefs.getInt(balKey, member.earnedPoints).coerceAtLeast(0)
+                    } else {
+                        member.earnedPoints
+                    }
+                    val savedGoal = if (prefs.contains(goalKey)) {
+                        prefs.getString(goalKey, null)?.takeIf { it.isNotBlank() }
+                    } else {
+                        member.targetRewardId
+                    }
+                    if (savedBal != member.earnedPoints || savedGoal != member.targetRewardId) {
+                        val updated = member.copy(earnedPoints = savedBal, targetRewardId = savedGoal)
                         if (_currentMember.value.id == member.id) {
                             currentUpdated = updated
                         }
@@ -9337,6 +9492,14 @@ class FamilyRepository(
     //  TASK COLLABORATION (PART A & B): VOLUNTEER FOR TASK & SWAP TASKS
     // =========================================================================
 
+    private val collaborationMutex = kotlinx.coroutines.sync.Mutex()
+
+    /**
+     * Optional hook for unit/Robolectric tests to simulate concurrent remote task state changes
+     * (e.g., another parent on a second device approving a different volunteer right before commit).
+     */
+    internal var remoteTaskConflictStateProvider: ((taskId: String) -> FamilyTask?)? = null
+
     fun clearCollaborationError() {
         _collaborationError.value = null
     }
@@ -9349,10 +9512,19 @@ class FamilyRepository(
         val requesterChildId = (data["requesterChildId"] as? String)?.trim().orEmpty()
         val targetChildId = (data["targetChildId"] as? String)?.trim().orEmpty()
         val primaryTaskId = (data["primaryTaskId"] as? String)?.trim().orEmpty()
-        if (requesterChildId.isBlank() || targetChildId.isBlank() || primaryTaskId.isBlank()) return null
+        val isOpenTaskVolunteer = (data["isOpenTaskVolunteer"] as? Boolean)
+            ?: (data["is_open_task_volunteer"] as? Boolean)
+            ?: false
+        if (requesterChildId.isBlank() || primaryTaskId.isBlank()) return null
+        if (!isOpenTaskVolunteer && targetChildId.isBlank()) return null
 
         val typeRaw = (data["type"] as? String) ?: TaskProposalType.VOLUNTEER_FOR_TASK.firestoreValue
-        val statusRaw = (data["status"] as? String) ?: TaskProposalStatus.PENDING_CHILD_APPROVAL.firestoreValue
+        val defaultStatus = if (isOpenTaskVolunteer) {
+            TaskProposalStatus.PENDING_PARENT_APPROVAL.firestoreValue
+        } else {
+            TaskProposalStatus.PENDING_CHILD_APPROVAL.firestoreValue
+        }
+        val statusRaw = (data["status"] as? String) ?: defaultStatus
         val createdAt = (data["createdAtMillis"] as? Number)?.toLong() ?: System.currentTimeMillis()
         val updatedAt = (data["updatedAtMillis"] as? Number)?.toLong() ?: createdAt
 
@@ -9368,6 +9540,7 @@ class FamilyRepository(
             primaryTaskId = primaryTaskId,
             primaryTaskTitle = (data["primaryTaskTitle"] as? String).orEmpty(),
             primaryTaskPoints = (data["primaryTaskPoints"] as? Number)?.toInt() ?: 0,
+            isOpenTaskVolunteer = isOpenTaskVolunteer,
             offeredSwapTaskId = (data["offeredSwapTaskId"] as? String)?.takeIf { it.isNotBlank() },
             offeredSwapTaskTitle = (data["offeredSwapTaskTitle"] as? String)?.takeIf { it.isNotBlank() },
             offeredSwapTaskPoints = (data["offeredSwapTaskPoints"] as? Number)?.toInt(),
@@ -9395,6 +9568,7 @@ class FamilyRepository(
             "primaryTaskId" to proposal.primaryTaskId,
             "primaryTaskTitle" to proposal.primaryTaskTitle,
             "primaryTaskPoints" to proposal.primaryTaskPoints,
+            "isOpenTaskVolunteer" to proposal.isOpenTaskVolunteer,
             "status" to proposal.status.firestoreValue,
             "note" to proposal.note,
             "createdAtMillis" to proposal.createdAtMillis,
@@ -9408,6 +9582,126 @@ class FamilyRepository(
         if (!proposal.parentDecidedByName.isNullOrBlank()) map["parentDecidedByName"] = proposal.parentDecidedByName
         if (proposal.parentDecidedAtMillis != null) map["parentDecidedAtMillis"] = proposal.parentDecidedAtMillis
         return map
+    }
+
+    /**
+     * Part C (Open Tasks for Volunteering):
+     * Allows a CHILD in the family to volunteer for an unassigned open task (`isOpenForVolunteering == true`).
+     * - Creates a volunteer request in `task_proposals` with deterministic ID `vol_open_{taskId}_{childId}`
+     *   in [TaskProposalStatus.PENDING_PARENT_APPROVAL].
+     * - Multiple different children can volunteer for the same open task.
+     * - Prevents the same child from creating duplicate pending volunteer requests for the same task.
+     * - Does NOT assign the task before parent approval.
+     */
+    suspend fun volunteerForOpenTaskAsync(
+        taskId: String,
+        note: String = ""
+    ): Result<TaskCollaborationProposal> {
+        val requester = _currentMember.value
+        if (requester.isParent) {
+            val msg = "רק ילדי המשפחה יכולים להתנדב למשימה פתוחה"
+            _collaborationError.value = msg
+            return Result.failure(SecurityException(msg))
+        }
+        val familyId = _activeFamilyId.value.ifBlank { "fam_israeli_8492" }
+        val targetTask = _tasks.value.find { it.id == taskId }
+        if (targetTask == null) {
+            _collaborationError.value = "המשימה הפתוחה לא נמצאה"
+            return Result.failure(IllegalArgumentException("המשימה הפתוחה לא נמצאה"))
+        }
+        if (targetTask.isCompleted || targetTask.approvedByParent) {
+            val msg = "לא ניתן להתנדב למשימה שכבר הושלמה"
+            _collaborationError.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
+        if (!targetTask.isOpenForVolunteering || targetTask.assignedToMemberId.isNotBlank()) {
+            val msg = "משימה זו כבר שויכה או אינה פתוחה להתנדבות"
+            _collaborationError.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
+
+        val proposalId = "vol_open_${targetTask.id}_${requester.id}"
+        val existingForSameChild = _taskProposals.value.find {
+            (it.id == proposalId || (it.primaryTaskId == targetTask.id && it.requesterChildId == requester.id && it.isOpenTaskVolunteer)) &&
+                it.status.isPending
+        }
+        if (existingForSameChild != null) {
+            val msg = "כבר שלחת בקשת התנדבות פעילה למשימה זו"
+            _collaborationError.value = msg
+            return Result.failure(IllegalStateException(msg))
+        }
+
+        val nowMillis = System.currentTimeMillis()
+        val proposal = TaskCollaborationProposal(
+            id = proposalId,
+            operationId = proposalId,
+            familyId = familyId,
+            type = TaskProposalType.VOLUNTEER_FOR_TASK,
+            requesterChildId = requester.id,
+            requesterChildName = requester.name,
+            targetChildId = "",
+            targetChildName = "משימה פתוחה",
+            primaryTaskId = targetTask.id,
+            primaryTaskTitle = targetTask.title,
+            primaryTaskPoints = targetTask.points,
+            isOpenTaskVolunteer = true,
+            status = TaskProposalStatus.PENDING_PARENT_APPROVAL,
+            note = note.trim(),
+            createdAtMillis = nowMillis,
+            updatedAtMillis = nowMillis
+        )
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                val proposalRef = db.collection("families").document(familyId)
+                    .collection("task_proposals").document(proposalId)
+                proposalRef.set(buildTaskProposalFirestoreMap(proposal)).await()
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "שגיאה בשליחת בקשת ההתנדבות למשימה הפתוחה"
+                _collaborationError.value = msg
+                return Result.failure(e)
+            }
+        }
+
+        _collaborationError.value = null
+        _taskProposals.value = listOf(proposal) + _taskProposals.value.filterNot { it.id == proposalId }
+
+        pushAlert(
+            title = "🙋 התנדבות למשימה פתוחה",
+            message = "${requester.name} מתנדב/ת לבצע את המשימה הפתוחה \"${targetTask.title}\" (+${targetTask.points} נק'). ממתין לאישור הורה.",
+            targetName = "הורים",
+            targetEmoji = requester.avatarEmoji.ifBlank { "🙋" },
+            reason = AlertReason.TASK_REMINDER
+        )
+        return Result.success(proposal)
+    }
+
+    fun volunteerForOpenTask(taskId: String, note: String = ""): Boolean {
+        if (_currentMember.value.isParent) {
+            _collaborationError.value = "רק ילדי המשפחה יכולים להתנדב למשימה פתוחה"
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                volunteerForOpenTaskAsync(taskId, note).isSuccess
+            }
+        }
+        repoScope.launch {
+            volunteerForOpenTaskAsync(taskId, note)
+        }
+        return true
+    }
+
+    suspend fun selectVolunteerForOpenTaskAsync(proposalId: String): Result<TaskCollaborationProposal> {
+        return decideTaskProposalAsParentAsync(proposalId = proposalId, approve = true)
+    }
+
+    fun selectVolunteerForOpenTask(proposalId: String): Boolean {
+        return decideTaskProposalAsParent(proposalId = proposalId, approve = true)
     }
 
     /**
@@ -9794,35 +10088,66 @@ class FamilyRepository(
     suspend fun decideTaskProposalAsParentAsync(
         proposalId: String,
         approve: Boolean
-    ): Result<TaskCollaborationProposal> {
+    ): Result<TaskCollaborationProposal> = collaborationMutex.withLock {
         val caller = _currentMember.value
         if (!caller.isParent) {
             val msg = "רק הורה רשאי לאשר או לדחות סופית שינוי שיוך או החלפת משימות 🔒"
             _collaborationError.value = msg
-            return Result.failure(SecurityException(msg))
+            return@withLock Result.failure(SecurityException(msg))
         }
 
         val proposal = _taskProposals.value.find { it.id == proposalId }
         if (proposal == null) {
             _collaborationError.value = "ההצעה לא נמצאה"
-            return Result.failure(IllegalArgumentException("ההצעה לא נמצאה"))
+            return@withLock Result.failure(IllegalArgumentException("ההצעה לא נמצאה"))
         }
 
         if (proposal.status != TaskProposalStatus.PENDING_PARENT_APPROVAL) {
-            val msg = "ניתן לאשר/לדחות כהורה רק הצעה שכבר אושרה על ידי הילד/ה השני/ה"
+            val msg = if (proposal.status == TaskProposalStatus.CLOSED_NOT_SELECTED) {
+                "המשימה הפתוחה כבר שויכה למתנדב אחר"
+            } else {
+                "ניתן לאשר/לדחות כהורה רק הצעה שממתינה לאישור הורה"
+            }
             _collaborationError.value = msg
-            return Result.failure(IllegalStateException(msg))
+            return@withLock Result.failure(IllegalStateException(msg))
         }
 
-        val primaryTask = _tasks.value.find { it.id == proposal.primaryTaskId }
-        if (primaryTask == null) {
+        val localPrimaryTask = _tasks.value.find { it.id == proposal.primaryTaskId }
+        if (localPrimaryTask == null) {
             _collaborationError.value = "המשימה הראשית בהצעה לא נמצאה"
-            return Result.failure(IllegalStateException("המשימה הראשית בהצעה לא נמצאה"))
+            return@withLock Result.failure(IllegalStateException("המשימה הראשית בהצעה לא נמצאה"))
         }
+        val simulatedRemoteTask = remoteTaskConflictStateProvider?.invoke(proposal.primaryTaskId)
+        val primaryTask = simulatedRemoteTask ?: localPrimaryTask
+
         if (primaryTask.isCompleted || primaryTask.approvedByParent) {
             val msg = "לא ניתן לאשר העברה של משימה שכבר הושלמה"
             _collaborationError.value = msg
-            return Result.failure(IllegalStateException(msg))
+            return@withLock Result.failure(IllegalStateException(msg))
+        }
+
+        if (proposal.isOpenTaskVolunteer && approve) {
+            val alreadyAssignedToAnother = !primaryTask.isOpenForVolunteering ||
+                primaryTask.assignedToMemberId.isNotBlank() ||
+                (!primaryTask.transferProposalId.isNullOrBlank() && primaryTask.transferProposalId != proposalId)
+            if (alreadyAssignedToAnother) {
+                val conflictNow = System.currentTimeMillis()
+                // Reconcile local state so this competing proposal reflects CLOSED_NOT_SELECTED
+                _tasks.value = _tasks.value.map { if (it.id == primaryTask.id) primaryTask else it }
+                _taskProposals.value = _taskProposals.value.map { existing ->
+                    if (existing.id == proposalId && existing.status.isPending) {
+                        existing.copy(
+                            status = TaskProposalStatus.CLOSED_NOT_SELECTED,
+                            updatedAtMillis = conflictNow
+                        )
+                    } else {
+                        existing
+                    }
+                }
+                val msg = "המשימה הפתוחה כבר שויכה למתנדב אחר על ידי הורה נוסף"
+                _collaborationError.value = msg
+                return@withLock Result.failure(IllegalStateException(msg))
+            }
         }
 
         val offeredSwapTask = if (proposal.type == TaskProposalType.SWAP_TASKS) {
@@ -9830,12 +10155,12 @@ class FamilyRepository(
             val found = _tasks.value.find { it.id == swapId }
             if (found == null) {
                 _collaborationError.value = "המשימה המוצעת להחלפה לא נמצאה"
-                return Result.failure(IllegalStateException("המשימה המוצעת להחלפה לא נמצאה"))
+                return@withLock Result.failure(IllegalStateException("המשימה המוצעת להחלפה לא נמצאה"))
             }
             if (found.isCompleted || found.approvedByParent) {
                 val msg = "לא ניתן להחליף משימה שכבר הושלמה"
                 _collaborationError.value = msg
-                return Result.failure(IllegalStateException(msg))
+                return@withLock Result.failure(IllegalStateException(msg))
             }
             found
         } else {
@@ -9860,15 +10185,44 @@ class FamilyRepository(
             updatedAtMillis = nowMillis
         )
 
-        val origPrimaryOwnerId = primaryTask.originalAssignedToMemberId?.takeIf { it.isNotBlank() }
-            ?: primaryTask.assignedToMemberId
-        val origPrimaryOwnerName = primaryTask.originalAssignedMemberName?.takeIf { it.isNotBlank() }
-            ?: _members.value.find { it.id == origPrimaryOwnerId }?.name
-            ?: proposal.targetChildName
+        // When approving an open-task volunteer, close all competing pending volunteer requests for the same task
+        val competingOpenProposalsToClose = if (approve && proposal.isOpenTaskVolunteer) {
+            _taskProposals.value.filter {
+                it.primaryTaskId == primaryTask.id &&
+                    it.id != proposal.id &&
+                    it.status.isPending
+            }
+        } else {
+            emptyList()
+        }
+        val closedCompetingById = competingOpenProposalsToClose.associate { comp ->
+            comp.id to comp.copy(
+                status = TaskProposalStatus.CLOSED_NOT_SELECTED,
+                parentDecidedByUid = actorUid,
+                parentDecidedByName = actorName,
+                parentDecidedAtMillis = nowMillis,
+                updatedAtMillis = nowMillis
+            )
+        }
+
+        val origPrimaryOwnerId = if (proposal.isOpenTaskVolunteer) {
+            null
+        } else {
+            primaryTask.originalAssignedToMemberId?.takeIf { it.isNotBlank() }
+                ?: primaryTask.assignedToMemberId.takeIf { it.isNotBlank() }
+        }
+        val origPrimaryOwnerName = if (proposal.isOpenTaskVolunteer) {
+            null
+        } else {
+            primaryTask.originalAssignedMemberName?.takeIf { it.isNotBlank() }
+                ?: origPrimaryOwnerId?.let { id -> _members.value.find { it.id == id }?.name }
+                ?: proposal.targetChildName.takeIf { it.isNotBlank() }
+        }
 
         val updatedPrimaryTask = if (approve) {
             primaryTask.copy(
                 assignedToMemberId = proposal.requesterChildId,
+                isOpenForVolunteering = false,
                 originalAssignedToMemberId = origPrimaryOwnerId,
                 originalAssignedMemberName = origPrimaryOwnerName,
                 transferProposalId = proposal.id,
@@ -9877,7 +10231,7 @@ class FamilyRepository(
             )
         } else {
             primaryTask.copy(
-                pendingProposalId = null,
+                pendingProposalId = if (primaryTask.pendingProposalId == proposal.id) null else primaryTask.pendingProposalId,
                 updatedAtMillis = nowMillis
             )
         }
@@ -9914,25 +10268,128 @@ class FamilyRepository(
                 val familyRef = db.collection("families").document(familyId)
                 val proposalRef = familyRef.collection("task_proposals").document(proposalId)
                 val primaryRef = familyRef.collection("tasks").document(updatedPrimaryTask.id)
-                db.runBatch { batch ->
-                    batch.update(
-                        proposalRef,
-                        mapOf(
-                            "status" to newStatus.firestoreValue,
-                            "parentDecidedByUid" to actorUid,
-                            "parentDecidedByName" to actorName,
-                            "parentDecidedAtMillis" to nowMillis,
-                            "updatedAtMillis" to nowMillis
+                val swapRef = updatedSwapTask?.let { familyRef.collection("tasks").document(it.id) }
+
+                // Candidate competing volunteer proposal IDs (both known local proposals and deterministic child volunteer IDs)
+                val deterministicCompetingIds = if (approve && proposal.isOpenTaskVolunteer) {
+                    _members.value
+                        .filter { !it.isParent && it.id != proposal.requesterChildId }
+                        .map { "vol_open_${primaryTask.id}_${it.id}" }
+                } else {
+                    emptyList()
+                }
+                val allCandidateCompetingIds = (closedCompetingById.keys + deterministicCompetingIds)
+                    .distinct()
+                    .filter { it.isNotBlank() && it != proposalId }
+                val candidateCompetingRefs = allCandidateCompetingIds.map { compId ->
+                    compId to familyRef.collection("task_proposals").document(compId)
+                }
+
+                db.runTransaction { tx ->
+                    // 1. All reads MUST happen before any writes in a Firestore Transaction
+                    val primarySnap = tx.get(primaryRef)
+                    val proposalSnap = tx.get(proposalRef)
+                    val swapSnap = swapRef?.let { tx.get(it) }
+                    val competingSnaps = candidateCompetingRefs.map { (compId, compRef) ->
+                        Triple(compId, compRef, tx.get(compRef))
+                    }
+
+                    // 2. Validate proposal status at approval time
+                    if (proposalSnap.exists()) {
+                        val remoteStatus = TaskProposalStatus.fromFirestoreValue(proposalSnap.getString("status"))
+                        if (remoteStatus != TaskProposalStatus.PENDING_PARENT_APPROVAL) {
+                            throw IllegalStateException("המשימה הפתוחה כבר שויכה למתנדב אחר על ידי הורה נוסף")
+                        }
+                    }
+
+                    // 3. Validate primary task state at approval time (prevents race condition between two parents)
+                    if (primarySnap.exists()) {
+                        val remoteCompleted = (primarySnap.getBoolean("isCompleted") ?: primarySnap.getBoolean("is_completed")) ?: false
+                        val remoteApproved = (primarySnap.getBoolean("approvedByParent") ?: primarySnap.getBoolean("approved_by_parent")) ?: false
+                        if (remoteCompleted || remoteApproved) {
+                            throw IllegalStateException("לא ניתן לאשר העברה של משימה שכבר הושלמה")
+                        }
+
+                        if (proposal.isOpenTaskVolunteer && approve) {
+                            val remoteOpen = (primarySnap.getBoolean("isOpenForVolunteering")
+                                ?: primarySnap.getBoolean("is_open_for_volunteering")) ?: false
+                            val remoteAssignee = (primarySnap.getString("assignedToMemberId")
+                                ?: primarySnap.getString("assignedUid")
+                                ?: primarySnap.getString("assignedMemberId")).orEmpty().trim()
+                            val remoteTransferProp = (primarySnap.getString("transferProposalId")
+                                ?: primarySnap.getString("activeCollaborationProposalId")).orEmpty().trim()
+
+                            if (!remoteOpen || remoteAssignee.isNotBlank() || (remoteTransferProp.isNotBlank() && remoteTransferProp != proposalId)) {
+                                throw IllegalStateException("המשימה הפתוחה כבר שויכה למתנדב אחר על ידי הורה נוסף")
+                            }
+                        } else if (!proposal.isOpenTaskVolunteer && approve) {
+                            val remoteAssignee = (primarySnap.getString("assignedToMemberId")
+                                ?: primarySnap.getString("assignedUid")).orEmpty().trim()
+                            if (remoteAssignee.isNotBlank() && remoteAssignee != proposal.targetChildId) {
+                                throw IllegalStateException("שיוך המשימה כבר שונה במקביל על ידי הורה אחר")
+                            }
+                        }
+                    }
+
+                    if (swapSnap != null && swapSnap.exists() && approve) {
+                        val swapCompleted = (swapSnap.getBoolean("isCompleted") ?: false) ||
+                            (swapSnap.getBoolean("approvedByParent") ?: false)
+                        val swapAssignee = (swapSnap.getString("assignedToMemberId")
+                            ?: swapSnap.getString("assignedUid")).orEmpty().trim()
+                        if (swapCompleted || (swapAssignee.isNotBlank() && swapAssignee != proposal.requesterChildId)) {
+                            throw IllegalStateException("המשימה המוצעת להחלפה כבר שונתה או הושלמה במקביל")
+                        }
+                    }
+
+                    // 4. Atomic writes inside the transaction
+                    if (proposalSnap.exists()) {
+                        tx.update(
+                            proposalRef,
+                            mapOf(
+                                "status" to newStatus.firestoreValue,
+                                "parentDecidedByUid" to actorUid,
+                                "parentDecidedByName" to actorName,
+                                "parentDecidedAtMillis" to nowMillis,
+                                "updatedAtMillis" to nowMillis
+                            )
                         )
-                    )
-                    batch.set(
-                        primaryRef,
-                        buildFullTaskFirestoreMap(updatedPrimaryTask, familyId, nowMillis),
-                        SetOptions.merge()
-                    )
-                    if (updatedSwapTask != null) {
-                        val swapRef = familyRef.collection("tasks").document(updatedSwapTask.id)
-                        batch.set(
+                    } else {
+                        tx.set(proposalRef, buildTaskProposalFirestoreMap(updatedProposal), SetOptions.merge())
+                    }
+
+                    competingSnaps.forEach { (compId, compRef, compSnap) ->
+                        if (compSnap.exists()) {
+                            val compRemoteStatus = TaskProposalStatus.fromFirestoreValue(compSnap.getString("status"))
+                            if (compRemoteStatus.isPending) {
+                                tx.update(
+                                    compRef,
+                                    mapOf(
+                                        "status" to TaskProposalStatus.CLOSED_NOT_SELECTED.firestoreValue,
+                                        "parentDecidedByUid" to actorUid,
+                                        "parentDecidedByName" to actorName,
+                                        "parentDecidedAtMillis" to nowMillis,
+                                        "updatedAtMillis" to nowMillis
+                                    )
+                                )
+                            }
+                        } else if (closedCompetingById.containsKey(compId)) {
+                            tx.set(
+                                compRef,
+                                buildTaskProposalFirestoreMap(closedCompetingById.getValue(compId)),
+                                SetOptions.merge()
+                            )
+                        }
+                    }
+
+                    if (approve || !proposal.isOpenTaskVolunteer) {
+                        tx.set(
+                            primaryRef,
+                            buildFullTaskFirestoreMap(updatedPrimaryTask, familyId, nowMillis),
+                            SetOptions.merge()
+                        )
+                    }
+                    if (updatedSwapTask != null && swapRef != null) {
+                        tx.set(
                             swapRef,
                             buildFullTaskFirestoreMap(updatedSwapTask, familyId, nowMillis),
                             SetOptions.merge()
@@ -9942,12 +10399,18 @@ class FamilyRepository(
             } catch (e: Exception) {
                 val msg = e.localizedMessage ?: "שגיאה בעדכון החלטת ההורה על ההצעה"
                 _collaborationError.value = msg
-                return Result.failure(e)
+                return@withLock Result.failure(e)
             }
         }
 
         _collaborationError.value = null
-        _taskProposals.value = _taskProposals.value.map { if (it.id == proposalId) updatedProposal else it }
+        _taskProposals.value = _taskProposals.value.map { existing ->
+            when {
+                existing.id == proposalId -> updatedProposal
+                closedCompetingById.containsKey(existing.id) -> closedCompetingById.getValue(existing.id)
+                else -> existing
+            }
+        }
         _tasks.value = _tasks.value.map { t ->
             when (t.id) {
                 updatedPrimaryTask.id -> updatedPrimaryTask
@@ -9956,15 +10419,23 @@ class FamilyRepository(
             }
         }
         resyncTaskRemindersForActiveMember()
+        repoScope.launch {
+            runCatching {
+                effectiveTaskDao?.upsertTask(updatedPrimaryTask.toCoreTask(familyId))
+            }
+        }
 
         if (approve) {
-            val alertMessage = if (proposal.type == TaskProposalType.SWAP_TASKS && updatedSwapTask != null) {
-                "$actorName אישר/ה את החלפת המשימות בין ${proposal.requesterChildName} לבין ${proposal.targetChildName}!"
-            } else {
-                "$actorName אישר/ה ש-${proposal.requesterChildName} יבצע/תבצע את המשימה \"${updatedPrimaryTask.title}\" במקום ${proposal.targetChildName}!"
+            val alertMessage = when {
+                proposal.isOpenTaskVolunteer ->
+                    "$actorName בחר/ה ב-${proposal.requesterChildName} לביצוע המשימה הפתוחה \"${updatedPrimaryTask.title}\" (+${updatedPrimaryTask.points} נק')!"
+                proposal.type == TaskProposalType.SWAP_TASKS && updatedSwapTask != null ->
+                    "$actorName אישר/ה את החלפת המשימות בין ${proposal.requesterChildName} לבין ${proposal.targetChildName}!"
+                else ->
+                    "$actorName אישר/ה ש-${proposal.requesterChildName} יבצע/תבצע את המשימה \"${updatedPrimaryTask.title}\" במקום ${proposal.targetChildName}!"
             }
             pushAlert(
-                title = "אושר ע״י הורה! ✅",
+                title = if (proposal.isOpenTaskVolunteer) "המשימה שויכה אליך! 🎯" else "אושר ע״י הורה! ✅",
                 message = alertMessage,
                 targetName = proposal.requesterChildName,
                 targetEmoji = "✅",
@@ -9979,7 +10450,7 @@ class FamilyRepository(
                 reason = AlertReason.TASK_REMINDER
             )
         }
-        return Result.success(updatedProposal)
+        return@withLock Result.success(updatedProposal)
     }
 
     fun decideTaskProposalAsParent(proposalId: String, approve: Boolean): Boolean {
@@ -10704,8 +11175,116 @@ class FamilyRepository(
     }
 
     // =========================================================================
-    //  PART E: FULL REWARD CATALOG MANAGEMENT (PARENT ONLY)
+    //  PART E: FULL REWARD CATALOG MANAGEMENT & PERSONAL REWARD GOAL
     // =========================================================================
+
+    /**
+     * Part A (Personal Reward Goal Progress Meter):
+     * Sets or clears a child's personal savings goal reward (`targetRewardId`) in `/families/{familyId}/members/{targetChildId}`.
+     * - Only the child themselves (`caller.id == targetChildId`) or an authorized PARENT (`caller.isParent`)
+     *   can change that child's personal reward goal.
+     * - Selecting or changing a reward goal NEVER deducts points.
+     */
+    suspend fun setPersonalRewardGoalAsync(
+        rewardId: String?,
+        targetChildId: String = _currentMember.value.id
+    ): Result<FamilyMember> {
+        val caller = _currentMember.value
+        val authUid = currentUid()
+        val isSelfChild = caller.id == targetChildId || (authUid.isNotBlank() && authUid == targetChildId)
+        if (!caller.isParent && !isSelfChild) {
+            val msg = "רק הילד/ה עצמו/ה או הורה מורשה רשאים לשנות את יעד הפרס האישי 🔒"
+            _pointsOperationError.value = msg
+            return Result.failure(SecurityException(msg))
+        }
+
+        val targetMember = _members.value.find { it.id == targetChildId }
+        if (targetMember == null) {
+            _pointsOperationError.value = "פרופיל הילד/ה לא נמצא"
+            return Result.failure(IllegalArgumentException("פרופיל הילד/ה לא נמצא"))
+        }
+        if (targetMember.isParent) {
+            val msg = "יעד חיסכון לפרס זמין עבור ילדי המשפחה בלבד"
+            _pointsOperationError.value = msg
+            return Result.failure(IllegalArgumentException(msg))
+        }
+
+        val cleanRewardId = rewardId?.trim()?.takeIf { it.isNotBlank() }
+        if (cleanRewardId != null) {
+            val reward = _rewards.value.find { it.id == cleanRewardId && !it.isDeleted && it.isActive }
+            if (reward == null) {
+                val msg = "הפרס שנבחר אינו זמין כעת לבחירה כיעד אישי"
+                _pointsOperationError.value = msg
+                return Result.failure(IllegalArgumentException(msg))
+            }
+        }
+
+        val familyId = _activeFamilyId.value.ifBlank { "fam_israeli_8492" }
+        val nowMillis = System.currentTimeMillis()
+        val updatedMember = targetMember.copy(targetRewardId = cleanRewardId)
+
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db != null && authUser != null) {
+            try {
+                db.collection("families")
+                    .document(familyId)
+                    .collection("members")
+                    .document(targetChildId)
+                    .set(
+                        mapOf(
+                            "targetRewardId" to (cleanRewardId ?: ""),
+                            "updatedAt" to nowMillis
+                        ),
+                        SetOptions.merge()
+                    )
+                    .await()
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "שגיאה בשמירת יעד הפרס האישי"
+                _pointsOperationError.value = msg
+                return Result.failure(e)
+            }
+        }
+
+        _pointsOperationError.value = null
+        _members.value = _members.value.map { if (it.id == targetChildId) updatedMember else it }
+        if (_currentMember.value.id == targetChildId) {
+            _currentMember.value = updatedMember
+        }
+        persistMemberTargetRewardLocally(familyId, targetChildId, cleanRewardId)
+        return Result.success(updatedMember)
+    }
+
+    fun setPersonalRewardGoal(
+        rewardId: String?,
+        targetChildId: String = _currentMember.value.id
+    ): Boolean {
+        val caller = _currentMember.value
+        val authUid = currentUid()
+        val isSelfChild = caller.id == targetChildId || (authUid.isNotBlank() && authUid == targetChildId)
+        if (!caller.isParent && !isSelfChild) {
+            _pointsOperationError.value = "רק הילד/ה עצמו/ה או הורה מורשה רשאים לשנות את יעד הפרס האישי 🔒"
+            return false
+        }
+        val db = firestoreProvider()
+        val authUser = authProvider()?.currentUser
+        if (db == null && authUser == null && !simulateOfflineNetworkFailure) {
+            return kotlinx.coroutines.runBlocking {
+                setPersonalRewardGoalAsync(rewardId, targetChildId).isSuccess
+            }
+        }
+        repoScope.launch {
+            setPersonalRewardGoalAsync(rewardId, targetChildId)
+        }
+        return true
+    }
+
+    fun getRewardGoalProgress(memberId: String = _currentMember.value.id): RewardGoalProgressUiModel? {
+        val member = _members.value.find { it.id == memberId }
+            ?: _currentMember.value.takeIf { it.id == memberId }
+            ?: return null
+        return RewardGoalProgressUiModel.compute(member, _rewards.value)
+    }
 
     private fun buildRewardFirestoreMap(reward: RewardItem, familyId: String): Map<String, Any?> {
         return mapOf(

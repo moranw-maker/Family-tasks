@@ -149,6 +149,11 @@ data class Task(
     @set:PropertyName("pending_proposal_id")
     var pendingProposalId: String? = null,
 
+    @ColumnInfo(name = "is_open_for_volunteering")
+    @get:PropertyName("is_open_for_volunteering")
+    @set:PropertyName("is_open_for_volunteering")
+    var isOpenForVolunteering: Boolean = false,
+
     @ServerTimestamp
     @ColumnInfo(name = "created_at")
     @get:PropertyName("created_at")
@@ -224,6 +229,7 @@ data class Task(
             originalAssignedMemberName = originalAssignedMemberName?.takeIf { it.isNotBlank() },
             transferProposalId = transferProposalId?.takeIf { it.isNotBlank() },
             pendingProposalId = pendingProposalId?.takeIf { it.isNotBlank() },
+            isOpenForVolunteering = isOpenForVolunteering,
             createdAtMillis = createdAt?.time ?: System.currentTimeMillis(),
             updatedAtMillis = updatedAt?.time ?: System.currentTimeMillis()
         )
@@ -265,9 +271,11 @@ data class Task(
                 originalAssignedMemberName = familyTask.originalAssignedMemberName,
                 transferProposalId = familyTask.transferProposalId,
                 pendingProposalId = familyTask.pendingProposalId,
+                isOpenForVolunteering = familyTask.isOpenForVolunteering,
                 createdAt = Date(familyTask.createdAtMillis),
                 updatedAt = Date(familyTask.updatedAtMillis)
             )
         }
     }
 }
+

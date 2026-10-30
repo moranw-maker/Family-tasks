@@ -98,6 +98,21 @@ enum class FilesViewMode {
     GRID
 }
 
+enum class TasksViewMode(val labelHe: String, val labelEn: String) {
+    STANDARD("תצוגה מפורטת", "Detailed View"),
+    COMPACT("תצוגה קומפקטית", "Compact View");
+
+    fun next(): TasksViewMode = if (this == STANDARD) COMPACT else STANDARD
+    fun toggled(): TasksViewMode = next()
+    fun getDisplayName(isHebrew: Boolean): String = if (isHebrew) labelHe else labelEn
+
+    companion object {
+        fun fromRaw(raw: String?): TasksViewMode {
+            return entries.find { it.name.equals(raw?.trim(), ignoreCase = true) } ?: STANDARD
+        }
+    }
+}
+
 /**
  * V1.6 Two-Role Family Permission Model:
  * Strictly two roles exist in the family system:
@@ -424,7 +439,8 @@ data class FamilyMember(
     val invitationAccepted: Boolean = true,
     val invitationPending: Boolean = false,
     val inviteToken: String? = "",
-    val invitedByMemberId: String? = ""
+    val invitedByMemberId: String? = "",
+    val targetRewardId: String? = null
 ) {
     val isAdmin: Boolean get() = role == UserRole.PARENT
     val isParent: Boolean get() = role == UserRole.PARENT
@@ -595,9 +611,17 @@ data class FamilyTask(
     val originalAssignedMemberName: String? = null,
     val transferProposalId: String? = null,
     val pendingProposalId: String? = null,
+    val isOpenForVolunteering: Boolean = false,
     val createdAtMillis: Long = System.currentTimeMillis(),
     val updatedAtMillis: Long = System.currentTimeMillis()
 ) {
+    /**
+     * True when this task is an open volunteering task that has not yet been assigned to a child
+     * and is not completed or approved.
+     */
+    val isUnassignedOpenTask: Boolean
+        get() = isOpenForVolunteering && assignedToMemberId.isBlank() && !isCompleted && !approvedByParent
+
     /**
      * True when the task has been marked completed by a child and is awaiting parent approval.
      */
@@ -627,7 +651,7 @@ data class FamilyTask(
      * True when this task is active (not completed, not approved) and not currently in another active proposal.
      */
     fun isEligibleForChildProposal(): Boolean =
-        !isCompleted && !approvedByParent && pendingProposalId.isNullOrBlank()
+        !isCompleted && !approvedByParent && !isOpenForVolunteering && assignedToMemberId.isNotBlank() && pendingProposalId.isNullOrBlank()
 
     /**
      * True when this task has an explicit execution time, a non-NONE reminder offset, and is not completed.
@@ -1358,6 +1382,7 @@ enum class TaskProposalStatus(
     PENDING_PARENT_APPROVAL("PENDING_PARENT_APPROVAL", "ממתין לאישור הורה", "Pending Parent Approval"),
     APPROVED_BY_PARENT("APPROVED_BY_PARENT", "אושר ע\"י הורה", "Approved by Parent"),
     REJECTED_BY_PARENT("REJECTED_BY_PARENT", "נדחה ע\"י הורה", "Rejected by Parent"),
+    CLOSED_NOT_SELECTED("CLOSED_NOT_SELECTED", "לא נבחר/ה (נבחר מתנדב אחר)", "Not Selected"),
     CANCELLED("CANCELLED", "בוטל", "Cancelled");
 
     val isPending: Boolean
@@ -1374,8 +1399,9 @@ enum class TaskProposalStatus(
 }
 
 /**
- * Represents a child's offer to perform another child's task ([TaskProposalType.VOLUNTEER_FOR_TASK])
- * or a proposal to swap tasks between two children ([TaskProposalType.SWAP_TASKS]).
+ * Represents a child's offer to perform another child's task ([TaskProposalType.VOLUNTEER_FOR_TASK]),
+ * a proposal to swap tasks between two children ([TaskProposalType.SWAP_TASKS]),
+ * or a child volunteering for an unassigned open task ([isOpenTaskVolunteer] = true).
  * Stored in `/families/{familyId}/task_proposals/{proposalId}`.
  */
 data class TaskCollaborationProposal(
@@ -1385,7 +1411,7 @@ data class TaskCollaborationProposal(
     val type: TaskProposalType = TaskProposalType.VOLUNTEER_FOR_TASK,
     val requesterChildId: String,
     val requesterChildName: String = "",
-    val targetChildId: String,
+    val targetChildId: String = "",
     val targetChildName: String = "",
     val primaryTaskId: String,
     val primaryTaskTitle: String = "",
@@ -1393,6 +1419,7 @@ data class TaskCollaborationProposal(
     val offeredSwapTaskId: String? = null,
     val offeredSwapTaskTitle: String? = null,
     val offeredSwapTaskPoints: Int? = null,
+    val isOpenTaskVolunteer: Boolean = false,
     val status: TaskProposalStatus = TaskProposalStatus.PENDING_CHILD_APPROVAL,
     val note: String = "",
     val childRespondedAtMillis: Long? = null,
@@ -1411,7 +1438,7 @@ data class TaskCollaborationProposal(
     /**
      * Role-based visibility:
      * - Parents see all proposals in the family.
-     * - Children see only proposals where they are the requester or the target child.
+     * - Children see proposals where they are the requester or the target child.
      */
     fun isVisibleToMember(member: FamilyMember, authUid: String = ""): Boolean {
         if (member.isParent) return true
@@ -1508,4 +1535,125 @@ data class RewardRedemptionRequest(
         return member.isParent && status == RedemptionStatus.PENDING_PARENT_APPROVAL
     }
 }
+
+/**
+ * Pure, deterministic progress calculation model for a child's personal reward savings goal.
+ * Ensures progress percentage and remaining points are never negative, clamps progress bar
+ * between 0% and 100% even when the child's points exceed the reward cost, and detects when a
+ * previously selected target reward was disabled or deleted from the catalog.
+ */
+data class RewardGoalProgressUiModel(
+    val childId: String,
+    val childName: String,
+    val targetRewardId: String?,
+    val targetReward: RewardItem?,
+    val currentPoints: Int,
+    val requiredPoints: Int,
+    val remainingPoints: Int,
+    val progressFraction: Float,
+    val progressPercent: Int,
+    val isGoalReached: Boolean,
+    val isRewardUnavailable: Boolean,
+    val hasGoalSelected: Boolean
+) {
+    val reward: RewardItem?
+        get() = targetReward
+
+    val rewardIconEmoji: String
+        get() = targetReward?.iconEmoji ?: "🎯"
+
+    val rewardTitle: String
+        get() = targetReward?.title ?: ""
+
+    val pointsCost: Int
+        get() = requiredPoints
+
+    val progressPercentage: Int
+        get() = progressPercent
+
+    fun getStatusMessageHe(): String {
+        return when {
+            !hasGoalSelected -> "בחר/י פרס מהקטלוג כיעד אישי כדי לעקוב אחרי החיסכון שלך"
+            isRewardUnavailable -> "הפרס שנבחר כיעד אינו זמין כעת בקטלוג. אפשר לבחור יעד חדש!"
+            isGoalReached -> "🎉 הגעת ליעד! אפשר לבקש לממש את הפרס!"
+            else -> "עוד $remainingPoints נקודות לפרס שלך!"
+        }
+    }
+
+    fun getStatusMessageEn(): String {
+        return when {
+            !hasGoalSelected -> "Select a reward from the catalog to track your personal goal"
+            isRewardUnavailable -> "The selected target reward is no longer available. Choose a new goal!"
+            isGoalReached -> "🎉 Goal reached! You can request to redeem this reward!"
+            else -> "$remainingPoints more points to reach your reward!"
+        }
+    }
+
+    companion object {
+        fun compute(
+            member: FamilyMember,
+            rewards: List<RewardItem>
+        ): RewardGoalProgressUiModel {
+            val cleanGoalId = member.targetRewardId?.trim()?.takeIf { it.isNotBlank() }
+            val currentPts = member.earnedPoints.coerceAtLeast(0)
+            if (cleanGoalId == null) {
+                return RewardGoalProgressUiModel(
+                    childId = member.id,
+                    childName = member.name,
+                    targetRewardId = null,
+                    targetReward = null,
+                    currentPoints = currentPts,
+                    requiredPoints = 0,
+                    remainingPoints = 0,
+                    progressFraction = 0f,
+                    progressPercent = 0,
+                    isGoalReached = false,
+                    isRewardUnavailable = false,
+                    hasGoalSelected = false
+                )
+            }
+
+            val matchedReward = rewards.find { it.id == cleanGoalId }
+            val unavailable = matchedReward == null || matchedReward.isDeleted || !matchedReward.isActive
+            if (unavailable || matchedReward == null) {
+                return RewardGoalProgressUiModel(
+                    childId = member.id,
+                    childName = member.name,
+                    targetRewardId = cleanGoalId,
+                    targetReward = matchedReward?.takeIf { !it.isDeleted },
+                    currentPoints = currentPts,
+                    requiredPoints = matchedReward?.pointsCost?.coerceAtLeast(0) ?: 0,
+                    remainingPoints = 0,
+                    progressFraction = 0f,
+                    progressPercent = 0,
+                    isGoalReached = false,
+                    isRewardUnavailable = true,
+                    hasGoalSelected = true
+                )
+            }
+
+            val reqPts = matchedReward.pointsCost.coerceAtLeast(1)
+            val remPts = (reqPts - currentPts).coerceAtLeast(0)
+            val rawFraction = (currentPts.toFloat() / reqPts.toFloat()).coerceIn(0f, 1f)
+            val pct = ((currentPts.toDouble() * 100.0) / reqPts.toDouble()).toInt().coerceIn(0, 100)
+            val reached = currentPts >= reqPts
+
+            return RewardGoalProgressUiModel(
+                childId = member.id,
+                childName = member.name,
+                targetRewardId = cleanGoalId,
+                targetReward = matchedReward,
+                currentPoints = currentPts,
+                requiredPoints = reqPts,
+                remainingPoints = remPts,
+                progressFraction = rawFraction,
+                progressPercent = pct,
+                isGoalReached = reached,
+                isRewardUnavailable = false,
+                hasGoalSelected = true
+            )
+        }
+    }
+}
+
 

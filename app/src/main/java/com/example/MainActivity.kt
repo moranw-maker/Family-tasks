@@ -134,6 +134,7 @@ fun FamilyTasksApp(
     val tenMinuteClassAlertsEnabled by viewModel.tenMinuteClassAlertsEnabled.collectAsStateWithLifecycle()
     val timetableViewMode by viewModel.timetableViewMode.collectAsStateWithLifecycle()
     val filesViewMode by viewModel.filesViewMode.collectAsStateWithLifecycle()
+    val tasksViewMode by viewModel.tasksViewMode.collectAsStateWithLifecycle()
 
     val currentScreen by viewModel.currentScreen.collectAsStateWithLifecycle()
     val selectedDate by viewModel.selectedDate.collectAsStateWithLifecycle()
@@ -427,6 +428,17 @@ fun FamilyTasksApp(
                                                     originalOwnerPoints = originalPts,
                                                     bonusPointsForPerformer = bonusPts
                                                 )
+                                            },
+                                            tasksViewMode = tasksViewMode,
+                                            onToggleTasksViewMode = { viewModel.toggleTasksViewMode() },
+                                            onVolunteerForOpenTask = { taskId, note ->
+                                                viewModel.volunteerForOpenTask(taskId, note)
+                                            },
+                                            onCancelTaskProposal = { proposalId ->
+                                                viewModel.cancelTaskProposal(proposalId)
+                                            },
+                                            onSelectOpenTaskVolunteer = { proposalId ->
+                                                viewModel.selectVolunteerForOpenTask(proposalId)
                                             }
                                         )
                                     }
@@ -711,7 +723,8 @@ fun FamilyTasksApp(
                                     recurrence = taskResult.recurrence,
                                     points = taskResult.points,
                                     hasDueTime = taskResult.hasDueTime,
-                                    reminderOffset = taskResult.reminderOffset
+                                    reminderOffset = taskResult.reminderOffset,
+                                    isOpenForVolunteering = taskResult.isOpenForVolunteering
                                 )
                             }
                         )
@@ -727,6 +740,10 @@ fun FamilyTasksApp(
                             onDismiss = { showRewardsSheet = false },
                             rewards = rewards,
                             redemptions = rewardRedemptions,
+                            members = members,
+                            onSetPersonalRewardGoal = { rewardId, targetChildId ->
+                                viewModel.setPersonalRewardGoal(rewardId, targetChildId)
+                            },
                             onRequestRedemption = { reward ->
                                 viewModel.requestRewardRedemption(reward)
                             },

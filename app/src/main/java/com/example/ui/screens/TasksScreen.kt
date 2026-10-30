@@ -9,8 +9,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -127,6 +129,12 @@ fun TasksScreen(
     onChildRespondProposal: (proposalId: String, approve: Boolean) -> Unit = { _, _ -> },
     onParentDecideProposal: (proposalId: String, approve: Boolean) -> Unit = { _, _ -> },
     onApproveTaskWithSplit: (taskId: String, performerPoints: Int, originalOwnerPoints: Int, bonusPoints: Int) -> Unit = { _, _, _, _ -> },
+    tasksViewMode: TasksViewMode = TasksViewMode.STANDARD,
+    onToggleTasksViewMode: () -> Unit = {},
+    onVolunteerForOpenTask: (taskId: String, note: String) -> Unit = { _, _ -> },
+    onCancelTaskProposal: (proposalId: String) -> Unit = {},
+    onSelectOpenTaskVolunteer: (proposalId: String) -> Unit = {},
+    listState: LazyListState = rememberLazyListState(),
     periods: List<SchedulePeriod> = emptyList(),
     alarms: List<FamilyAlarm> = emptyList(),
     onNavigateToScreen: (AppScreen) -> Unit = {}
@@ -164,8 +172,19 @@ fun TasksScreen(
         tasks.count { !it.isCompleted && it.dateEpochDay == todayEpoch }
     }
 
-    // Filter tasks based on member, status, date, and search query.
+    // Unassigned open tasks available for volunteering
+    val openVolunteeringTasks = remember(tasks, searchQuery) {
+        tasks.filter { task ->
+            task.isUnassignedOpenTask &&
+                (searchQuery.isBlank() ||
+                    task.title.contains(searchQuery, ignoreCase = true) ||
+                    task.description.contains(searchQuery, ignoreCase = true))
+        }
+    }
+
+    // Filter tasks based on member, status, date, and search query (excluding unassigned open tasks which have their own section).
     val filteredTasks = tasks.filter { task ->
+        if (task.isUnassignedOpenTask) return@filter false
         val matchesMember = selectedMemberFilter == null || task.assignedToMemberId == selectedMemberFilter
         val matchesSearch = searchQuery.isBlank() ||
             task.title.contains(searchQuery, ignoreCase = true) ||
@@ -195,6 +214,7 @@ fun TasksScreen(
     ) { innerPadding ->
         SoftGlassScreenBackground(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
+                state = listState,
                 contentPadding = PaddingValues(
                     start = 16.dp,
                     end = 16.dp,
@@ -268,6 +288,7 @@ fun TasksScreen(
                                                 manageShape
                                             )
                                             .velvetNeumorphicSheen(isDark = glass.isDark, cornerRadius = 14.dp)
+                                            .testTag("family_management_chip")
                                     ) {
                                         Row(
                                             modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
@@ -467,6 +488,38 @@ fun TasksScreen(
                             subtitle = if (isHebrew) "מעקב ביצועים ותזכורות בזמן אמת" else "Real-time tasks & reminders",
                             modifier = Modifier.weight(1f)
                         )
+
+                        Spacer(modifier = Modifier.width(6.dp))
+                        val viewToggleShape = RoundedCornerShape(14.dp)
+                        Surface(
+                            shape = viewToggleShape,
+                            color = glass.cardBackground.copy(alpha = 0.85f),
+                            border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.35f)),
+                            modifier = Modifier
+                                .clip(viewToggleShape)
+                                .clickable { onToggleTasksViewMode() }
+                                .testTag("switch_tasks_view_btn")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (tasksViewMode == TasksViewMode.COMPACT) Icons.Default.ViewAgenda else Icons.Default.ViewStream,
+                                    contentDescription = if (isHebrew) "החלף תצוגה" else "Switch View",
+                                    tint = glass.primaryAccent,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = if (isHebrew) "החלף תצוגה" else "Switch View",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = glass.primaryAccent
+                                    )
+                                )
+                            }
+                        }
 
                         if (currentMember.isParent) {
                             Spacer(modifier = Modifier.width(8.dp))
@@ -771,6 +824,24 @@ fun TasksScreen(
                     }
                 }
 
+                // 5.4 Open Tasks for Volunteering ("🙋 משימות פתוחות")
+                if (openVolunteeringTasks.isNotEmpty()) {
+                    item(key = "open_tasks_volunteering_section") {
+                        OpenTasksVolunteeringSection(
+                            openTasks = openVolunteeringTasks,
+                            taskProposals = taskProposals,
+                            currentMember = currentMember,
+                            isHebrew = isHebrew,
+                            onVolunteer = { task -> onVolunteerForOpenTask(task.id, "") },
+                            onCancelVolunteer = { proposalId -> onCancelTaskProposal(proposalId) },
+                            onParentSelectVolunteer = { proposalId -> onSelectOpenTaskVolunteer(proposalId) },
+                            onEditTask = onEditTask,
+                            onDeleteTask = onDeleteTask,
+                            onCardClick = { selectedTaskForDetail = it }
+                        )
+                    }
+                }
+
                 // 5.5 Task Collaboration Proposals (Volunteer & Swap Requests)
                 if (visibleProposals.isNotEmpty()) {
                     item(key = "task_proposals_section") {
@@ -779,13 +850,14 @@ fun TasksScreen(
                             currentMember = currentMember,
                             isHebrew = isHebrew,
                             onChildRespond = onChildRespondProposal,
-                            onParentDecide = onParentDecideProposal
+                            onParentDecide = onParentDecideProposal,
+                            onCancelProposal = onCancelTaskProposal
                         )
                     }
                 }
 
                 // 6. Tasks List (Presented Early on Screen)
-                if (filteredTasks.isEmpty()) {
+                if (filteredTasks.isEmpty() && openVolunteeringTasks.isEmpty()) {
                     item {
                         FamilyEmptyState(
                             emoji = if (filterTab == 3) "🏆" else "✨",
@@ -818,6 +890,7 @@ fun TasksScreen(
                             currentMember = currentMember,
                             syncState = syncState,
                             activeProposal = activeProposalForTask,
+                            isCompact = tasksViewMode == TasksViewMode.COMPACT,
                             isHebrew = isHebrew,
                             onToggle = { onToggleTask(task.id) },
                             onApprove = { onApproveTask(task.id) },
@@ -908,6 +981,7 @@ private fun TaskItemCardModern(
     currentMember: FamilyMember = FamilyMember(id = "", name = "", role = UserRole.PARENT, colorHex = 0xFF2B6CB0),
     syncState: TaskCompletionSyncState = TaskCompletionSyncState.IDLE,
     activeProposal: TaskCollaborationProposal? = null,
+    isCompact: Boolean = false,
     isHebrew: Boolean,
     onToggle: () -> Unit,
     onApprove: () -> Unit = {},
@@ -964,12 +1038,15 @@ private fun TaskItemCardModern(
     }
 
     FamilyGlassCard(
-        cornerRadius = 22.dp,
+        cornerRadius = if (isCompact) 18.dp else 22.dp,
         isSelected = isSaving,
         accentColor = cardAccentColor,
-        elevation = 6.dp,
+        elevation = if (isCompact) 4.dp else 6.dp,
         onClick = onCardClick,
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 13.dp),
+        contentPadding = PaddingValues(
+            horizontal = if (isCompact) 12.dp else 14.dp,
+            vertical = if (isCompact) 9.dp else 13.dp
+        ),
         modifier = Modifier
             .fillMaxWidth()
             .testTag("task_card_${task.id}")
@@ -1479,12 +1556,312 @@ private fun TaskItemCardModern(
 }
 
 @Composable
+private fun OpenTasksVolunteeringSection(
+    openTasks: List<FamilyTask>,
+    taskProposals: List<TaskCollaborationProposal>,
+    currentMember: FamilyMember,
+    isHebrew: Boolean,
+    onVolunteer: (FamilyTask) -> Unit,
+    onCancelVolunteer: (String) -> Unit,
+    onParentSelectVolunteer: (String) -> Unit,
+    onEditTask: (FamilyTask) -> Unit,
+    onDeleteTask: (String) -> Unit,
+    onCardClick: (FamilyTask) -> Unit
+) {
+    val glass = LocalSoftGlassColors.current
+    FamilyGlassCard(
+        cornerRadius = 22.dp,
+        isTintedBlue = true,
+        elevation = 5.dp,
+        contentPadding = PaddingValues(14.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("open_tasks_volunteering_section")
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (isHebrew) "🙋 משימות פתוחות" else "🙋 Open Tasks",
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            fontWeight = FontWeight.ExtraBold,
+                            color = glass.textPrimary
+                        )
+                    )
+                    Text(
+                        text = if (isHebrew) {
+                            "משימות פתוחות להתנדבות ילדי המשפחה באישור הורה"
+                        } else {
+                            "Open tasks for family children to volunteer"
+                        },
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = glass.textSecondary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    )
+                }
+                FamilyStatusChip(
+                    emoji = "📢",
+                    label = "${openTasks.size} ${if (isHebrew) "פתוחות" else "open"}",
+                    containerColor = glass.primaryAccentSoftBg,
+                    contentColor = glass.primaryAccent
+                )
+            }
+
+            openTasks.forEach { task ->
+                val openVolunteers = remember(taskProposals, task.id) {
+                    taskProposals.filter {
+                        it.primaryTaskId == task.id &&
+                            it.isOpenTaskVolunteer &&
+                            it.status == TaskProposalStatus.PENDING_PARENT_APPROVAL
+                    }
+                }
+                val myPendingVolunteerProposal = remember(openVolunteers, currentMember.id) {
+                    openVolunteers.find { it.requesterChildId == currentMember.id }
+                }
+                val normalizedTime = remember(task.dueTimeFormatted) {
+                    TimeFormatUtils.normalize24HourString(task.dueTimeFormatted)
+                }
+                val taskDateFormatted = remember(task.dateEpochDay, isHebrew) {
+                    val date = LocalDate.ofEpochDay(task.dateEpochDay)
+                    val today = LocalDate.now()
+                    when (date) {
+                        today -> if (isHebrew) "היום" else "Today"
+                        today.plusDays(1) -> if (isHebrew) "מחר" else "Tomorrow"
+                        else -> "${date.dayOfMonth}/${date.monthValue}"
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = glass.cardBackground,
+                    border = BorderStroke(1.dp, glass.primaryAccent.copy(alpha = 0.35f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .clickable { onCardClick(task) }
+                        .testTag("open_task_card_${task.id}")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(text = task.category.defaultEmoji, fontSize = 18.sp)
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = task.title,
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = glass.textPrimary
+                                        ),
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (task.description.isNotBlank()) {
+                                        Text(
+                                            text = task.description,
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = glass.textSecondary
+                                            ),
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (currentMember.isParent) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    IconButton(
+                                        onClick = { onEditTask(task) },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Edit,
+                                            contentDescription = if (isHebrew) "ערוך" else "Edit",
+                                            tint = glass.textSecondary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { onDeleteTask(task.id) },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.DeleteOutline,
+                                            contentDescription = if (isHebrew) "מחק" else "Delete",
+                                            tint = glass.dangerText,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Metadata Chips Row: Points, Date/Time, Volunteers Count
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.horizontalScroll(rememberScrollState())
+                        ) {
+                            FamilyStatusChip(
+                                emoji = "⭐",
+                                label = "+${task.points} ${if (isHebrew) "נק׳" else "pts"}",
+                                containerColor = glass.warningBg,
+                                contentColor = glass.warningText
+                            )
+                            FamilyStatusChip(
+                                emoji = "📅",
+                                label = if (task.hasDueTime) "$taskDateFormatted • $normalizedTime" else taskDateFormatted,
+                                containerColor = glass.primaryAccentSoftBg,
+                                contentColor = glass.primaryAccent
+                            )
+                            FamilyStatusChip(
+                                emoji = "🙋",
+                                label = if (isHebrew) {
+                                    when (openVolunteers.size) {
+                                        0 -> "אין מתנדבים עדיין"
+                                        1 -> "מתנדב אחד"
+                                        else -> "${openVolunteers.size} מתנדבים"
+                                    }
+                                } else {
+                                    "${openVolunteers.size} volunteers"
+                                },
+                                containerColor = if (openVolunteers.isNotEmpty()) glass.successBg else glass.primaryAccentSoftBg.copy(alpha = 0.6f),
+                                contentColor = if (openVolunteers.isNotEmpty()) glass.successText else glass.textSecondary
+                            )
+                        }
+
+                        // Child Action: Volunteer or Cancel Pending Volunteer Request
+                        if (!currentMember.isParent) {
+                            if (myPendingVolunteerProposal == null) {
+                                FamilyPrimaryButton(
+                                    text = if (isHebrew) "🙋 אני מתנדב!" else "🙋 I Volunteer!",
+                                    onClick = { onVolunteer(task) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(38.dp)
+                                        .testTag("volunteer_open_task_btn_${task.id}")
+                                )
+                            } else {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = if (isHebrew) {
+                                            "✓ התנדבת למשימה זו • ממתין לאישור הורה"
+                                        } else {
+                                            "✓ Volunteered • Awaiting parent approval"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = glass.successText
+                                        ),
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    OutlinedButton(
+                                        onClick = { onCancelVolunteer(myPendingVolunteerProposal.id) },
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = BorderStroke(1.dp, glass.dangerText.copy(alpha = 0.5f)),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier
+                                            .height(32.dp)
+                                            .testTag("cancel_open_volunteer_btn_${task.id}")
+                                    ) {
+                                        Text(
+                                            text = if (isHebrew) "בטל התנדבות" else "Cancel",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                fontWeight = FontWeight.Bold,
+                                                color = glass.dangerText
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Parent Action: View Volunteers and Choose/Approve who receives the task
+                        if (currentMember.isParent && openVolunteers.isNotEmpty()) {
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("parent_open_volunteers_list_${task.id}")
+                            ) {
+                                Text(
+                                    text = if (isHebrew) {
+                                        if (openVolunteers.size == 1) "מתנדב/ת למשימה זו (בחר/י לאישור ושיוך):"
+                                        else "מספר ילדים התנדבו למשימה זו — בחר/י מי יקבל אותה:"
+                                    } else {
+                                        "Select volunteer to assign this task:"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = glass.primaryAccent
+                                    )
+                                )
+                                openVolunteers.forEach { proposal ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = "🙋 ${proposal.requesterChildName}",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                fontWeight = FontWeight.Bold,
+                                                color = glass.textPrimary
+                                            ),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        FamilyPrimaryButton(
+                                            text = if (isHebrew) {
+                                                "בחר ב-${proposal.requesterChildName} ✓"
+                                            } else {
+                                                "Assign to ${proposal.requesterChildName} ✓"
+                                            },
+                                            onClick = { onParentSelectVolunteer(proposal.id) },
+                                            containerColor = GoogleGreen,
+                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                            modifier = Modifier
+                                                .height(34.dp)
+                                                .testTag("select_open_volunteer_${proposal.id}")
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun TaskCollaborationProposalsCard(
     proposals: List<TaskCollaborationProposal>,
     currentMember: FamilyMember,
     isHebrew: Boolean,
     onChildRespond: (proposalId: String, approve: Boolean) -> Unit,
-    onParentDecide: (proposalId: String, approve: Boolean) -> Unit
+    onParentDecide: (proposalId: String, approve: Boolean) -> Unit,
+    onCancelProposal: (proposalId: String) -> Unit = {}
 ) {
     val glass = LocalSoftGlassColors.current
     FamilyGlassCard(
@@ -1518,13 +1895,18 @@ private fun TaskCollaborationProposalsCard(
 
             proposals.forEach { proposal ->
                 val isAwaitingMyChildResponse = !currentMember.isParent &&
+                    !proposal.isOpenTaskVolunteer &&
                     proposal.status == TaskProposalStatus.PENDING_CHILD_APPROVAL &&
                     proposal.targetChildId == currentMember.id
                 val isAwaitingParentDecision = currentMember.isParent &&
                     proposal.status == TaskProposalStatus.PENDING_PARENT_APPROVAL
+                val canRequesterCancel = !currentMember.isParent &&
+                    proposal.requesterChildId == currentMember.id &&
+                    proposal.status.isPending
 
                 val statusColor = when (proposal.status) {
                     TaskProposalStatus.APPROVED_BY_PARENT -> GoogleGreen
+                    TaskProposalStatus.CLOSED_NOT_SELECTED -> glass.textSecondary
                     TaskProposalStatus.REJECTED_BY_CHILD, TaskProposalStatus.REJECTED_BY_PARENT, TaskProposalStatus.CANCELLED -> GoogleRed
                     else -> Color(0xFFE8710A)
                 }
@@ -1547,10 +1929,16 @@ private fun TaskCollaborationProposalsCard(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = if (proposal.type == TaskProposalType.SWAP_TASKS) {
-                                    if (isHebrew) "🔁 הצעת החלפת משימות" else "🔁 Task Swap Proposal"
-                                } else {
-                                    if (isHebrew) "🙋 הצעה לביצוע משימה" else "🙋 Volunteer Proposal"
+                                text = when {
+                                    proposal.isOpenTaskVolunteer -> {
+                                        if (isHebrew) "📢 התנדבות למשימה פתוחה" else "📢 Open Task Volunteer"
+                                    }
+                                    proposal.type == TaskProposalType.SWAP_TASKS -> {
+                                        if (isHebrew) "🔁 הצעת החלפת משימות" else "🔁 Task Swap Proposal"
+                                    }
+                                    else -> {
+                                        if (isHebrew) "🙋 הצעה לביצוע משימה" else "🙋 Volunteer Proposal"
+                                    }
                                 },
                                 style = MaterialTheme.typography.labelMedium.copy(
                                     fontWeight = FontWeight.ExtraBold,
@@ -1572,17 +1960,27 @@ private fun TaskCollaborationProposalsCard(
                             }
                         }
 
-                        val desc = if (proposal.type == TaskProposalType.SWAP_TASKS) {
-                            if (isHebrew) {
-                                "${proposal.requesterChildName} מציע/ה להחליף את \"${proposal.offeredSwapTaskTitle.orEmpty()}\" (${proposal.offeredSwapTaskPoints ?: 0} נק׳) תמורת \"${proposal.primaryTaskTitle}\" (${proposal.primaryTaskPoints} נק׳) של ${proposal.targetChildName}"
-                            } else {
-                                "${proposal.requesterChildName} proposes swapping \"${proposal.offeredSwapTaskTitle.orEmpty()}\" for \"${proposal.primaryTaskTitle}\" (${proposal.targetChildName})"
+                        val desc = when {
+                            proposal.isOpenTaskVolunteer -> {
+                                if (isHebrew) {
+                                    "${proposal.requesterChildName} מתנדב/ת לבצע את המשימה הפתוחה \"${proposal.primaryTaskTitle}\" (+${proposal.primaryTaskPoints} נק׳)"
+                                } else {
+                                    "${proposal.requesterChildName} volunteers for open task \"${proposal.primaryTaskTitle}\" (+${proposal.primaryTaskPoints} pts)"
+                                }
                             }
-                        } else {
-                            if (isHebrew) {
-                                "${proposal.requesterChildName} מבקש/ת לבצע את \"${proposal.primaryTaskTitle}\" (+${proposal.primaryTaskPoints} נק׳) במקום ${proposal.targetChildName}"
-                            } else {
-                                "${proposal.requesterChildName} wants to perform \"${proposal.primaryTaskTitle}\" instead of ${proposal.targetChildName}"
+                            proposal.type == TaskProposalType.SWAP_TASKS -> {
+                                if (isHebrew) {
+                                    "${proposal.requesterChildName} מציע/ה להחליף את \"${proposal.offeredSwapTaskTitle.orEmpty()}\" (${proposal.offeredSwapTaskPoints ?: 0} נק׳) תמורת \"${proposal.primaryTaskTitle}\" (${proposal.primaryTaskPoints} נק׳) של ${proposal.targetChildName}"
+                                } else {
+                                    "${proposal.requesterChildName} proposes swapping \"${proposal.offeredSwapTaskTitle.orEmpty()}\" for \"${proposal.primaryTaskTitle}\" (${proposal.targetChildName})"
+                                }
+                            }
+                            else -> {
+                                if (isHebrew) {
+                                    "${proposal.requesterChildName} מבקש/ת לבצע את \"${proposal.primaryTaskTitle}\" (+${proposal.primaryTaskPoints} נק׳) במקום ${proposal.targetChildName}"
+                                } else {
+                                    "${proposal.requesterChildName} wants to perform \"${proposal.primaryTaskTitle}\" instead of ${proposal.targetChildName}"
+                                }
                             }
                         }
 
@@ -1626,13 +2024,35 @@ private fun TaskCollaborationProposalsCard(
                             }
                         }
 
+                        if (canRequesterCancel) {
+                            OutlinedButton(
+                                onClick = { onCancelProposal(proposal.id) },
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, glass.dangerText.copy(alpha = 0.45f)),
+                                modifier = Modifier
+                                    .height(34.dp)
+                                    .testTag("child_cancel_proposal_${proposal.id}")
+                            ) {
+                                Text(
+                                    text = if (isHebrew) "בטל בקשה" else "Cancel Request",
+                                    color = glass.dangerText,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+
                         if (isAwaitingParentDecision) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 FamilyPrimaryButton(
-                                    text = if (isHebrew) "אשר שינוי שיוך (הורה) ✓" else "Parent Approve ✓",
+                                    text = if (proposal.isOpenTaskVolunteer) {
+                                        if (isHebrew) "בחר ב-${proposal.requesterChildName} למשימה ✓" else "Select ${proposal.requesterChildName} ✓"
+                                    } else {
+                                        if (isHebrew) "אשר שינוי שיוך (הורה) ✓" else "Parent Approve ✓"
+                                    },
                                     onClick = { onParentDecide(proposal.id, true) },
                                     containerColor = GoogleGreen,
                                     modifier = Modifier

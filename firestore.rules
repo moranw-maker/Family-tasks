@@ -875,7 +875,14 @@ service cloud.firestore {
       // -----------------------------------------------------------------------
       match /tasks/{taskId} {
         allow get, list: if isFamilyMember(familyId);
-        allow create: if isParent(familyId);
+        allow create: if isParent(familyId)
+          && (
+            !request.resource.data.get('isOpenForVolunteering', false)
+            || (
+              request.resource.data.get('isCompleted', false) == false
+              && request.resource.data.get('approvedByParent', false) == false
+            )
+          );
         allow update: if (
           isParent(familyId)
           && (
@@ -891,10 +898,12 @@ service cloud.firestore {
 
       // -----------------------------------------------------------------------
       // 2b-2. Task Collaboration Proposals (/families/{familyId}/task_proposals/{proposalId})
-      // - Stage 1 (Create): Child proposes to volunteer for another child's active task or swap tasks -> status 'PENDING_CHILD_APPROVAL'.
+      // - Stage 1 (Create):
+      //   (a) Child proposes to volunteer for another child's active task or swap tasks -> status 'PENDING_CHILD_APPROVAL'.
+      //   (b) Child volunteers for an unassigned open task ('isOpenTaskVolunteer' == true) -> status 'PENDING_PARENT_APPROVAL'.
       // - Stage 2 (Child Response): Target child approves ('PENDING_PARENT_APPROVAL') or rejects ('REJECTED_BY_CHILD').
       //   Requester child (or parent) may also cancel a pending proposal ('CANCELLED').
-      // - Stage 3 (Parent Decision): Only a PARENT can transition 'PENDING_PARENT_APPROVAL' -> 'APPROVED_BY_PARENT' or 'REJECTED_BY_PARENT'.
+      // - Stage 3 (Parent Decision): Only a PARENT can transition 'PENDING_PARENT_APPROVAL' -> 'APPROVED_BY_PARENT', 'REJECTED_BY_PARENT', or 'CLOSED_NOT_SELECTED'.
       // -----------------------------------------------------------------------
       match /task_proposals/{proposalId} {
         allow get, list: if isFamilyMember(familyId);
@@ -904,25 +913,41 @@ service cloud.firestore {
           && request.resource.data.get('id', proposalId) == proposalId
           && request.resource.data.get('type', '') in ['VOLUNTEER_FOR_TASK', 'SWAP_TASKS']
           && request.resource.data.get('requesterChildId', '') == request.auth.uid
-          && request.resource.data.get('targetChildId', '') is string
-          && request.resource.data.get('targetChildId', '').size() > 0
-          && request.resource.data.get('targetChildId', '') != request.auth.uid
           && request.resource.data.get('primaryTaskId', '') is string
           && request.resource.data.get('primaryTaskId', '').size() > 0
-          && request.resource.data.get('status', '') == 'PENDING_CHILD_APPROVAL'
           && exists(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.primaryTaskId))
           && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.primaryTaskId)).data.get('isCompleted', false) == false
           && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.primaryTaskId)).data.get('approvedByParent', false) == false
           && (
-            request.resource.data.type == 'VOLUNTEER_FOR_TASK'
+            (
+              // Open task volunteering: only a CHILD in the family can volunteer for an unassigned open task
+              request.resource.data.get('isOpenTaskVolunteer', false) == true
+              && isChild(familyId)
+              && request.resource.data.get('type', '') == 'VOLUNTEER_FOR_TASK'
+              && request.resource.data.get('targetChildId', '') == ''
+              && request.resource.data.get('status', '') == 'PENDING_PARENT_APPROVAL'
+              && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.primaryTaskId)).data.get('isOpenForVolunteering', false) == true
+              && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.primaryTaskId)).data.get('assignedToMemberId', '') == ''
+            )
             || (
-              request.resource.data.type == 'SWAP_TASKS'
-              && request.resource.data.get('offeredSwapTaskId', '') is string
-              && request.resource.data.get('offeredSwapTaskId', '').size() > 0
-              && request.resource.data.get('offeredSwapTaskId', '') != request.resource.data.primaryTaskId
-              && exists(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.offeredSwapTaskId))
-              && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.offeredSwapTaskId)).data.get('isCompleted', false) == false
-              && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.offeredSwapTaskId)).data.get('approvedByParent', false) == false
+              // Regular child-to-child volunteer or swap proposal
+              request.resource.data.get('isOpenTaskVolunteer', false) == false
+              && request.resource.data.get('targetChildId', '') is string
+              && request.resource.data.get('targetChildId', '').size() > 0
+              && request.resource.data.get('targetChildId', '') != request.auth.uid
+              && request.resource.data.get('status', '') == 'PENDING_CHILD_APPROVAL'
+              && (
+                request.resource.data.type == 'VOLUNTEER_FOR_TASK'
+                || (
+                  request.resource.data.type == 'SWAP_TASKS'
+                  && request.resource.data.get('offeredSwapTaskId', '') is string
+                  && request.resource.data.get('offeredSwapTaskId', '').size() > 0
+                  && request.resource.data.get('offeredSwapTaskId', '') != request.resource.data.primaryTaskId
+                  && exists(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.offeredSwapTaskId))
+                  && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.offeredSwapTaskId)).data.get('isCompleted', false) == false
+                  && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(request.resource.data.offeredSwapTaskId)).data.get('approvedByParent', false) == false
+                )
+              )
             )
           );
 
@@ -941,7 +966,19 @@ service cloud.firestore {
           && request.resource.data.get('status', '') == 'CANCELLED'
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAtMillis'])
         ) || (
-          // Parent final decision (only after target child approved -> PENDING_PARENT_APPROVAL) or parent cancellation
+          // Requester child re-volunteers for an open task after cancelling
+          isChild(familyId)
+          && resource.data.get('isOpenTaskVolunteer', false) == true
+          && resource.data.get('requesterChildId', '') == request.auth.uid
+          && resource.data.get('status', '') == 'CANCELLED'
+          && request.resource.data.get('status', '') == 'PENDING_PARENT_APPROVAL'
+          && exists(/databases/$(database)/documents/families/$(familyId)/tasks/$(resource.data.primaryTaskId))
+          && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(resource.data.primaryTaskId)).data.get('isOpenForVolunteering', false) == true
+          && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(resource.data.primaryTaskId)).data.get('assignedToMemberId', '') == ''
+          && get(/databases/$(database)/documents/families/$(familyId)/tasks/$(resource.data.primaryTaskId)).data.get('isCompleted', false) == false
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'note', 'updatedAtMillis'])
+        ) || (
+          // Parent final decision (only after target child approved or on open-task volunteer -> PENDING_PARENT_APPROVAL) or parent cancellation
           isParent(familyId)
           && request.resource.data.get('requesterChildId', '') == resource.data.get('requesterChildId', '')
           && request.resource.data.get('targetChildId', '') == resource.data.get('targetChildId', '')
@@ -949,7 +986,7 @@ service cloud.firestore {
           && (
             (
               resource.data.get('status', '') == 'PENDING_PARENT_APPROVAL'
-              && request.resource.data.get('status', '') in ['APPROVED_BY_PARENT', 'REJECTED_BY_PARENT']
+              && request.resource.data.get('status', '') in ['APPROVED_BY_PARENT', 'REJECTED_BY_PARENT', 'CLOSED_NOT_SELECTED']
             )
             || (
               resource.data.get('status', '') in ['PENDING_CHILD_APPROVAL', 'PENDING_PARENT_APPROVAL']

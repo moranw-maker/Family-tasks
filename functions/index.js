@@ -85,8 +85,23 @@ function classifyTaskNotificationEvent(beforeData, afterData, taskId) {
   const dueTime = (afterData.dueTimeFormatted || "16:00").trim();
   const actorUid = (afterData.completedByMemberId || afterData.userId || "").trim();
 
-  // Event A: New task created and assigned to a family member
+  const afterOpenForVolunteering = Boolean(
+    afterData.isOpenForVolunteering || afterData.is_open_for_volunteering
+  );
+
+  // Event A0: New Open Task created for volunteering -> notify all children in the family
   if (!beforeData) {
+    if (afterOpenForVolunteering && !afterAssignee) {
+      return {
+        eventType: "OPEN_TASK_CREATED",
+        eventKey: `open_task:${taskId}`,
+        targetMode: "FAMILY_CHILDREN",
+        targetUid: "",
+        actorUid: (afterData.userId || "").trim(),
+        title: "📢 משימה פתוחה להתנדבות!",
+        body: `משימה חדשה פתוחה להתנדבות: "${title}" (שעה ${dueTime} • +${points} נק') — מי מתנדב?`
+      };
+    }
     if (!afterAssignee) return null;
     return {
       eventType: "TASK_ASSIGNED",
@@ -96,6 +111,19 @@ function classifyTaskNotificationEvent(beforeData, afterData, taskId) {
       actorUid: (afterData.userId || "").trim(),
       title: "משימה חדשה שובצה עבורך 📋",
       body: `שובצה לך משימה חדשה: "${title}" (שעה ${dueTime} • +${points} נק')`
+    };
+  }
+
+  // Event A1: Previously unassigned Open Task assigned to a selected volunteer child
+  if (!beforeAssignee && afterAssignee) {
+    return {
+      eventType: "TASK_ASSIGNED",
+      eventKey: `assign:${taskId}:${afterAssignee}`,
+      targetMode: "SINGLE_MEMBER",
+      targetUid: afterAssignee,
+      actorUid,
+      title: "משימה חדשה שובצה עבורך 📋",
+      body: `המשימה "${title}" שובצה אליך (שעה ${dueTime} • +${points} נק')`
     };
   }
 
@@ -181,6 +209,16 @@ async function resolveVerifiedRecipientUids(db, familyId, eventSpec) {
       .map((doc) => doc.id);
   }
 
+  if (eventSpec.targetMode === "FAMILY_CHILDREN") {
+    return validMemberDocs
+      .filter((doc) => {
+        const d = doc.data() || {};
+        const role = String(d.role || "").toUpperCase();
+        return !PARENT_ROLE_VALUES.has(role) && doc.id !== eventSpec.actorUid;
+      })
+      .map((doc) => doc.id);
+  }
+
   return [];
 }
 
@@ -210,12 +248,9 @@ async function dispatchToRecipientTokens(db, familyId, taskId, eventSpec, recipi
 
     const message = {
       tokens: tokenRecords.map((r) => r.token),
-      notification: {
-        title: eventSpec.title,
-        body: eventSpec.body
-      },
       data: {
         eventKey: `${eventSpec.eventKey}:${recipientUid}`,
+        canonicalEventKey: String(eventSpec.eventKey),
         eventType: eventSpec.eventType,
         familyId: String(familyId),
         taskId: String(taskId),
@@ -225,13 +260,7 @@ async function dispatchToRecipientTokens(db, familyId, taskId, eventSpec, recipi
         body: eventSpec.body
       },
       android: {
-        priority: "high",
-        notification: {
-          channelId: "family_tasks_channel",
-          priority: "high",
-          defaultSound: true,
-          defaultVibrateTimings: true
-        }
+        priority: "high"
       }
     };
 

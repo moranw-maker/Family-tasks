@@ -119,8 +119,14 @@ class FamilyMessagingService : FirebaseMessagingService() {
             val entityId = alarmId.ifBlank { taskId }
             val eventKey = data["eventKey"]
                 ?.takeIf { it.isNotBlank() }
-                ?: messageId
-                ?: "$eventType:$entityId:${data["updatedAt"] ?: System.currentTimeMillis()}"
+                ?: when {
+                    eventType == FcmTokenManager.EVENT_OPEN_TASK_CREATED && taskId.isNotBlank() ->
+                        "open_task:$taskId"
+                    !messageId.isNullOrBlank() ->
+                        messageId
+                    else ->
+                        "$eventType:$entityId:${data["updatedAt"] ?: System.currentTimeMillis()}"
+                }
 
             // Verify current authenticated user is the intended recipient
             val signedInUid = signedInUidOverride ?: runCatching {
@@ -246,8 +252,9 @@ class FamilyMessagingService : FirebaseMessagingService() {
                 onTaskReminderReconcileRequested?.invoke(familyId, taskId, "UPSERT")
             }
 
-            // Deduplicate task notification events by eventKey so FCM + Firestore snapshot never shows twice
-            if (!FcmTokenManager.markEventDispatchedIfNew(eventKey)) {
+            // Deduplicate task notification events by eventKey (both in-memory and SharedPreferences)
+            // so FCM + Firestore snapshot never shows twice whether the app is open or closed
+            if (!FcmTokenManager.markEventDispatchedIfNew(eventKey, appCtx)) {
                 return false
             }
 
@@ -293,6 +300,7 @@ class FamilyMessagingService : FirebaseMessagingService() {
         private fun defaultTitleForEvent(eventType: String): String {
             return when (eventType) {
                 FcmTokenManager.EVENT_TASK_ASSIGNED -> "משימה חדשה שובצה עבורך 📋"
+                FcmTokenManager.EVENT_OPEN_TASK_CREATED -> "📢 משימה פתוחה להתנדבות!"
                 FcmTokenManager.EVENT_TASK_SUBMITTED_FOR_APPROVAL -> "משימה ממתינה לאישור הורה ⏳"
                 FcmTokenManager.EVENT_TASK_APPROVED -> "המשימה שלך אושרה! 🎉"
                 FcmTokenManager.EVENT_TASK_REASSIGNED -> "משימה הועברה אליך 🔄"

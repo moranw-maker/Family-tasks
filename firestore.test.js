@@ -3039,3 +3039,262 @@ test("Flexible Points Splitting, Parent Points Transfers, Helping Bonus, Reward 
   await assertSucceeds(approveRedemptionBatch.commit());
 });
 
+test("Personal Reward Goal & Open Tasks for Volunteering: Firestore rules enforce parent-only open task creation, child volunteering, and atomic volunteer selection", async () => {
+  const famId = "fam_open_tasks_vol";
+  const child2Uid = "maya_child_2";
+  const parentDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const child1Db = testEnv.authenticatedContext(BOB_UID).firestore();
+  const child2Db = testEnv.authenticatedContext(child2Uid).firestore();
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const db = context.firestore();
+    await db.collection("families").doc(famId).set({
+      id: famId,
+      familyName: "משפחת הראל",
+      createdById: ALICE_UID,
+      memberIds: [ALICE_UID, BOB_UID, child2Uid],
+      createdAt: new Date(),
+    });
+    await db.collection("families").doc(famId).collection("members").doc(ALICE_UID).set({
+      id: ALICE_UID,
+      name: "אבא",
+      role: "PARENT",
+      earnedPoints: 0,
+      spentPoints: 0,
+    });
+    await db.collection("families").doc(famId).collection("members").doc(BOB_UID).set({
+      id: BOB_UID,
+      name: "רועי",
+      role: "CHILD",
+      earnedPoints: 40,
+      spentPoints: 0,
+    });
+    await db.collection("families").doc(famId).collection("members").doc(child2Uid).set({
+      id: child2Uid,
+      name: "מאיה",
+      role: "CHILD",
+      earnedPoints: 55,
+      spentPoints: 0,
+    });
+  });
+
+  // 1. Personal Reward Goal:
+  //    - Child 1 can set their own targetRewardId (without changing earnedPoints/role) -> SUCCEEDS
+  await assertSucceeds(
+    child1Db.collection("families").doc(famId).collection("members").doc(BOB_UID).update({
+      targetRewardId: "r_movie",
+    })
+  );
+  //    - Child 1 CANNOT change Child 2's targetRewardId -> FAILS
+  await assertFails(
+    child1Db.collection("families").doc(famId).collection("members").doc(child2Uid).update({
+      targetRewardId: "r_icecream",
+    })
+  );
+  //    - Parent CAN change Child 2's targetRewardId -> SUCCEEDS
+  await assertSucceeds(
+    parentDb.collection("families").doc(famId).collection("members").doc(child2Uid).update({
+      targetRewardId: "r_game",
+    })
+  );
+
+  // 2. Open Tasks Creation:
+  //    - Child CANNOT create an open task -> FAILS
+  await assertFails(
+    child1Db.collection("families").doc(famId).collection("tasks").doc("task_open_illegal").set({
+      id: "task_open_illegal",
+      familyId: famId,
+      title: "משימה פתוחה של ילד",
+      assignedToMemberId: "",
+      isOpenForVolunteering: true,
+      points: 20,
+      isCompleted: false,
+      approvedByParent: false,
+    })
+  );
+  //    - Parent CAN create an open task -> SUCCEEDS
+  await assertSucceeds(
+    parentDb.collection("families").doc(famId).collection("tasks").doc("task_open_yard").set({
+      id: "task_open_yard",
+      familyId: famId,
+      title: "סידור החצר",
+      description: "איסוף צעצועים וניקוי השולחן",
+      assignedToMemberId: "",
+      isOpenForVolunteering: true,
+      points: 25,
+      isCompleted: false,
+      approvedByParent: false,
+    })
+  );
+
+  //    - Child CANNOT directly assign the open task to themselves -> FAILS
+  await assertFails(
+    child1Db.collection("families").doc(famId).collection("tasks").doc("task_open_yard").update({
+      assignedToMemberId: BOB_UID,
+      isOpenForVolunteering: false,
+    })
+  );
+
+  // 3. Multiple Children Volunteering for the Open Task:
+  await assertSucceeds(
+    child1Db.collection("families").doc(famId).collection("task_proposals").doc(`vol_open_task_open_yard_${BOB_UID}`).set({
+      id: `vol_open_task_open_yard_${BOB_UID}`,
+      familyId: famId,
+      type: "VOLUNTEER_FOR_TASK",
+      primaryTaskId: "task_open_yard",
+      primaryTaskTitle: "סידור החצר",
+      primaryTaskPoints: 25,
+      requesterChildId: BOB_UID,
+      requesterChildName: "רועי",
+      targetChildId: "",
+      targetChildName: "משימה פתוחה",
+      isOpenTaskVolunteer: true,
+      status: "PENDING_PARENT_APPROVAL",
+      createdAtMillis: 1700040001000,
+      updatedAtMillis: 1700040001000,
+    })
+  );
+
+  await assertSucceeds(
+    child2Db.collection("families").doc(famId).collection("task_proposals").doc(`vol_open_task_open_yard_${child2Uid}`).set({
+      id: `vol_open_task_open_yard_${child2Uid}`,
+      familyId: famId,
+      type: "VOLUNTEER_FOR_TASK",
+      primaryTaskId: "task_open_yard",
+      primaryTaskTitle: "סידור החצר",
+      primaryTaskPoints: 25,
+      requesterChildId: child2Uid,
+      requesterChildName: "מאיה",
+      targetChildId: "",
+      targetChildName: "משימה פתוחה",
+      isOpenTaskVolunteer: true,
+      status: "PENDING_PARENT_APPROVAL",
+      createdAtMillis: 1700040002000,
+      updatedAtMillis: 1700040002000,
+    })
+  );
+
+  // 4. Parent selects Child 2 (Maya) as the volunteer via a Firestore Transaction with conflict detection:
+  //    Atomically verifies task is still open and unassigned, assigns task to Maya, sets isOpenForVolunteering = false,
+  //    marks Maya's proposal APPROVED_BY_PARENT, and closes Roey's proposal as CLOSED_NOT_SELECTED
+  const taskRef = parentDb.collection("families").doc(famId).collection("tasks").doc("task_open_yard");
+  const mayaProposalRef = parentDb.collection("families").doc(famId).collection("task_proposals").doc(`vol_open_task_open_yard_${child2Uid}`);
+  const roeyProposalRef = parentDb.collection("families").doc(famId).collection("task_proposals").doc(`vol_open_task_open_yard_${BOB_UID}`);
+
+  await assertSucceeds(
+    parentDb.runTransaction(async (tx) => {
+      const taskSnap = await tx.get(taskRef);
+      const mayaPropSnap = await tx.get(mayaProposalRef);
+      const roeyPropSnap = await tx.get(roeyProposalRef);
+
+      const taskData = taskSnap.data() || {};
+      if (!taskData.isOpenForVolunteering || (taskData.assignedToMemberId && taskData.assignedToMemberId.trim() !== "")) {
+        throw new Error("CONFLICT: Open task was already assigned to another volunteer");
+      }
+      if ((mayaPropSnap.data() || {}).status !== "PENDING_PARENT_APPROVAL") {
+        throw new Error("CONFLICT: Proposal is no longer pending parent approval");
+      }
+
+      tx.update(taskRef, {
+        assignedToMemberId: child2Uid,
+        assignedUid: child2Uid,
+        assignedMemberId: child2Uid,
+        isOpenForVolunteering: false,
+        transferProposalId: `vol_open_task_open_yard_${child2Uid}`,
+        activeCollaborationProposalId: `vol_open_task_open_yard_${child2Uid}`,
+        updatedAt: 1700040005000,
+      });
+      tx.update(mayaProposalRef, {
+        status: "APPROVED_BY_PARENT",
+        parentDecidedByUid: ALICE_UID,
+        parentDecidedByName: "אבא",
+        parentDecidedAtMillis: 1700040005000,
+        updatedAtMillis: 1700040005000,
+      });
+      if (roeyPropSnap.exists && (roeyPropSnap.data() || {}).status === "PENDING_PARENT_APPROVAL") {
+        tx.update(roeyProposalRef, {
+          status: "CLOSED_NOT_SELECTED",
+          parentDecidedByUid: ALICE_UID,
+          parentDecidedByName: "אבא",
+          parentDecidedAtMillis: 1700040005000,
+          updatedAtMillis: 1700040005000,
+        });
+      }
+    })
+  );
+
+  // 4B. Second Parent (or concurrent parent approval) tries to approve Roey (`BOB_UID`) for the same task via Transaction ->
+  //     Transaction detects `isOpenForVolunteering == false` / `assignedToMemberId == child2Uid` and FAILS with conflict!
+  const assert = require("node:assert");
+  await assert.rejects(
+    async () => {
+      await parentDb.runTransaction(async (tx) => {
+        const taskSnap = await tx.get(taskRef);
+        const roeyPropSnap = await tx.get(roeyProposalRef);
+        const taskData = taskSnap.data() || {};
+        if (!taskData.isOpenForVolunteering || (taskData.assignedToMemberId && taskData.assignedToMemberId.trim() !== "")) {
+          throw new Error("המשימה הפתוחה כבר שויכה למתנדב אחר על ידי הורה נוסף");
+        }
+        if ((roeyPropSnap.data() || {}).status !== "PENDING_PARENT_APPROVAL") {
+          throw new Error("המשימה הפתוחה כבר שויכה למתנדב אחר על ידי הורה נוסף");
+        }
+        tx.update(taskRef, {
+          assignedToMemberId: BOB_UID,
+          isOpenForVolunteering: false,
+        });
+      });
+    },
+    /כבר שויכה למתנדב אחר/
+  );
+
+  // Verify Maya remains the sole assignee and Roey's proposal remains CLOSED_NOT_SELECTED
+  const finalTaskSnap = await taskRef.get();
+  assert.strictEqual(finalTaskSnap.data().assignedToMemberId, child2Uid);
+  assert.strictEqual(finalTaskSnap.data().isOpenForVolunteering, false);
+  const finalRoeySnap = await roeyProposalRef.get();
+  assert.strictEqual(finalRoeySnap.data().status, "CLOSED_NOT_SELECTED");
+
+  // 5. Volunteering for an already-assigned task MUST FAIL
+  await assertFails(
+    child1Db.collection("families").doc(famId).collection("task_proposals").doc("vol_open_after_assigned").set({
+      id: "vol_open_after_assigned",
+      familyId: famId,
+      type: "VOLUNTEER_FOR_TASK",
+      primaryTaskId: "task_open_yard",
+      primaryTaskTitle: "סידור החצר",
+      primaryTaskPoints: 25,
+      requesterChildId: BOB_UID,
+      requesterChildName: "רועי",
+      targetChildId: "",
+      targetChildName: "משימה פתוחה",
+      isOpenTaskVolunteer: true,
+      status: "PENDING_PARENT_APPROVAL",
+      createdAtMillis: 1700040009000,
+      updatedAtMillis: 1700040009000,
+    })
+  );
+
+  // 6. Verify Cloud Function OPEN_TASK_CREATED classification produces canonical eventKey "open_task:{taskId}"
+  const { classifyTaskNotificationEvent } = require("./functions/index.js");
+  const openTaskEvent = classifyTaskNotificationEvent(
+    null,
+    {
+      id: "task_open_yard",
+      familyId: famId,
+      title: "סידור החצר",
+      assignedToMemberId: "",
+      isOpenForVolunteering: true,
+      points: 25,
+      dueTimeFormatted: "17:00",
+      userId: ALICE_UID,
+    },
+    "task_open_yard"
+  );
+  assert.ok(openTaskEvent);
+  assert.strictEqual(openTaskEvent.eventType, "OPEN_TASK_CREATED");
+  assert.strictEqual(openTaskEvent.eventKey, "open_task:task_open_yard");
+  assert.strictEqual(openTaskEvent.targetMode, "FAMILY_CHILDREN");
+});
+
+
+

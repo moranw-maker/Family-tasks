@@ -1,6 +1,9 @@
 package com.example.ui.components
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -16,6 +19,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -25,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.FamilyMember
 import com.example.model.RedemptionStatus
+import com.example.model.RewardGoalProgressUiModel
 import com.example.model.RewardItem
 import com.example.model.RewardRedemptionRequest
 import com.example.ui.theme.*
@@ -43,12 +48,32 @@ fun RewardsSheet(
     onCreateReward: (title: String, pointsCost: Int, iconEmoji: String, description: String) -> Unit = { _, _, _, _ -> },
     onUpdateReward: (rewardId: String, title: String, pointsCost: Int, iconEmoji: String, description: String, isActive: Boolean) -> Unit = { _, _, _, _, _, _ -> },
     onToggleRewardActive: (rewardId: String, isActive: Boolean) -> Unit = { _, _ -> },
-    onDeleteReward: (rewardId: String) -> Unit = {}
+    onDeleteReward: (rewardId: String) -> Unit = {},
+    members: List<FamilyMember> = emptyList(),
+    onSetPersonalRewardGoal: (rewardId: String?, targetChildId: String) -> Unit = { _, _ -> }
 ) {
     val glassColors = LocalSoftGlassColors.current
     var selectedFilter by remember { mutableIntStateOf(0) } // 0 = All, 1 = Available, 2 = Redemptions
     var showCreateRewardDialog by remember { mutableStateOf(false) }
     var rewardToEdit by remember { mutableStateOf<RewardItem?>(null) }
+
+    val childMembers = remember(members, currentMember) {
+        val kids = members.filter { it.isChild && it.invitationAccepted && !it.invitationPending }
+        if (kids.isEmpty() && currentMember.isChild) listOf(currentMember) else kids
+    }
+    var selectedGoalChildId by remember(currentMember.id, childMembers) {
+        mutableStateOf(
+            if (currentMember.isChild) currentMember.id
+            else childMembers.firstOrNull()?.id ?: currentMember.id
+        )
+    }
+    val goalTargetMember = remember(currentMember, members, selectedGoalChildId) {
+        if (currentMember.isChild) {
+            members.find { it.id == currentMember.id } ?: currentMember
+        } else {
+            members.find { it.id == selectedGoalChildId } ?: currentMember
+        }
+    }
 
     // Default fallback catalog if repository list is empty
     val fallbackCatalog = remember(isHebrew) {
@@ -104,17 +129,24 @@ fun RewardsSheet(
         )
     }
 
-    val effectiveCatalog = remember(rewards, fallbackCatalog, currentMember.isParent) {
-        val base = if (rewards.isNotEmpty()) rewards else fallbackCatalog
-        base.filter { item ->
+    val fullCatalogWithDeleted = remember(rewards, fallbackCatalog) {
+        if (rewards.isNotEmpty()) rewards else fallbackCatalog
+    }
+
+    val effectiveCatalog = remember(fullCatalogWithDeleted, currentMember.isParent) {
+        fullCatalogWithDeleted.filter { item ->
             !item.isDeleted && (currentMember.isParent || item.isActive)
         }
     }
 
-    val displayRewards = remember(effectiveCatalog, selectedFilter, currentMember.earnedPoints) {
+    val goalProgress = remember(goalTargetMember, fullCatalogWithDeleted) {
+        com.example.model.RewardGoalProgressUiModel.compute(goalTargetMember, fullCatalogWithDeleted)
+    }
+
+    val displayRewards = remember(effectiveCatalog, selectedFilter, goalTargetMember.earnedPoints) {
         effectiveCatalog.filter { item ->
             when (selectedFilter) {
-                1 -> item.isActive && currentMember.earnedPoints >= item.pointsCost
+                1 -> item.isActive && goalTargetMember.earnedPoints >= item.pointsCost
                 else -> true
             }
         }
@@ -182,19 +214,19 @@ fun RewardsSheet(
                 FamilyMemberAvatar(member = currentMember, size = 36.dp, isHighlighted = true)
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // Hero Points Soft Glass Card + Parent Add Reward Button
             FamilyGlassCard(
                 cornerRadius = 24.dp,
                 accentColor = SoftLavender,
                 elevation = 4.dp,
-                contentPadding = PaddingValues(16.dp),
+                contentPadding = PaddingValues(14.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("rewards_hero_points_card")
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -202,7 +234,7 @@ fun RewardsSheet(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "${currentMember.earnedPoints} ${if (isHebrew) "נקודות" else "Points"}",
+                                text = "${goalTargetMember.earnedPoints} ${if (isHebrew) "נקודות" else "Points"}",
                                 style = MaterialTheme.typography.headlineSmall.copy(
                                     fontWeight = FontWeight.ExtraBold,
                                     color = if (glassColors.isDark) Color(0xFFD8B4FE) else PastelPurpleDark
@@ -211,7 +243,7 @@ fun RewardsSheet(
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = if (currentMember.isParent) {
-                                    if (isHebrew) "מצב הורה: ניהול קטלוג פרסים ואישור בקשות מימוש" else "Parent mode: Manage catalog & approve redemptions"
+                                    if (isHebrew) "מצב הורה: ניהול קטלוג פרסים, יעדי ילדים ואישור בקשות מימוש" else "Parent mode: Manage catalog, child goals & redemptions"
                                 } else {
                                     if (isHebrew) "הנקודות שצברת מביצוע משימות • מימוש באישור הורה ⭐" else "Your chore points • Redemptions require parent approval ⭐"
                                 },
@@ -226,10 +258,44 @@ fun RewardsSheet(
                             shape = RoundedCornerShape(18.dp),
                             color = if (glassColors.isDark) Color(0xFF422006) else Color(0xFFFEF3C7),
                             border = BorderStroke(1.2.dp, GoogleYellow.copy(alpha = 0.45f)),
-                            modifier = Modifier.size(50.dp)
+                            modifier = Modifier.size(46.dp)
                         ) {
                             Box(contentAlignment = Alignment.Center) {
-                                Text(text = "⭐", fontSize = 24.sp)
+                                Text(text = "⭐", fontSize = 22.sp)
+                            }
+                        }
+                    }
+
+                    // Parent selector to view/manage a specific child's personal reward goal
+                    if (currentMember.isParent && childMembers.size > 1) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = if (isHebrew) "יעד חיסכון עבור:" else "Goal for:",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = glassColors.textSecondary
+                                )
+                            )
+                            childMembers.forEach { child ->
+                                val isSelected = child.id == goalTargetMember.id
+                                FilterChip(
+                                    selected = isSelected,
+                                    onClick = { selectedGoalChildId = child.id },
+                                    label = {
+                                        Text(
+                                            text = "${child.avatarEmoji} ${child.name} (${child.earnedPoints} ⭐)",
+                                            fontSize = 11.sp,
+                                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("goal_child_selector_${child.id}")
+                                )
                             }
                         }
                     }
@@ -246,7 +312,29 @@ fun RewardsSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            // Personal Reward Goal Progress Card (Part A)
+            if (goalProgress != null) {
+                Spacer(modifier = Modifier.height(10.dp))
+                val hasPendingGoalRedemption = visibleRedemptions.any {
+                    it.rewardId == goalProgress.targetRewardId &&
+                        it.requestedByMemberId == goalTargetMember.id &&
+                        it.status == RedemptionStatus.PENDING_PARENT_APPROVAL
+                }
+                PersonalRewardGoalCard(
+                    progress = goalProgress,
+                    isHebrew = isHebrew,
+                    hasPendingRedemption = hasPendingGoalRedemption,
+                    canRequestRedemption = !currentMember.isParent || goalTargetMember.id == currentMember.id,
+                    onRequestRedeem = {
+                        goalProgress.reward?.let { onRequestRedemption(it) }
+                    },
+                    onClearGoal = {
+                        onSetPersonalRewardGoal(null, goalTargetMember.id)
+                    }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
 
             // Filter Tabs
             Row(
@@ -277,13 +365,13 @@ fun RewardsSheet(
                 )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 420.dp)
+                    .heightIn(max = 400.dp)
             ) {
                 // Pending Redemptions Banner on main tabs if any pending
                 if (selectedFilter != 2 && pendingRedemptionsCount > 0) {
@@ -350,7 +438,8 @@ fun RewardsSheet(
                     }
                 } else {
                     items(displayRewards, key = { "reward_${it.id}" }) { item ->
-                        val canAfford = currentMember.earnedPoints >= item.pointsCost
+                        val canAfford = goalTargetMember.earnedPoints >= item.pointsCost
+                        val isCurrentGoal = goalTargetMember.targetRewardId == item.id
                         val hasPendingForThisReward = visibleRedemptions.any {
                             it.rewardId == item.id &&
                                 it.requestedByMemberId == currentMember.id &&
@@ -361,6 +450,7 @@ fun RewardsSheet(
                             cornerRadius = 20.dp,
                             accentColor = when {
                                 !item.isActive -> glassColors.textMuted
+                                isCurrentGoal -> glassColors.primaryAccent
                                 canAfford -> GoogleGreen
                                 else -> null
                             },
@@ -430,12 +520,25 @@ fun RewardsSheet(
                                                     overflow = TextOverflow.Ellipsis
                                                 )
                                             }
-                                            FamilyStatusChip(
-                                                emoji = "⭐",
-                                                label = "${item.pointsCost} ${if (isHebrew) "נקודות" else "pts"}",
-                                                containerColor = if (canAfford) glassColors.successBg else glassColors.warningBg,
-                                                contentColor = if (canAfford) glassColors.successText else glassColors.warningText
-                                            )
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                FamilyStatusChip(
+                                                    emoji = "⭐",
+                                                    label = "${item.pointsCost} ${if (isHebrew) "נקודות" else "pts"}",
+                                                    containerColor = if (canAfford) glassColors.successBg else glassColors.warningBg,
+                                                    contentColor = if (canAfford) glassColors.successText else glassColors.warningText
+                                                )
+                                                if (isCurrentGoal) {
+                                                    FamilyStatusChip(
+                                                        emoji = "🎯",
+                                                        label = if (isHebrew) "היעד שלי" else "My Goal",
+                                                        containerColor = glassColors.primaryAccentSoftBg,
+                                                        contentColor = glassColors.primaryAccent
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
 
@@ -469,6 +572,52 @@ fun RewardsSheet(
                                                     modifier = Modifier.size(18.dp)
                                                 )
                                             }
+                                        }
+                                    }
+                                }
+
+                                // Personal Goal Selection Row ("🎯 הגדר כפרס שאני חוסך אליו")
+                                if (item.isActive && (currentMember.isChild || (currentMember.isParent && goalTargetMember.isChild))) {
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = if (isCurrentGoal) {
+                                            glassColors.primaryAccent.copy(alpha = 0.14f)
+                                        } else {
+                                            glassColors.primaryAccentSoftBg.copy(alpha = 0.7f)
+                                        },
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (isCurrentGoal) glassColors.primaryAccent else glassColors.cardBorder
+                                        ),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .clickable {
+                                                val nextGoalId = if (isCurrentGoal) null else item.id
+                                                onSetPersonalRewardGoal(nextGoalId, goalTargetMember.id)
+                                            }
+                                            .testTag("set_personal_goal_btn_${item.id}")
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 7.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.Center
+                                        ) {
+                                            Text(
+                                                text = if (isCurrentGoal) {
+                                                    if (isHebrew) "🎯 מוגדר כפרס שאני חוסך אליו (לחץ לביטול)"
+                                                    else "🎯 Active Savings Goal (tap to clear)"
+                                                } else {
+                                                    if (isHebrew) "🎯 הגדר כפרס שאני חוסך אליו"
+                                                    else "🎯 Set as my savings goal"
+                                                },
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    color = glassColors.primaryAccent
+                                                )
+                                            )
                                         }
                                     }
                                 }
@@ -886,3 +1035,228 @@ private fun RowScope.RewardFilterPill(
         }
     }
 }
+
+@Composable
+fun PersonalRewardGoalCard(
+    progress: RewardGoalProgressUiModel,
+    isHebrew: Boolean,
+    hasPendingRedemption: Boolean = false,
+    canRequestRedemption: Boolean = true,
+    onRequestRedeem: () -> Unit = {},
+    onClearGoal: () -> Unit = {}
+) {
+    val glass = LocalSoftGlassColors.current
+    val animatedFraction by animateFloatAsState(
+        targetValue = progress.progressFraction.coerceIn(0f, 1f),
+        animationSpec = tween(durationMillis = 500),
+        label = "personalGoalProgressFraction"
+    )
+
+    if (progress.isRewardUnavailable) {
+        FamilyGlassCard(
+            cornerRadius = 20.dp,
+            accentColor = glass.warningText,
+            elevation = 3.dp,
+            contentPadding = PaddingValues(14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("personal_reward_goal_card")
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = if (isHebrew) {
+                        "⚠️ הפרס שנבחר כיעד הושבת או הוסר מהקטלוג. בחר/י פרס יעד חדש מהרשימה למטה."
+                    } else {
+                        "⚠️ Your selected target reward was disabled or removed. Choose a new goal below."
+                    },
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        color = glass.warningText,
+                        fontWeight = FontWeight.Bold
+                    ),
+                    modifier = Modifier.testTag("reward_goal_unavailable_notice")
+                )
+                OutlinedButton(
+                    onClick = onClearGoal,
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    modifier = Modifier
+                        .height(32.dp)
+                        .testTag("clear_unavailable_reward_goal_btn")
+                ) {
+                    Text(
+                        text = if (isHebrew) "בחר יעד חדש 🎯" else "Choose New Goal 🎯",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+        return
+    }
+
+    FamilyGlassCard(
+        cornerRadius = 22.dp,
+        accentColor = if (progress.isGoalReached) GoogleGreen else glass.primaryAccent,
+        elevation = 4.dp,
+        contentPadding = PaddingValues(14.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("personal_reward_goal_card")
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (progress.isGoalReached) glass.successBg else glass.primaryAccentSoftBg,
+                        border = BorderStroke(
+                            1.dp,
+                            if (progress.isGoalReached) glass.successBorder else glass.primaryAccent.copy(alpha = 0.4f)
+                        ),
+                        modifier = Modifier.size(42.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(text = progress.rewardIconEmoji, fontSize = 22.sp)
+                        }
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (isHebrew) {
+                                "🎯 הפרס שלי: ${progress.rewardTitle}"
+                            } else {
+                                "🎯 My Goal: ${progress.rewardTitle}"
+                            },
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = glass.textPrimary
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag("reward_goal_title_text")
+                        )
+                        Text(
+                            text = if (isHebrew) {
+                                "${progress.currentPoints} / ${progress.pointsCost} נקודות (${progress.progressPercentage}%)"
+                            } else {
+                                "${progress.currentPoints} / ${progress.pointsCost} points (${progress.progressPercentage}%)"
+                            },
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = if (progress.isGoalReached) glass.successText else glass.primaryAccent
+                            ),
+                            modifier = Modifier.testTag("reward_goal_points_fraction")
+                        )
+                    }
+                }
+
+                IconButton(
+                    onClick = onClearGoal,
+                    modifier = Modifier
+                        .size(28.dp)
+                        .testTag("clear_personal_reward_goal_btn")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = if (isHebrew) "נקה יעד" else "Clear Goal",
+                        tint = glass.textMuted,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            // Smooth Animated Graphical Progress Bar (clamped 0%..100%)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(11.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(
+                        if (glass.isDark) Color(0xFF1E293B) else Color(0xFFE2E8F0)
+                    )
+                    .testTag("reward_goal_progress_bar")
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(animatedFraction)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(
+                            Brush.horizontalGradient(
+                                colors = if (progress.isGoalReached) {
+                                    listOf(Color(0xFF10B981), Color(0xFF22C55E), Color(0xFF16A34A))
+                                } else {
+                                    listOf(Color(0xFF4F46E5), Color(0xFF2563EB), Color(0xFF7C3AED))
+                                }
+                            )
+                        )
+                )
+            }
+
+            if (progress.isGoalReached) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = if (isHebrew) {
+                            "🎉 הגעת ליעד! אפשר לבקש לממש את הפרס!"
+                        } else {
+                            "🎉 Goal reached! You can request to redeem this reward!"
+                        },
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.ExtraBold,
+                            color = glass.successText
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp)
+                            .testTag("reward_goal_reached_message")
+                    )
+
+                    if (hasPendingRedemption) {
+                        FamilyStatusChip(
+                            emoji = "⏳",
+                            label = if (isHebrew) "ממתין לאישור" else "Pending",
+                            containerColor = glass.warningBg,
+                            contentColor = glass.warningText
+                        )
+                    } else if (canRequestRedemption) {
+                        FamilyPrimaryButton(
+                            text = if (isHebrew) "🎁 בקש לממש" else "🎁 Redeem",
+                            onClick = onRequestRedeem,
+                            containerColor = GoogleGreen,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .height(34.dp)
+                                .testTag("reward_goal_redeem_btn")
+                        )
+                    }
+                }
+            } else {
+                Text(
+                    text = if (isHebrew) {
+                        "עוד ${progress.remainingPoints} נקודות לפרס שלך!"
+                    } else {
+                        "${progress.remainingPoints} more points to reach your reward!"
+                    },
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = glass.textSecondary
+                    ),
+                    modifier = Modifier.testTag("reward_goal_remaining_text")
+                )
+            }
+        }
+    }
+}
+

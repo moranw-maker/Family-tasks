@@ -250,7 +250,11 @@ object NotificationHelper {
      */
     fun resolveSoundUsageForEvent(eventType: String): SoundUsageType {
         return when (eventType.uppercase()) {
-            FcmTokenManager.EVENT_TASK_ASSIGNED, "TASK_CREATED", "CREATE" -> SoundUsageType.TASK_CREATED
+            FcmTokenManager.EVENT_TASK_ASSIGNED,
+            FcmTokenManager.EVENT_OPEN_TASK_CREATED,
+            "TASK_CREATED",
+            "OPEN_TASK_CREATED",
+            "CREATE" -> SoundUsageType.TASK_CREATED
             FcmTokenManager.EVENT_TASK_REASSIGNED, "TASK_UPDATED", "UPDATE" -> SoundUsageType.TASK_UPDATED
             FcmTokenManager.EVENT_TASK_APPROVED,
             FcmTokenManager.EVENT_TASK_SUBMITTED_FOR_APPROVAL,
@@ -328,7 +332,8 @@ object NotificationHelper {
         taskId: String = "",
         eventType: String = FcmTokenManager.EVENT_TASK_ASSIGNED
     ) {
-        val deterministicId = 20_000 + abs(eventKey.ifBlank { "$title:$message" }.hashCode() % 70_000)
+        val canonicalKey = FcmTokenManager.canonicalizeEventKey(eventKey)
+        val deterministicId = 20_000 + abs(canonicalKey.ifBlank { "$eventType:$taskId:$title" }.hashCode() % 70_000)
         val usageType = resolveSoundUsageForEvent(eventType)
         val activeChannelId = ensureChannelForSoundUsage(context, usageType)
 

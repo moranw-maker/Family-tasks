@@ -5,7 +5,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -52,7 +54,8 @@ fun AdminDashboardScreen(
     onRemoveMember: (memberId: String) -> Unit,
     onRevokeInvitation: (code: String) -> Unit = {},
     onGenerateShareText: (name: String, role: UserRole) -> String = { _, _ -> "" },
-    onFormatInvitationShareText: ((FamilyInvitation) -> String)? = null
+    onFormatInvitationShareText: ((FamilyInvitation) -> String)? = null,
+    listState: LazyListState = rememberLazyListState()
 ) {
     val glass = LocalSoftGlassColors.current
     val context = LocalContext.current
@@ -72,6 +75,7 @@ fun AdminDashboardScreen(
 
     SoftGlassScreenBackground(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .testTag("admin_dashboard_screen"),
@@ -435,7 +439,9 @@ fun AdminDashboardScreen(
                                 TextButton(
                                     onClick = { onSwitchMember(member) },
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                    modifier = Modifier.height(32.dp)
+                                    modifier = Modifier
+                                        .height(32.dp)
+                                        .testTag("admin_switch_view_btn_${member.id}")
                                 ) {
                                     Text(
                                         text = if (isHebrew) "החלף תצוגה" else "Preview as",

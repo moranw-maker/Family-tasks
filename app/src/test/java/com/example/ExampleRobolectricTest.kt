@@ -13,6 +13,10 @@ import com.example.model.TaskCategory
 import com.example.model.TaskCompletionSyncState
 import com.example.model.TaskPriority
 import com.example.model.UserRole
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -4818,7 +4822,658 @@ class ExampleRobolectricTest {
         assertEquals("שעתיים משחק בפלייסטיישן", preservedHistoricalRedemption.rewardTitle)
         assertEquals(com.example.model.RedemptionStatus.APPROVED, preservedHistoricalRedemption.status)
     }
+
+    @Test
+    fun `test personal reward goal selection progress calculation real time updates and edge cases`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = FamilyRepository(context = context)
+
+        val dad = repository.members.value.first { it.id == "m_dad" }
+        val kid1 = repository.members.value.first { it.id == "m_kid1" }
+        val kid2 = repository.members.value.first { it.id == "m_kid2" }
+
+        // Prepare a 200-point reward in the catalog
+        repository.switchCurrentMember(dad)
+        val cinemaReward = repository.createRewardAsync(
+            title = "יציאה לסרט",
+            pointsCost = 200,
+            iconEmoji = "🎬",
+            description = "סרט ופופקורן"
+        ).getOrThrow()
+
+        // Set kid1's balance to exactly 120 points
+        repository.resetMemberPoints(kid1.id, "איפוס לבדיקת יעד אישי", "op_reset_goal_test")
+        repository.addMemberPoints(kid1.id, 120, "נקודות התחלה ליעד אישי", "op_add_120_goal_test")
+        assertEquals(120, repository.members.value.first { it.id == kid1.id }.earnedPoints)
+
+        // =========================================================================
+        // Scenario 1: Child selecting a personal reward goal
+        // =========================================================================
+        repository.switchCurrentMember(kid1)
+        val selectRes = repository.setPersonalRewardGoalAsync(cinemaReward.id)
+        assertTrue("Child must be able to set their own personal reward goal", selectRes.isSuccess)
+        assertEquals(
+            cinemaReward.id,
+            repository.members.value.first { it.id == kid1.id }.targetRewardId
+        )
+        // Selecting a goal does NOT deduct any points
+        assertEquals(
+            "Selecting a personal reward goal must NOT deduct points",
+            120,
+            repository.members.value.first { it.id == kid1.id }.earnedPoints
+        )
+
+        // Child 1 CANNOT change Child 2's personal reward goal
+        val crossChildGoalAttempt = repository.setPersonalRewardGoalAsync(cinemaReward.id, targetChildId = kid2.id)
+        assertTrue("Child must not be able to change another child's reward goal", crossChildGoalAttempt.isFailure)
+
+        // Parent CAN set or change a child's personal reward goal
+        repository.switchCurrentMember(dad)
+        assertTrue(repository.setPersonalRewardGoalAsync(cinemaReward.id, targetChildId = kid2.id).isSuccess)
+        assertEquals(cinemaReward.id, repository.members.value.first { it.id == kid2.id }.targetRewardId)
+
+        // =========================================================================
+        // Scenario 2: Calculating progress percentage and remaining points (120 / 200 -> 60%, 80 remaining)
+        // =========================================================================
+        val progressInitial = repository.getRewardGoalProgress(kid1.id)
+        assertNotNull(progressInitial)
+        assertEquals(120, progressInitial!!.currentPoints)
+        assertEquals(200, progressInitial.requiredPoints)
+        assertEquals(60, progressInitial.progressPercent)
+        assertEquals(0.6f, progressInitial.progressFraction, 0.001f)
+        assertEquals(80, progressInitial.remainingPoints)
+        assertFalse(progressInitial.isGoalReached)
+        assertFalse(progressInitial.isRewardUnavailable)
+
+        // =========================================================================
+        // Scenario 3: Updating progress meter after receiving points (120 + 50 = 170 -> 85%, 30 remaining)
+        // =========================================================================
+        repository.addMemberPoints(kid1.id, 50, "בונוס עזרה בבית", "op_add_50_goal_test")
+        val progressAfter50 = repository.getRewardGoalProgress(kid1.id)!!
+        assertEquals(170, progressAfter50.currentPoints)
+        assertEquals(85, progressAfter50.progressPercent)
+        assertEquals(30, progressAfter50.remainingPoints)
+        assertFalse(progressAfter50.isGoalReached)
+
+        // =========================================================================
+        // Scenario 4: Reaching 100% (and exceeding cost) -> 100% progress bar, 0 remaining, isGoalReached = true
+        // =========================================================================
+        repository.addMemberPoints(kid1.id, 60, "השלמת משימות השבוע", "op_add_60_goal_test")
+        val progressAt230 = repository.getRewardGoalProgress(kid1.id)!!
+        assertEquals("Real balance (230) must be shown even when > cost (200)", 230, progressAt230.currentPoints)
+        assertEquals("Progress percentage must clamp to 100%", 100, progressAt230.progressPercent)
+        assertEquals("Progress fraction must clamp to 1.0f", 1.0f, progressAt230.progressFraction, 0.001f)
+        assertEquals("Remaining points must be 0 when goal is reached", 0, progressAt230.remainingPoints)
+        assertTrue("isGoalReached must be true when earnedPoints >= pointsCost", progressAt230.isGoalReached)
+
+        // =========================================================================
+        // Scenario 5: Updating progress meter when reward cost changes or reward is disabled/deleted
+        // =========================================================================
+        // Parent increases reward cost from 200 to 250 -> kid1 (230 pts) is now at 92% with 20 pts remaining
+        repository.updateRewardAsync(
+            rewardId = cinemaReward.id,
+            title = "יציאה לסרט VIP",
+            pointsCost = 250,
+            iconEmoji = "🎬",
+            description = "סרט ופופקורן גדול",
+            isActive = true
+        ).getOrThrow()
+        val progressAfterCostChange = repository.getRewardGoalProgress(kid1.id)!!
+        assertEquals(250, progressAfterCostChange.requiredPoints)
+        assertEquals(92, progressAfterCostChange.progressPercent)
+        assertEquals(20, progressAfterCostChange.remainingPoints)
+        assertFalse(progressAfterCostChange.isGoalReached)
+
+        // Parent disables the reward -> isRewardUnavailable becomes true
+        repository.setRewardActiveState(cinemaReward.id, isActive = false)
+        val progressWhenDisabled = repository.getRewardGoalProgress(kid1.id)!!
+        assertTrue("Disabled target reward must be flagged as unavailable", progressWhenDisabled.isRewardUnavailable)
+
+        // Parent soft-deletes the reward -> isRewardUnavailable remains true and child can choose a new goal
+        repository.deleteRewardFromCatalog(cinemaReward.id)
+        val progressWhenDeleted = repository.getRewardGoalProgress(kid1.id)!!
+        assertTrue("Deleted target reward must be flagged as unavailable", progressWhenDeleted.isRewardUnavailable)
+    }
+
+    @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+    @Test
+    fun `test switch view button preserves family management parent permissions and scroll position`() = androidx.compose.ui.test.runComposeUiTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        if (com.google.firebase.FirebaseApp.getApps(context).isEmpty()) {
+            com.google.firebase.FirebaseApp.initializeApp(
+                context,
+                com.google.firebase.FirebaseOptions.Builder()
+                    .setProjectId("test-project")
+                    .setApplicationId("1:1234567890:android:abcdef")
+                    .setApiKey("fake-api-key-for-test")
+                    .build()
+            )
+        }
+        context.getSharedPreferences("family_tasks_ui_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+        val repository = FamilyRepository(
+            context = context,
+            firestoreProvider = { null },
+            authProvider = { null }
+        )
+        val viewModel = FamilyViewModel(repository)
+
+        val dad = repository.members.value.first { it.id == "m_dad" }
+        val kid1 = repository.members.value.first { it.id == "m_kid1" }
+        repository.switchCurrentMember(dad)
+        assertTrue(viewModel.currentMember.value.isParent)
+        assertEquals(UserRole.PARENT, viewModel.currentMember.value.role)
+
+        // Add enough tasks so the LazyColumn is scrollable
+        for (i in 1..15) {
+            repository.addTask(
+                FamilyTask(
+                    id = "scroll_test_task_$i",
+                    title = "משימת בדיקת גלילה $i",
+                    category = TaskCategory.CLEANING,
+                    assignedToMemberId = kid1.id,
+                    dateEpochDay = LocalDate.now().toEpochDay(),
+                    points = 10
+                )
+            )
+        }
+
+        // =========================================================================
+        // Scenarios 6, 7, 8:
+        // - Clicking "החלף תצוגה" in AdminDashboardScreen or TasksScreen NEVER loses "ניהול המשפחה"
+        // - Preserves parent permissions (currentMember.isParent == true, role == PARENT)
+        // - Preserves LazyListState scroll position
+        // - Persists view mode across restarts in SharedPreferences
+        // =========================================================================
+        viewModel.switchMember(kid1)
+        assertEquals(
+            "viewModel.switchMember must NOT replace currentMember with the child",
+            dad.id,
+            viewModel.currentMember.value.id
+        )
+        assertEquals(
+            "Parent role must remain PARENT after switchMember",
+            UserRole.PARENT,
+            viewModel.currentMember.value.role
+        )
+        assertTrue(
+            "Parent permissions (isParent) must remain true after switchMember",
+            viewModel.currentMember.value.isParent
+        )
+        assertEquals(kid1.id, viewModel.selectedMemberFilter.value)
+        assertEquals(com.example.model.TasksViewMode.COMPACT, viewModel.tasksViewMode.value)
+
+        // Verify persistence across repository re-instantiation
+        val restoredRepository = FamilyRepository(context = context)
+        assertEquals(
+            "Selected TasksViewMode must persist across app restarts",
+            com.example.model.TasksViewMode.COMPACT,
+            restoredRepository.tasksViewMode.value
+        )
+
+        // Reset filter to all and test Compose UI scroll preservation + "ניהול משפחה" visibility in both Light & Dark themes
+        viewModel.setMemberFilter(null)
+        lateinit var capturedListState: androidx.compose.foundation.lazy.LazyListState
+        var isDarkThemeState by androidx.compose.runtime.mutableStateOf(false)
+
+        setContent {
+            val tasks by viewModel.tasks.collectAsState()
+            val members by viewModel.members.collectAsState()
+            val currentMember by viewModel.currentMember.collectAsState()
+            val selectedFilter by viewModel.selectedMemberFilter.collectAsState()
+            val viewMode by viewModel.tasksViewMode.collectAsState()
+            val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+            capturedListState = listState
+
+            com.example.ui.theme.MyApplicationTheme(
+                themeMode = if (isDarkThemeState) com.example.model.AppThemeMode.DARK else com.example.model.AppThemeMode.LIGHT
+            ) {
+                com.example.ui.screens.TasksScreen(
+                    tasks = tasks,
+                    members = members,
+                    currentMember = currentMember,
+                    selectedMemberFilter = selectedFilter,
+                    isHebrew = true,
+                    onFilterChange = { viewModel.setMemberFilter(it) },
+                    onToggleTask = {},
+                    onEditTask = {},
+                    onDeleteTask = {},
+                    onSendNudge = {},
+                    onAddNewTask = {},
+                    tasksViewMode = viewMode,
+                    onToggleTasksViewMode = { viewModel.toggleTasksViewMode() },
+                    listState = listState
+                )
+            }
+        }
+
+        // Verify "ניהול משפחה" chip is present before switching view
+        onNodeWithTag("family_management_chip", useUnmergedTree = true).assertExists()
+        onNodeWithTag("switch_tasks_view_btn").assertExists()
+
+        // Click "החלף תצוגה" while at the top -> "ניהול משפחה" and parent permissions remain intact
+        onNodeWithTag("switch_tasks_view_btn").performClick()
+        waitForIdle()
+        onNodeWithTag("family_management_chip", useUnmergedTree = true).assertExists()
+        assertTrue(viewModel.currentMember.value.isParent)
+        assertEquals(com.example.model.TasksViewMode.STANDARD, viewModel.tasksViewMode.value)
+
+        // Scroll down to item index 4 and verify scroll position is preserved when toggling view mode
+        runOnIdle {
+            kotlinx.coroutines.runBlocking {
+                capturedListState.scrollToItem(index = 4, scrollOffset = 20)
+            }
+        }
+        waitForIdle()
+        val indexBeforeToggle = capturedListState.firstVisibleItemIndex
+        val offsetBeforeToggle = capturedListState.firstVisibleItemScrollOffset
+        assertEquals(4, indexBeforeToggle)
+
+        // Toggle view mode programmatically / via callback while scrolled -> listState does not jump back to 0!
+        runOnIdle {
+            viewModel.toggleTasksViewMode()
+        }
+        waitForIdle()
+        assertEquals(com.example.model.TasksViewMode.COMPACT, viewModel.tasksViewMode.value)
+        assertEquals(
+            "Scroll item index must be preserved when switching view mode",
+            indexBeforeToggle,
+            capturedListState.firstVisibleItemIndex
+        )
+        assertEquals(
+            "Scroll offset must be preserved when switching view mode",
+            offsetBeforeToggle,
+            capturedListState.firstVisibleItemScrollOffset
+        )
+        assertTrue("Parent permissions must remain true after toggling view", viewModel.currentMember.value.isParent)
+
+        // Switch to Dark Theme and verify no crash and state remains intact
+        runOnIdle {
+            isDarkThemeState = true
+        }
+        waitForIdle()
+        assertEquals(indexBeforeToggle, capturedListState.firstVisibleItemIndex)
+    }
+
+    @Test
+    fun `test open tasks for volunteering creation notifications multi child volunteering parent selection and points award`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = FamilyRepository(context = context)
+
+        val dad = repository.members.value.first { it.id == "m_dad" }
+        val kid1 = repository.members.value.first { it.id == "m_kid1" }
+        val kid2 = repository.members.value.first { it.id == "m_kid2" }
+
+        // =========================================================================
+        // Scenario 10: Blocking a child from creating an open task
+        // =========================================================================
+        repository.switchCurrentMember(kid1)
+        val illegalChildOpenTask = FamilyTask(
+            id = "open_task_illegal_child",
+            title = "משימה פתוחה של ילד",
+            category = TaskCategory.CLEANING,
+            assignedToMemberId = "",
+            isOpenForVolunteering = true,
+            dateEpochDay = LocalDate.now().toEpochDay(),
+            points = 30
+        )
+        assertFalse(
+            "Child must be blocked from creating an open task",
+            repository.addTask(illegalChildOpenTask)
+        )
+        assertNull(repository.tasks.value.find { it.id == "open_task_illegal_child" })
+
+        // =========================================================================
+        // Scenarios 9 & 11: Parent creates an open task -> notifies all children with Signature Pulse sound
+        // =========================================================================
+        repository.switchCurrentMember(dad)
+        val notifsBeforeOpenTask = repository.notifications.value.size
+        val openTask = FamilyTask(
+            id = "open_task_yard_25",
+            title = "סידור החצר",
+            description = "איסוף העלים וסידור הכיסאות",
+            category = TaskCategory.CLEANING,
+            assignedToMemberId = "",
+            isOpenForVolunteering = true,
+            dateEpochDay = LocalDate.now().toEpochDay(),
+            dueTimeFormatted = "17:00",
+            hasDueTime = true,
+            points = 25
+        )
+        assertTrue("Parent must be able to create an open task", repository.addTask(openTask))
+
+        val savedOpenTask = repository.tasks.value.first { it.id == "open_task_yard_25" }
+        assertTrue(savedOpenTask.isOpenForVolunteering)
+        assertEquals("", savedOpenTask.assignedToMemberId)
+        assertTrue(savedOpenTask.isUnassignedOpenTask)
+        assertFalse("Open task must not use child-to-child swap/volunteer flow", savedOpenTask.isEligibleForChildProposal())
+
+        // Verify notification was generated for all family children with Signature Pulse sound
+        assertEquals(notifsBeforeOpenTask + 1, repository.notifications.value.size)
+        val openTaskNotif = repository.notifications.value.first()
+        assertTrue(openTaskNotif.title.contains("משימה פתוחה להתנדבות"))
+        assertTrue(openTaskNotif.message.contains("סידור החצר"))
+        assertTrue(openTaskNotif.message.contains("25"))
+        // Verify OPEN_TASK_CREATED maps to SoundUsageType.TASK_CREATED whose default is FamilyTasks Signature Pulse
+        com.example.notifications.FamilySoundManager.clearAllSoundPrefsForTesting(context)
+        val openTaskCreatedSoundCfg = com.example.notifications.FamilySoundManager.getSoundConfigForUsage(
+            context,
+            com.example.notifications.SoundUsageType.TASK_CREATED
+        )
+        assertEquals("LIBRARY:familytasks_signature_pulse", openTaskCreatedSoundCfg.soundId)
+
+        // =========================================================================
+        // Scenario 12: Single child volunteering for an open task (+ duplicate guard + cancel & re-volunteer)
+        // =========================================================================
+        repository.switchCurrentMember(kid1)
+        val kid1PointsBeforeVolunteer = repository.members.value.first { it.id == kid1.id }.earnedPoints
+        val vol1Res = repository.volunteerForOpenTaskAsync("open_task_yard_25", "אני אשמח לסדר את החצר!")
+        assertTrue("Child 1 must be able to volunteer for open task", vol1Res.isSuccess)
+        val vol1Proposal = vol1Res.getOrThrow()
+        assertTrue(vol1Proposal.isOpenTaskVolunteer)
+        assertEquals(com.example.model.TaskProposalStatus.PENDING_PARENT_APPROVAL, vol1Proposal.status)
+        assertEquals("", vol1Proposal.targetChildId)
+        assertEquals(
+            "Volunteering alone must NOT grant points before completion and parent approval",
+            kid1PointsBeforeVolunteer,
+            repository.members.value.first { it.id == kid1.id }.earnedPoints
+        )
+        assertEquals(
+            "Task must remain unassigned until parent selects a volunteer",
+            "",
+            repository.tasks.value.first { it.id == "open_task_yard_25" }.assignedToMemberId
+        )
+
+        // Duplicate volunteer request by the same child for the same task is blocked
+        val duplicateVol1 = repository.volunteerForOpenTaskAsync("open_task_yard_25")
+        assertTrue("Same child must not be able to create duplicate active volunteer requests for the same task", duplicateVol1.isFailure)
+
+        // Child 1 can cancel their pending request and then volunteer again
+        assertTrue(repository.cancelTaskProposalAsync(vol1Proposal.id).isSuccess)
+        assertEquals(
+            com.example.model.TaskProposalStatus.CANCELLED,
+            repository.taskProposals.value.first { it.id == vol1Proposal.id }.status
+        )
+        val reVol1Proposal = repository.volunteerForOpenTaskAsync("open_task_yard_25").getOrThrow()
+        assertEquals(com.example.model.TaskProposalStatus.PENDING_PARENT_APPROVAL, reVol1Proposal.status)
+
+        // =========================================================================
+        // Scenario 13: Multiple children volunteering for the same open task
+        // =========================================================================
+        repository.switchCurrentMember(kid2)
+        val vol2Proposal = repository.volunteerForOpenTaskAsync("open_task_yard_25", "גם אני רוצה להתנדב!").getOrThrow()
+        assertTrue(vol2Proposal.isOpenTaskVolunteer)
+        assertEquals(com.example.model.TaskProposalStatus.PENDING_PARENT_APPROVAL, vol2Proposal.status)
+
+        val pendingVolunteersForYard = repository.taskProposals.value.filter {
+            it.primaryTaskId == "open_task_yard_25" &&
+                it.isOpenTaskVolunteer &&
+                it.status == com.example.model.TaskProposalStatus.PENDING_PARENT_APPROVAL
+        }
+        assertEquals("Both children's volunteer requests must be active and visible to parents", 2, pendingVolunteersForYard.size)
+
+        // =========================================================================
+        // Scenario 14: Parent selects a volunteer -> assigns task + closes competing requests + blocks double assignment
+        // =========================================================================
+        // Child cannot approve/select a volunteer
+        assertTrue(repository.selectVolunteerForOpenTaskAsync(vol2Proposal.id).isFailure)
+
+        repository.switchCurrentMember(dad)
+        val selectedProposal = repository.selectVolunteerForOpenTaskAsync(vol2Proposal.id).getOrThrow()
+        assertEquals(com.example.model.TaskProposalStatus.APPROVED_BY_PARENT, selectedProposal.status)
+
+        // Verify task is now assigned to kid2 and removed from open tasks
+        val assignedTask = repository.tasks.value.first { it.id == "open_task_yard_25" }
+        assertEquals("Task must be assigned to the chosen child (kid2)", kid2.id, assignedTask.assignedToMemberId)
+        assertFalse("Task must be removed from open tasks (isOpenForVolunteering = false)", assignedTask.isOpenForVolunteering)
+        assertFalse(assignedTask.isUnassignedOpenTask)
+
+        // Verify competing volunteer request (kid1) was automatically closed as CLOSED_NOT_SELECTED
+        val closedCompetingProposal = repository.taskProposals.value.first { it.id == reVol1Proposal.id }
+        assertEquals(
+            "Competing volunteer request must be closed as CLOSED_NOT_SELECTED",
+            com.example.model.TaskProposalStatus.CLOSED_NOT_SELECTED,
+            closedCompetingProposal.status
+        )
+
+        // Prevent double-assignment: trying to select kid1's proposal afterwards must fail
+        val doubleAssignAttempt = repository.selectVolunteerForOpenTaskAsync(reVol1Proposal.id)
+        assertTrue("Double-assignment of an already assigned open task must be blocked", doubleAssignAttempt.isFailure)
+
+        // =========================================================================
+        // Scenario 15: Completing the assigned open task, parent approval, and granting points
+        // =========================================================================
+        val kid2PointsBeforeComplete = repository.members.value.first { it.id == kid2.id }.earnedPoints
+        repository.switchCurrentMember(kid2)
+        assertTrue("Chosen volunteer (kid2) must be able to mark the task completed", repository.toggleTaskCompletionAsync("open_task_yard_25").isSuccess)
+        assertTrue(repository.tasks.value.first { it.id == "open_task_yard_25" }.isCompleted)
+        assertFalse(repository.tasks.value.first { it.id == "open_task_yard_25" }.approvedByParent)
+        assertEquals(
+            "Points must wait for parent approval",
+            kid2PointsBeforeComplete,
+            repository.members.value.first { it.id == kid2.id }.earnedPoints
+        )
+
+        // Parent approves the completed task -> kid2 receives the 25 points!
+        repository.switchCurrentMember(dad)
+        assertTrue("Parent approval of completed task must succeed", repository.approveTaskCompletionAsync("open_task_yard_25").isSuccess)
+        val finalTask = repository.tasks.value.first { it.id == "open_task_yard_25" }
+        assertTrue(finalTask.isCompleted)
+        assertTrue(finalTask.approvedByParent)
+        assertEquals(
+            "Chosen volunteer (kid2) must receive the 25 task points upon parent approval",
+            kid2PointsBeforeComplete + 25,
+            repository.members.value.first { it.id == kid2.id }.earnedPoints
+        )
+
+        // =========================================================================
+        // Scenario 16: Concurrent / Cross-Parent Conflict Detection in selectVolunteerForOpenTaskAsync
+        // =========================================================================
+        val conflictOpenTask = FamilyTask(
+            id = "open_task_conflict_99",
+            title = "ניקוי שולחן האוכל",
+            category = TaskCategory.CLEANING,
+            assignedToMemberId = "",
+            isOpenForVolunteering = true,
+            dateEpochDay = LocalDate.now().toEpochDay(),
+            points = 15
+        )
+        assertTrue(repository.addTask(conflictOpenTask))
+
+        repository.switchCurrentMember(kid1)
+        val conflictVol1 = repository.volunteerForOpenTaskAsync("open_task_conflict_99", "רועי מתנדב").getOrThrow()
+        repository.switchCurrentMember(kid2)
+        val conflictVol2 = repository.volunteerForOpenTaskAsync("open_task_conflict_99", "מאיה מתנדבת").getOrThrow()
+
+        // 16A: Two concurrent parent approval calls launched simultaneously for different volunteers ->
+        //      Only ONE succeeds; the second is rejected with a conflict error!
+        repository.switchCurrentMember(dad)
+        val startGate = java.util.concurrent.CountDownLatch(1)
+        val doneGate = java.util.concurrent.CountDownLatch(2)
+        val res1Ref = java.util.concurrent.atomic.AtomicReference<Result<com.example.model.TaskCollaborationProposal>>()
+        val res2Ref = java.util.concurrent.atomic.AtomicReference<Result<com.example.model.TaskCollaborationProposal>>()
+        Thread {
+            startGate.await()
+            res1Ref.set(runBlocking { repository.selectVolunteerForOpenTaskAsync(conflictVol1.id) })
+            doneGate.countDown()
+        }.start()
+        Thread {
+            startGate.await()
+            res2Ref.set(runBlocking { repository.selectVolunteerForOpenTaskAsync(conflictVol2.id) })
+            doneGate.countDown()
+        }.start()
+        startGate.countDown()
+        doneGate.await()
+        val res1 = res1Ref.get()!!
+        val res2 = res2Ref.get()!!
+        assertTrue(
+            "Exactly one of two concurrent parent approvals for different volunteers must succeed",
+            (res1.isSuccess && res2.isFailure) || (res1.isFailure && res2.isSuccess)
+        )
+        val afterConcurrentTask = repository.tasks.value.first { it.id == "open_task_conflict_99" }
+        assertFalse(afterConcurrentTask.isOpenForVolunteering)
+        assertTrue(afterConcurrentTask.assignedToMemberId == kid1.id || afterConcurrentTask.assignedToMemberId == kid2.id)
+        val winningProposalId = if (afterConcurrentTask.assignedToMemberId == kid1.id) conflictVol1.id else conflictVol2.id
+        val losingProposalId = if (afterConcurrentTask.assignedToMemberId == kid1.id) conflictVol2.id else conflictVol1.id
+        assertEquals(
+            com.example.model.TaskProposalStatus.APPROVED_BY_PARENT,
+            repository.taskProposals.value.first { it.id == winningProposalId }.status
+        )
+        assertEquals(
+            com.example.model.TaskProposalStatus.CLOSED_NOT_SELECTED,
+            repository.taskProposals.value.first { it.id == losingProposalId }.status
+        )
+
+        // 16B: Cross-device conflict detection when Parent B on another device already approved kid2 in Firestore
+        //      right before Parent A clicks approve on kid1
+        val remoteConflictTask = FamilyTask(
+            id = "open_task_remote_race_100",
+            title = "קיפול כביסה",
+            category = TaskCategory.CLEANING,
+            assignedToMemberId = "",
+            isOpenForVolunteering = true,
+            dateEpochDay = LocalDate.now().toEpochDay(),
+            points = 20
+        )
+        assertTrue(repository.addTask(remoteConflictTask))
+        repository.switchCurrentMember(kid1)
+        val raceVol1 = repository.volunteerForOpenTaskAsync("open_task_remote_race_100").getOrThrow()
+        repository.switchCurrentMember(kid2)
+        val raceVol2 = repository.volunteerForOpenTaskAsync("open_task_remote_race_100").getOrThrow()
+
+        repository.switchCurrentMember(dad)
+        // Simulate that Parent 2 on another device just committed an approval of raceVol2 (kid2) in Firestore
+        repository.remoteTaskConflictStateProvider = { queriedTaskId ->
+            if (queriedTaskId == "open_task_remote_race_100") {
+                remoteConflictTask.copy(
+                    assignedToMemberId = kid2.id,
+                    isOpenForVolunteering = false,
+                    transferProposalId = raceVol2.id
+                )
+            } else {
+                null
+            }
+        }
+        val staleParentApproval = repository.selectVolunteerForOpenTaskAsync(raceVol1.id)
+        repository.remoteTaskConflictStateProvider = null
+
+        assertTrue(
+            "Approval must fail with conflict when remote task was already assigned by another parent",
+            staleParentApproval.isFailure
+        )
+        assertTrue(
+            staleParentApproval.exceptionOrNull()?.message?.contains("כבר שויכה למתנדב אחר") == true
+        )
+        assertEquals(
+            "Task must reflect the winning remote volunteer (kid2) and not be overwritten by stale parent approval",
+            kid2.id,
+            repository.tasks.value.first { it.id == "open_task_remote_race_100" }.assignedToMemberId
+        )
+        assertEquals(
+            com.example.model.TaskProposalStatus.CLOSED_NOT_SELECTED,
+            repository.taskProposals.value.first { it.id == raceVol1.id }.status
+        )
+
+        // =========================================================================
+        // Scenario 17: OPEN_TASK_CREATED Notification Deduplication (Foreground & Closed App)
+        // =========================================================================
+        org.robolectric.Shadows.shadowOf(context as android.app.Application)
+            .grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+        com.example.notifications.FcmTokenManager.clearAllDispatchedEventsForTesting(context)
+        val notifManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val shadowNotifManager = org.robolectric.Shadows.shadowOf(notifManager)
+        notifManager.cancelAll()
+
+        // 17A: Foreground deduplication between local Firestore listener key ("open_task:task_fg_1")
+        //      and Cloud Function onFamilyTaskWritten FCM key ("open_task:task_fg_1:m_kid1")
+        assertTrue(
+            "First local dispatch of open_task:task_fg_1 must be accepted",
+            com.example.notifications.FcmTokenManager.markEventDispatchedIfNew("open_task:task_fg_1", context)
+        )
+        com.example.util.NotificationHelper.showIncomingFcmNotification(
+            context = context,
+            title = "📢 משימה פתוחה להתנדבות!",
+            message = "משימה פתוחה חדשה: \"סידור הסלון\"",
+            eventKey = "open_task:task_fg_1",
+            taskId = "task_fg_1",
+            eventType = com.example.notifications.FcmTokenManager.EVENT_OPEN_TASK_CREATED
+        )
+        assertEquals(1, shadowNotifManager.allNotifications.size)
+
+        // Now FCM arrives from onFamilyTaskWritten with recipient-suffixed key "open_task:task_fg_1:m_kid1"
+        val fcmDuplicateHandled = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+            context = context,
+            data = mapOf(
+                "eventKey" to "open_task:task_fg_1:${kid1.id}",
+                "canonicalEventKey" to "open_task:task_fg_1",
+                "eventType" to com.example.notifications.FcmTokenManager.EVENT_OPEN_TASK_CREATED,
+                "familyId" to "fam_israeli_8492",
+                "taskId" to "task_fg_1",
+                "targetUid" to kid1.id,
+                "actorUid" to dad.id,
+                "title" to "📢 משימה פתוחה להתנדבות!",
+                "body" to "משימה פתוחה חדשה: \"סידור הסלון\""
+            ),
+            signedInUidOverride = kid1.id
+        )
+        assertFalse(
+            "Duplicate FCM delivery for the same OPEN_TASK_CREATED event must be suppressed when local listener already handled it",
+            fcmDuplicateHandled
+        )
+        assertEquals(
+            "Only a single OS notification may exist for task_fg_1",
+            1,
+            shadowNotifManager.allNotifications.size
+        )
+
+        // 17B: Closed App / Background deduplication surviving process restart via SharedPreferences
+        notifManager.cancelAll()
+        val bgFcmFirstDelivery = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+            context = context,
+            data = mapOf(
+                "eventKey" to "open_task:task_bg_2:${kid1.id}",
+                "canonicalEventKey" to "open_task:task_bg_2",
+                "eventType" to com.example.notifications.FcmTokenManager.EVENT_OPEN_TASK_CREATED,
+                "familyId" to "fam_israeli_8492",
+                "taskId" to "task_bg_2",
+                "targetUid" to kid1.id,
+                "actorUid" to dad.id,
+                "title" to "📢 משימה פתוחה להתנדבות!",
+                "body" to "משימה פתוחה חדשה: \"הוצאת הכלב\""
+            ),
+            signedInUidOverride = kid1.id
+        )
+        assertTrue("First background FCM delivery for task_bg_2 must be displayed", bgFcmFirstDelivery)
+        assertEquals(1, shadowNotifManager.allNotifications.size)
+
+        // Simulate app process death and cold start (clearing in-memory set while keeping SharedPreferences)
+        com.example.notifications.FcmTokenManager.clearInMemoryDispatchedEventsOnlyForTesting()
+
+        // When the app opens and the local Firestore listener or a retried FCM message checks "open_task:task_bg_2",
+        // SharedPreferences-backed deduplication must block the duplicate!
+        assertFalse(
+            "SharedPreferences-backed deduplication must remember open_task:task_bg_2 across process restarts",
+            com.example.notifications.FcmTokenManager.markEventDispatchedIfNew("open_task:task_bg_2", context)
+        )
+        val bgFcmRetryAfterRestart = com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+            context = context,
+            data = mapOf(
+                "eventKey" to "open_task:task_bg_2:${kid1.id}",
+                "eventType" to com.example.notifications.FcmTokenManager.EVENT_OPEN_TASK_CREATED,
+                "familyId" to "fam_israeli_8492",
+                "taskId" to "task_bg_2",
+                "targetUid" to kid1.id,
+                "actorUid" to dad.id,
+                "title" to "📢 משימה פתוחה להתנדבות!",
+                "body" to "משימה פתוחה חדשה: \"הוצאת הכלב\""
+            ),
+            signedInUidOverride = kid1.id
+        )
+        assertFalse("Retried FCM after cold restart must be blocked as duplicate", bgFcmRetryAfterRestart)
+        assertEquals(1, shadowNotifManager.allNotifications.size)
+    }
 }
+
+
 
 
 

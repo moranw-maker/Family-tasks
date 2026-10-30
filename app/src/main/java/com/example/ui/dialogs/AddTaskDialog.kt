@@ -77,8 +77,14 @@ fun AddTaskDialog(
     }
     var title by remember(editKey) { mutableStateOf(taskToEdit?.title ?: "") }
     var description by remember(editKey) { mutableStateOf(taskToEdit?.description ?: "") }
+    var isOpenForVolunteering by remember(editKey) {
+        mutableStateOf(taskToEdit?.isOpenForVolunteering ?: false)
+    }
     var selectedMemberId by remember(editKey) {
-        mutableStateOf(taskToEdit?.assignedToMemberId ?: (members.firstOrNull()?.id ?: ""))
+        mutableStateOf(
+            if (taskToEdit?.isOpenForVolunteering == true) ""
+            else taskToEdit?.assignedToMemberId ?: (members.firstOrNull()?.id ?: "")
+        )
     }
     var selectedCategory by remember(editKey) { mutableStateOf(taskToEdit?.category ?: TaskCategory.CLEANING) }
     var selectedPriority by remember(editKey) { mutableStateOf(taskToEdit?.priority ?: TaskPriority.MEDIUM) }
@@ -248,54 +254,135 @@ fun AddTaskDialog(
                                 .testTag("task_title_input")
                         )
 
-                        // PRIMARY ROW 2: Single-Row Family Member Selection (no clipping)
-                        Row(
+                        // PRIMARY ROW 2: Open Task Toggle ("📢 משימה פתוחה להתנדבות") + Single-Row Family Member Selection
+                        Column(
                             modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Text(
-                                text = if (isHebrew) "שיוך:" else "To:",
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            )
-                            LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                contentPadding = PaddingValues(horizontal = 4.dp),
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (isOpenForVolunteering) {
+                                    GoogleBlueLight
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                },
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isOpenForVolunteering) GoogleBlue else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                ),
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("assign_member_row")
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable {
+                                        val nextOpen = !isOpenForVolunteering
+                                        isOpenForVolunteering = nextOpen
+                                        if (nextOpen) {
+                                            selectedMemberId = ""
+                                        } else if (selectedMemberId.isBlank()) {
+                                            selectedMemberId = members.firstOrNull()?.id.orEmpty()
+                                        }
+                                    }
+                                    .testTag("open_task_volunteering_toggle")
                             ) {
-                                items(members, key = { it.id }) { member ->
-                                    val isSelected = member.id == selectedMemberId
-                                    Surface(
-                                        shape = RoundedCornerShape(14.dp),
-                                        color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
-                                        border = BorderStroke(
-                                            1.dp,
-                                            if (isSelected) GoogleBlue else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                                        ),
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(14.dp))
-                                            .clickable { selectedMemberId = member.id }
-                                            .testTag("assign_member_chip_${member.id}")
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        modifier = Modifier.weight(1f)
                                     ) {
-                                        Row(
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                        ) {
-                                            Text(text = member.avatarEmoji, fontSize = 13.sp)
-                                            Text(
-                                                text = member.name,
-                                                style = MaterialTheme.typography.labelSmall.copy(
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface
-                                                ),
-                                                maxLines = 1
+                                        Text(
+                                            text = if (isHebrew) "📢 משימה פתוחה להתנדבות" else "📢 Open Task for Volunteering",
+                                            style = MaterialTheme.typography.labelMedium.copy(
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = if (isOpenForVolunteering) GoogleBlueDark else MaterialTheme.colorScheme.onSurface
                                             )
+                                        )
+                                        if (isOpenForVolunteering) {
+                                            Text(
+                                                text = if (isHebrew) "• פתוח לכל הילדים" else "• All children",
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    color = GoogleBlueDark,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            )
+                                        }
+                                    }
+                                    Switch(
+                                        checked = isOpenForVolunteering,
+                                        onCheckedChange = { nextOpen ->
+                                            isOpenForVolunteering = nextOpen
+                                            if (nextOpen) {
+                                                selectedMemberId = ""
+                                            } else if (selectedMemberId.isBlank()) {
+                                                selectedMemberId = members.firstOrNull()?.id.orEmpty()
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .height(24.dp)
+                                            .testTag("open_task_volunteering_switch")
+                                    )
+                                }
+                            }
+
+                            AnimatedVisibility(visible = !isOpenForVolunteering) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = if (isHebrew) "שיוך:" else "To:",
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    )
+                                    LazyRow(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 4.dp),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("assign_member_row")
+                                    ) {
+                                        items(members, key = { it.id }) { member ->
+                                            val isSelected = !isOpenForVolunteering && member.id == selectedMemberId
+                                            Surface(
+                                                shape = RoundedCornerShape(14.dp),
+                                                color = if (isSelected) GoogleBlue else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                                                border = BorderStroke(
+                                                    1.dp,
+                                                    if (isSelected) GoogleBlue else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                                ),
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(14.dp))
+                                                    .clickable {
+                                                        isOpenForVolunteering = false
+                                                        selectedMemberId = member.id
+                                                    }
+                                                    .testTag("assign_member_chip_${member.id}")
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    Text(text = member.avatarEmoji, fontSize = 13.sp)
+                                                    Text(
+                                                        text = member.name,
+                                                        style = MaterialTheme.typography.labelSmall.copy(
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface
+                                                        ),
+                                                        maxLines = 1
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -888,13 +975,15 @@ fun AddTaskDialog(
                                         TaskReminderOffset.NONE
                                     }
                                     val effectiveReminderEnabled = effectiveHasDueTime && effectiveReminderOffset != TaskReminderOffset.NONE
+                                    val effectiveAssignee = if (isOpenForVolunteering) "" else selectedMemberId
                                     val nowMillis = System.currentTimeMillis()
                                     val taskResult = if (taskToEdit != null) {
                                         taskToEdit.copy(
                                             title = title.trim(),
                                             description = description.trim(),
                                             category = selectedCategory,
-                                            assignedToMemberId = selectedMemberId,
+                                            assignedToMemberId = effectiveAssignee,
+                                            isOpenForVolunteering = isOpenForVolunteering,
                                             dateEpochDay = preservedEpochDay,
                                             dueTimeFormatted = normalized24h,
                                             hasDueTime = effectiveHasDueTime,
@@ -911,7 +1000,8 @@ fun AddTaskDialog(
                                             title = title.trim(),
                                             description = description.trim(),
                                             category = selectedCategory,
-                                            assignedToMemberId = selectedMemberId,
+                                            assignedToMemberId = effectiveAssignee,
+                                            isOpenForVolunteering = isOpenForVolunteering,
                                             dateEpochDay = preservedEpochDay,
                                             dueTimeFormatted = normalized24h,
                                             hasDueTime = effectiveHasDueTime,
