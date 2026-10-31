@@ -184,19 +184,33 @@ async function resolveVerifiedRecipientUids(db, familyId, eventSpec) {
     return true;
   });
 
-  if (eventSpec.targetMode === "SINGLE_MEMBER") {
-    const isMember = validMemberDocs.some((doc) => doc.id === eventSpec.targetUid);
-    if (!isMember) return [];
-    // Do not notify the actor who performed the action themselves (except task approvals and alarm deletions)
-    if (
-      eventSpec.actorUid &&
-      eventSpec.actorUid === eventSpec.targetUid &&
-      eventSpec.eventType !== "TASK_APPROVED" &&
-      eventSpec.action !== "DELETE"
-    ) {
-      return [];
-    }
-    return [eventSpec.targetUid];
+  if (eventSpec.targetMode === "SINGLE_MEMBER" || eventSpec.targetMode === "MULTIPLE_MEMBERS") {
+    const candidateUids =
+      Array.isArray(eventSpec.targetUids) && eventSpec.targetUids.length > 0
+        ? eventSpec.targetUids
+        : eventSpec.targetUid
+          ? [eventSpec.targetUid]
+          : [];
+    const validMemberIds = new Set(validMemberDocs.map((doc) => doc.id));
+    return Array.from(
+      new Set(
+        candidateUids
+          .map((uid) => String(uid || "").trim())
+          .filter((uid) => uid.length > 0)
+      )
+    ).filter((uid) => {
+      if (!validMemberIds.has(uid)) return false;
+      // Do not notify the actor who performed the action themselves (except task approvals and alarm deletions)
+      if (
+        eventSpec.actorUid &&
+        eventSpec.actorUid === uid &&
+        eventSpec.eventType !== "TASK_APPROVED" &&
+        eventSpec.action !== "DELETE"
+      ) {
+        return false;
+      }
+      return true;
+    });
   }
 
   if (eventSpec.targetMode === "FAMILY_PARENTS") {
@@ -614,27 +628,52 @@ exports.onFamilyTaskWritten = onDocumentWritten(
  * - The write is only a target-device schedule acknowledgement (`scheduleStatus`, `acknowledgedBy*`,
  *   `nextTriggerAtMillis`, `lastScheduleError`) with no alarm schedule/configuration changes.
  */
+/**
+ * Extracts deduplicated target member UIDs from an alarm document.
+ * Prefers the multi-recipient `assignedMemberIds` array when present and non-empty,
+ * and falls back to legacy single-recipient `assignedToMemberId` or `assignedMemberId`.
+ */
+function extractAlarmTargetUids(data) {
+  if (!data || typeof data !== "object") return [];
+  const rawList = Array.isArray(data.assignedMemberIds) ? data.assignedMemberIds : [];
+  const normalizedList = Array.from(
+    new Set(
+      rawList
+        .map((id) => String(id || "").trim())
+        .filter((id) => id.length > 0)
+    )
+  );
+  if (normalizedList.length > 0) {
+    return normalizedList;
+  }
+  const single = String(data.assignedToMemberId || data.assignedMemberId || "").trim();
+  return single ? [single] : [];
+}
+
 function classifyAlarmSyncEvent(beforeData, afterData, alarmId) {
   if (!beforeData && !afterData) return null;
 
   // Case 1: Hard document deletion (afterData is null)
   if (beforeData && !afterData) {
-    const targetUid = (beforeData.assignedToMemberId || beforeData.assignedMemberId || "").trim();
-    if (!targetUid) return null;
-    const createdByUid = (beforeData.createdByMemberId || "").trim();
-    const rawUpdatedByUid = (beforeData.updatedByUid || "").trim();
-    const rawDeletedByUid = (beforeData.deletedByUid || "").trim();
-    // Never mistake the target child (who acknowledged local scheduling) for the actor who deleted the alarm
+    const beforeTargetUids = extractAlarmTargetUids(beforeData);
+    if (beforeTargetUids.length === 0) return null;
+    const primaryTargetUid = beforeTargetUids[0];
+    const isOnlyTarget = (uid) => beforeTargetUids.length === 1 && beforeTargetUids[0] === uid;
+    const createdByUid = String(beforeData.createdByMemberId || "").trim();
+    const rawUpdatedByUid = String(beforeData.updatedByUid || "").trim();
+    const rawDeletedByUid = String(beforeData.deletedByUid || "").trim();
+    // Never mistake a target child (who acknowledged local scheduling) for the actor who deleted the alarm
     const actorUid =
       rawDeletedByUid ||
-      (rawUpdatedByUid && rawUpdatedByUid !== targetUid ? rawUpdatedByUid : "") ||
-      (createdByUid && createdByUid !== targetUid ? createdByUid : "");
+      (rawUpdatedByUid && !isOnlyTarget(rawUpdatedByUid) ? rawUpdatedByUid : "") ||
+      (createdByUid && !isOnlyTarget(createdByUid) ? createdByUid : "");
     return {
       eventType: "ALARM_SYNC_REQUIRED",
       action: "DELETE",
-      eventKey: `alarm_del:${alarmId}:${targetUid}:${Date.now()}`,
-      targetMode: "SINGLE_MEMBER",
-      targetUid,
+      eventKey: `alarm_del:${alarmId}:${beforeTargetUids.join(",")}:${Date.now()}`,
+      targetMode: beforeTargetUids.length === 1 ? "SINGLE_MEMBER" : "MULTIPLE_MEMBERS",
+      targetUid: primaryTargetUid,
+      targetUids: beforeTargetUids,
       actorUid,
       updatedAt: String(Date.now())
     };
@@ -645,67 +684,73 @@ function classifyAlarmSyncEvent(beforeData, afterData, alarmId) {
   const beforeDeleted = beforeData
     ? Boolean(beforeData.isDeleted) || beforeData.scheduleStatus === "DELETED"
     : false;
-  const afterTargetUid = (afterData.assignedToMemberId || afterData.assignedMemberId || "").trim();
-  const beforeTargetUid = beforeData
-    ? (beforeData.assignedToMemberId || beforeData.assignedMemberId || "").trim()
-    : "";
-  const createdByUid = (afterData.createdByMemberId || (beforeData && beforeData.createdByMemberId) || "").trim();
-  const rawUpdatedByUid = (afterData.updatedByUid || "").trim();
-  const rawDeletedByUid = (afterData.deletedByUid || "").trim();
-  const actorUid = (rawUpdatedByUid || createdByUid || "").trim();
+  const afterTargetUids = extractAlarmTargetUids(afterData);
+  const beforeTargetUids = beforeData ? extractAlarmTargetUids(beforeData) : [];
+  const createdByUid = String(afterData.createdByMemberId || (beforeData && beforeData.createdByMemberId) || "").trim();
+  const rawUpdatedByUid = String(afterData.updatedByUid || "").trim();
+  const rawDeletedByUid = String(afterData.deletedByUid || "").trim();
+  const actorUid = String(rawUpdatedByUid || createdByUid || "").trim();
   const stamp = String(afterData.updatedAt || afterData.createdAtMillis || Date.now());
 
   if (afterDeleted && !beforeDeleted) {
-    const targetUid = afterTargetUid || beforeTargetUid;
-    if (!targetUid) return null;
+    const deleteTargetUids = Array.from(new Set([...beforeTargetUids, ...afterTargetUids]));
+    if (deleteTargetUids.length === 0) return null;
+    const isOnlyTarget = (uid) => deleteTargetUids.length === 1 && deleteTargetUids[0] === uid;
     const deleteActorUid =
       rawDeletedByUid ||
-      (rawUpdatedByUid && rawUpdatedByUid !== targetUid ? rawUpdatedByUid : "") ||
-      (createdByUid && createdByUid !== targetUid ? createdByUid : "");
+      (rawUpdatedByUid && !isOnlyTarget(rawUpdatedByUid) ? rawUpdatedByUid : "") ||
+      (createdByUid && !isOnlyTarget(createdByUid) ? createdByUid : "");
     return {
       eventType: "ALARM_SYNC_REQUIRED",
       action: "DELETE",
-      eventKey: `alarm_softdel:${alarmId}:${targetUid}:${stamp}`,
-      targetMode: "SINGLE_MEMBER",
-      targetUid,
+      eventKey: `alarm_softdel:${alarmId}:${deleteTargetUids.join(",")}:${stamp}`,
+      targetMode: deleteTargetUids.length === 1 ? "SINGLE_MEMBER" : "MULTIPLE_MEMBERS",
+      targetUid: deleteTargetUids[0],
+      targetUids: deleteTargetUids,
       actorUid: deleteActorUid,
       updatedAt: stamp
     };
   }
 
-  if (!afterTargetUid) return null;
-
-  // Do not send background FCM push to the actor who performed the write on their own device
-  if (actorUid && actorUid === afterTargetUid) {
-    return null;
-  }
-
-  // Case 3: Newly created alarm for a child
+  // Case 3: Newly created alarm for one or more recipients
   if (!beforeData) {
+    if (afterTargetUids.length === 0) return null;
+    // Do not send background FCM push to the actor who performed the write on their own device
+    const createTargetUids = actorUid
+      ? afterTargetUids.filter((uid) => uid !== actorUid)
+      : afterTargetUids;
+    if (createTargetUids.length === 0) return null;
+
     return {
       eventType: "ALARM_SYNC_REQUIRED",
       action: "CREATE",
-      eventKey: `alarm_create:${alarmId}:${afterTargetUid}:${stamp}`,
-      targetMode: "SINGLE_MEMBER",
-      targetUid: afterTargetUid,
+      eventKey: `alarm_create:${alarmId}:${createTargetUids.join(",")}:${stamp}`,
+      targetMode: createTargetUids.length === 1 ? "SINGLE_MEMBER" : "MULTIPLE_MEMBERS",
+      targetUid: createTargetUids[0],
+      targetUids: createTargetUids,
       actorUid,
       updatedAt: stamp
     };
   }
 
   // Check whether any meaningful alarm schedule or configuration field changed
-  // (ignoring target-device acknowledgement fields to avoid infinite loops)
+  // (ignoring target-device acknowledgement fields such as `scheduleStatus`,
+  // `acknowledgedByMemberId`, `acknowledgedByMemberIds`, `acknowledgedByDeviceName`,
+  // `acknowledgedAtMillis`, `nextTriggerAtMillis`, `lastScheduleError` to avoid infinite loops)
   const beforeDays = Array.isArray(beforeData.daysOfWeek) ? beforeData.daysOfWeek.join(",") : "";
   const afterDays = Array.isArray(afterData.daysOfWeek) ? afterData.daysOfWeek.join(",") : "";
   const beforeEnabled = beforeData.isEnabled !== false;
   const afterEnabled = afterData.isEnabled !== false;
 
-  const scheduleOrConfigChanged =
+  const addedTargetUids = afterTargetUids.filter((uid) => !beforeTargetUids.includes(uid));
+  const removedTargetUids = beforeTargetUids.filter((uid) => !afterTargetUids.includes(uid));
+  const recipientsChanged = addedTargetUids.length > 0 || removedTargetUids.length > 0;
+
+  const coreScheduleOrSettingsChanged =
     beforeEnabled !== afterEnabled ||
     Number(beforeData.hour) !== Number(afterData.hour) ||
     Number(beforeData.minute) !== Number(afterData.minute) ||
     beforeDays !== afterDays ||
-    beforeTargetUid !== afterTargetUid ||
     String(beforeData.title || "") !== String(afterData.title || "") ||
     String(beforeData.soundType || "") !== String(afterData.soundType || "") ||
     String(beforeData.customSoundUri || "") !== String(afterData.customSoundUri || "") ||
@@ -713,7 +758,22 @@ function classifyAlarmSyncEvent(beforeData, afterData, alarmId) {
     Number(beforeData.snoozeDurationMinutes || 5) !== Number(afterData.snoozeDurationMinutes || 5) ||
     Number(beforeData.volumePercent || 85) !== Number(afterData.volumePercent || 85);
 
-  if (!scheduleOrConfigChanged) {
+  if (!coreScheduleOrSettingsChanged && !recipientsChanged) {
+    return null;
+  }
+
+  // Determine which recipients need to synchronize:
+  // - If schedule/settings changed: all current recipients + any removed recipients (so removed recipients cancel locally).
+  // - If only recipients changed: only newly added recipients + removed recipients.
+  const rawAffectedUids = coreScheduleOrSettingsChanged
+    ? Array.from(new Set([...afterTargetUids, ...removedTargetUids]))
+    : Array.from(new Set([...addedTargetUids, ...removedTargetUids]));
+
+  const updateTargetUids = actorUid
+    ? rawAffectedUids.filter((uid) => uid !== actorUid)
+    : rawAffectedUids;
+
+  if (updateTargetUids.length === 0) {
     return null;
   }
 
@@ -725,9 +785,12 @@ function classifyAlarmSyncEvent(beforeData, afterData, alarmId) {
   return {
     eventType: "ALARM_SYNC_REQUIRED",
     action,
-    eventKey: `alarm_${action.toLowerCase()}:${alarmId}:${afterTargetUid}:${stamp}`,
-    targetMode: "SINGLE_MEMBER",
-    targetUid: afterTargetUid,
+    eventKey: `alarm_${action.toLowerCase()}:${alarmId}:${updateTargetUids.join(",")}:${stamp}`,
+    targetMode: updateTargetUids.length === 1 ? "SINGLE_MEMBER" : "MULTIPLE_MEMBERS",
+    targetUid: updateTargetUids[0],
+    targetUids: updateTargetUids,
+    addedTargetUids,
+    removedTargetUids,
     actorUid,
     updatedAt: stamp
   };
@@ -844,6 +907,7 @@ exports.onFamilyAlarmFirestoreWritten = onDocumentWritten(
         action: eventSpec.action,
         alarmId,
         targetUid: eventSpec.targetUid,
+        targetUids: eventSpec.targetUids || (eventSpec.targetUid ? [eventSpec.targetUid] : []),
         createdAt: Date.now()
       });
       return false;
@@ -864,6 +928,7 @@ exports.onFamilyAlarmFirestoreWritten = onDocumentWritten(
 exports.classifyTaskNotificationEvent = classifyTaskNotificationEvent;
 exports.classifyTaskReminderSyncEvents = classifyTaskReminderSyncEvents;
 exports.classifyAlarmSyncEvent = classifyAlarmSyncEvent;
+exports.extractAlarmTargetUids = extractAlarmTargetUids;
 exports.resolveVerifiedRecipientUids = resolveVerifiedRecipientUids;
 
 

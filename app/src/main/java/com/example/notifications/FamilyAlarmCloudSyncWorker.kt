@@ -530,6 +530,24 @@ object FamilyAlarmCloudSyncWorker {
                 }
             }
 
+            val previouslyPersistedIds = previouslyPersisted.map { it.id }.toSet()
+            val untargetedCancelledIds = mutableSetOf<String>()
+            remoteAlarms.forEach { remoteAlarm ->
+                val isTargetedHere = remoteAlarm.isTargetedAtDeviceMember(
+                    memberId = uid,
+                    authUid = uid,
+                    currentMemberName = memberName,
+                    isChildDevice = isChildDevice
+                )
+                if (!isTargetedHere && remoteAlarm.id in previouslyPersistedIds) {
+                    val isStillScheduled = FamilyAlarmScheduler.isAlarmLocallyScheduled(appCtx, remoteAlarm.id) ||
+                        FamilyAlarmScheduler.isSnoozeLocallyScheduled(appCtx, remoteAlarm.id)
+                    if (!isStillScheduled) {
+                        untargetedCancelledIds.add(remoteAlarm.id)
+                    }
+                }
+            }
+
             var transientAckWriteError: String? = null
 
             // 2. Confirm deleted alarm cancellations on member doc ONLY AFTER local AlarmManager cancellation succeeded
@@ -557,8 +575,11 @@ object FamilyAlarmCloudSyncWorker {
             }
 
             // 3. Write target-device schedule acknowledgement back to Firestore for remote alarms targeted at this device.
-            //    IMPORTANT: Do NOT overwrite updatedByUid here — acknowledgedByMemberId records who acknowledged local scheduling,
-            //    while updatedByUid records who last created/modified the alarm configuration.
+            //    IMPORTANT:
+            //    - Do NOT overwrite updatedByUid here — acknowledgedByMemberId / acknowledgedByMemberIds records who
+            //      acknowledged local scheduling, while updatedByUid records who last created/modified the alarm configuration.
+            //    - For multi-recipient alarms, each child writes their acknowledgement ONCE (via atomic FieldValue.arrayUnion(uid))
+            //      and never overwrites or ping-pongs when another child acknowledges or has a different local scheduleStatus.
             for (remoteAlarm in remoteAlarms) {
                 if (remoteAlarm.id in deletedIds) continue
                 val isTargetedHere = remoteAlarm.isTargetedAtDeviceMember(
@@ -582,17 +603,35 @@ object FamilyAlarmCloudSyncWorker {
                 }
                 val resolvedError = localRes?.errorMessage.orEmpty()
 
-                val needsAckWrite = remoteAlarm.scheduleStatus != resolvedStatus ||
-                    remoteAlarm.acknowledgedByMemberId != uid ||
-                    remoteAlarm.nextTriggerAtMillis != resolvedNextTrigger
+                val isMultiRecipient = remoteAlarm.effectiveAssignedMemberIds.size > 1
+                val isAlreadyAckedByThisMember = remoteAlarm.isAcknowledgedByMember(uid)
+
+                val needsAckWrite = if (isMultiRecipient) {
+                    !isAlreadyAckedByThisMember ||
+                        remoteAlarm.scheduleStatus == FamilyAlarm.STATUS_PENDING_TARGET_DEVICE
+                } else {
+                    !isAlreadyAckedByThisMember ||
+                        remoteAlarm.scheduleStatus != resolvedStatus ||
+                        remoteAlarm.nextTriggerAtMillis != resolvedNextTrigger
+                }
 
                 if (needsAckWrite) {
+                    val mergedScheduleStatus = if (
+                        isMultiRecipient &&
+                        remoteAlarm.scheduleStatus == FamilyAlarm.STATUS_EXACT_PERMISSION_NEEDED &&
+                        remoteAlarm.effectiveAcknowledgedMemberIds.any { it != uid }
+                    ) {
+                        FamilyAlarm.STATUS_EXACT_PERMISSION_NEEDED
+                    } else {
+                        resolvedStatus
+                    }
                     runCatching {
                         familyRef.collection("alarms").document(remoteAlarm.id)
                             .update(
                                 mapOf(
-                                    "scheduleStatus" to resolvedStatus,
+                                    "scheduleStatus" to mergedScheduleStatus,
                                     "acknowledgedByMemberId" to uid,
+                                    "acknowledgedByMemberIds" to FieldValue.arrayUnion(uid),
                                     "acknowledgedByDeviceName" to deviceModelLabel,
                                     "acknowledgedAtMillis" to System.currentTimeMillis(),
                                     "nextTriggerAtMillis" to resolvedNextTrigger,
@@ -609,6 +648,7 @@ object FamilyAlarmCloudSyncWorker {
             }
 
             val scheduledCount = scheduleResults.values.count { it.isScheduled }
+            val totalCancelledCount = (newlyCancelledIds + untargetedCancelledIds).size
 
             if (transientAckWriteError != null) {
                 return AlarmCloudReconciliationResult(
@@ -616,7 +656,7 @@ object FamilyAlarmCloudSyncWorker {
                     familyId = resolvedFamilyId,
                     uid = uid,
                     scheduledCount = scheduledCount,
-                    cancelledCount = newlyCancelledIds.size,
+                    cancelledCount = totalCancelledCount,
                     errorMessage = transientAckWriteError
                 )
             }
@@ -624,7 +664,7 @@ object FamilyAlarmCloudSyncWorker {
             Log.i(
                 TAG,
                 "Reconciled family alarms from Firestore (reason=$reason, familyId=$resolvedFamilyId, " +
-                    "remote=${remoteAlarms.size}, scheduled=$scheduledCount, deleted=${newlyCancelledIds.size})"
+                    "remote=${remoteAlarms.size}, scheduled=$scheduledCount, deleted=$totalCancelledCount)"
             )
 
             return AlarmCloudReconciliationResult(
@@ -632,7 +672,7 @@ object FamilyAlarmCloudSyncWorker {
                 familyId = resolvedFamilyId,
                 uid = uid,
                 scheduledCount = scheduledCount,
-                cancelledCount = newlyCancelledIds.size
+                cancelledCount = totalCancelledCount
             )
         } catch (e: Exception) {
             Log.w(TAG, "reconcileAlarmsFromFirestore failed (reason=$reason): ${e.message}")
@@ -698,6 +738,14 @@ object FamilyAlarmCloudSyncWorker {
         }?.ifEmpty { SchoolDay.allWeekDays } ?: SchoolDay.allWeekDays
         val isEnabled = doc.getBoolean("isEnabled") ?: true
         val emoji = doc.getString("ringtoneEmoji") ?: "⏰"
+        val ackSingle = doc.getString("acknowledgedByMemberId").orEmpty().trim()
+        val rawAckIds = (doc.get("acknowledgedByMemberIds") as? List<*>)
+            ?.mapNotNull { (it as? String)?.trim()?.takeIf { s -> s.isNotBlank() } }
+            .orEmpty()
+        val effectiveAckIds = buildList {
+            rawAckIds.forEach { if (it !in this) add(it) }
+            if (ackSingle.isNotBlank() && ackSingle !in this) add(ackSingle)
+        }
 
         return FamilyAlarm(
             id = doc.id,
@@ -726,7 +774,8 @@ object FamilyAlarmCloudSyncWorker {
             volumePercent = (doc.getLong("volumePercent") ?: 85L).toInt().coerceIn(10, 100),
             scheduleStatus = doc.getString("scheduleStatus")
                 ?: if (isEnabled) FamilyAlarm.STATUS_SCHEDULED_LOCALLY else FamilyAlarm.STATUS_DISABLED,
-            acknowledgedByMemberId = doc.getString("acknowledgedByMemberId").orEmpty(),
+            acknowledgedByMemberId = ackSingle,
+            acknowledgedByMemberIds = effectiveAckIds,
             acknowledgedByDeviceName = doc.getString("acknowledgedByDeviceName").orEmpty(),
             acknowledgedAtMillis = doc.getLong("acknowledgedAtMillis") ?: 0L,
             nextTriggerAtMillis = doc.getLong("nextTriggerAtMillis") ?: 0L,

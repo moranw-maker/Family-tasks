@@ -5779,6 +5779,343 @@ class ExampleRobolectricTest {
         assertEquals(listOf(kid1.name, kid2.name), savedEditorAlarm!!.assignedMemberNames)
         context.getSharedPreferences("family_tasks_ui_prefs", Context.MODE_PRIVATE).edit().clear().commit()
     }
+
+    @Test
+    fun `test multi recipient alarm sync 1 2 3 children add remove delete time change simultaneous ack ping pong prevention mixed version and boot restore`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val parentId = "uid_parent_dad"
+        val kid1Id = "uid_kid_noa_1"
+        val kid2Id = "uid_kid_yuval_2"
+        val kid3Id = "uid_kid_itay_3"
+
+        // 1. Legacy single-child alarm compatibility (only assignedMemberId / assignedToMemberId)
+        val legacySingleAlarm = com.example.model.FamilyAlarm(
+            id = "alarm_legacy_single_kid",
+            familyId = "fam_multi_test",
+            title = "שעון ישן לנועה",
+            hour = 6,
+            minute = 45,
+            assignedMemberId = kid1Id,
+            assignedToMemberId = kid1Id,
+            assignedMemberName = "נועה",
+            createdByMemberId = parentId,
+            createdByRole = "PARENT",
+            isPersonal = false,
+            isEnabled = true,
+            scheduleStatus = com.example.model.FamilyAlarm.STATUS_PENDING_TARGET_DEVICE
+        )
+        assertEquals(listOf(kid1Id), legacySingleAlarm.effectiveAssignedMemberIds)
+        assertTrue(legacySingleAlarm.isTargetedAtDeviceMember(memberId = kid1Id, authUid = kid1Id, currentMemberName = "נועה", isChildDevice = true))
+        assertFalse(legacySingleAlarm.isTargetedAtDeviceMember(memberId = kid2Id, authUid = kid2Id, currentMemberName = "יובל", isChildDevice = true))
+
+        // Schedule on Kid 1 device
+        val resSingleKid1 = com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
+            context = context,
+            alarms = listOf(legacySingleAlarm),
+            currentMemberId = kid1Id,
+            currentAuthUid = kid1Id,
+            currentMemberName = "נועה",
+            isChildDevice = true,
+            authoritativeRemoteSync = true
+        )
+        assertTrue(resSingleKid1[legacySingleAlarm.id]?.isScheduled == true)
+        assertTrue(com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, legacySingleAlarm.id))
+
+        // 2. Multi-recipient alarm for 2 children (kid1 + kid2)
+        val alarmMultiId = "alarm_multi_2_kids"
+        val alarmFor2Kids = com.example.model.FamilyAlarm(
+            id = alarmMultiId,
+            familyId = "fam_multi_test",
+            title = "השכמה לנועה ויובל",
+            hour = 7,
+            minute = 0,
+            assignedMemberId = kid1Id,
+            assignedToMemberId = kid1Id,
+            assignedMemberName = "נועה, יובל",
+            assignedMemberIds = listOf(kid1Id, kid2Id),
+            assignedMemberNames = listOf("נועה", "יובל"),
+            createdByMemberId = parentId,
+            createdByRole = "PARENT",
+            isPersonal = false,
+            isEnabled = true,
+            scheduleStatus = com.example.model.FamilyAlarm.STATUS_PENDING_TARGET_DEVICE
+        )
+        assertEquals(listOf(kid1Id, kid2Id), alarmFor2Kids.effectiveAssignedMemberIds)
+        assertTrue(alarmFor2Kids.isTargetedAtDeviceMember(kid1Id, kid1Id, "נועה", isChildDevice = true))
+        assertTrue(alarmFor2Kids.isTargetedAtDeviceMember(kid2Id, kid2Id, "יובל", isChildDevice = true))
+        assertFalse(alarmFor2Kids.isTargetedAtDeviceMember(kid3Id, kid3Id, "איתי", isChildDevice = true))
+        assertFalse(alarmFor2Kids.isTargetDeviceAcknowledged())
+
+        // 3. Multi-recipient alarm for 3 children (adding kid3 to existing 2-child alarm)
+        val alarmFor3Kids = alarmFor2Kids.copy(
+            assignedMemberIds = listOf(kid1Id, kid2Id, kid3Id),
+            assignedMemberNames = listOf("נועה", "יובל", "איתי"),
+            assignedMemberName = "נועה, יובל, איתי"
+        )
+        assertEquals(listOf(kid1Id, kid2Id, kid3Id), alarmFor3Kids.effectiveAssignedMemberIds)
+        assertTrue(alarmFor3Kids.isTargetedAtDeviceMember(kid1Id, kid1Id, "נועה", isChildDevice = true))
+        assertTrue(alarmFor3Kids.isTargetedAtDeviceMember(kid2Id, kid2Id, "יובל", isChildDevice = true))
+        assertTrue(alarmFor3Kids.isTargetedAtDeviceMember(kid3Id, kid3Id, "איתי", isChildDevice = true))
+
+        // Verify Kid 3 device schedules the alarm when added
+        val resKid3Added = com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
+            context = context,
+            alarms = listOf(alarmFor3Kids),
+            currentMemberId = kid3Id,
+            currentAuthUid = kid3Id,
+            currentMemberName = "איתי",
+            isChildDevice = true,
+            authoritativeRemoteSync = true
+        )
+        assertTrue("Added 3rd child must schedule the alarm locally", resKid3Added[alarmMultiId]?.isScheduled == true)
+        assertTrue(com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmMultiId))
+
+        // 4. Removing a child from an existing alarm (removing kid3 -> back to [kid1, kid2]):
+        //    When kid3's device syncs the updated alarm list, kid3's local AlarmManager schedule MUST be cancelled!
+        com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
+            context = context,
+            alarms = listOf(alarmFor2Kids),
+            currentMemberId = kid3Id,
+            currentAuthUid = kid3Id,
+            currentMemberName = "איתי",
+            isChildDevice = true,
+            authoritativeRemoteSync = true
+        )
+        assertFalse(
+            "Removing a child from assignedMemberIds must cancel the alarm on that child's device",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmMultiId)
+        )
+
+        // Meanwhile on Kid 1 and Kid 2 devices, the alarm remains scheduled!
+        com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
+            context = context,
+            alarms = listOf(alarmFor2Kids),
+            currentMemberId = kid1Id,
+            currentAuthUid = kid1Id,
+            currentMemberName = "נועה",
+            isChildDevice = true,
+            authoritativeRemoteSync = true
+        )
+        assertTrue(
+            "Remaining child (Kid 1) must still have the alarm scheduled locally",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmMultiId)
+        )
+
+        // 5. Simultaneous acknowledgement & Ping-Pong prevention:
+        //    Kid 1 acknowledges with SCHEDULED_LOCALLY; Kid 2 acknowledges with EXACT_PERMISSION_NEEDED
+        val afterKid1Ack = alarmFor2Kids.copy(
+            scheduleStatus = com.example.model.FamilyAlarm.STATUS_SCHEDULED_LOCALLY,
+            acknowledgedByMemberId = kid1Id,
+            acknowledgedByMemberIds = listOf(kid1Id)
+        )
+        assertTrue(afterKid1Ack.isAcknowledgedByMember(kid1Id))
+        assertFalse(afterKid1Ack.isAcknowledgedByMember(kid2Id))
+        assertFalse(
+            "Multi-recipient alarm must NOT report all target devices acknowledged when only 1 of 2 children acknowledged",
+            afterKid1Ack.isTargetDeviceAcknowledged()
+        )
+
+        // Kid 2 acknowledges (atomic arrayUnion adds kid2Id alongside kid1Id, and sets scheduleStatus = EXACT_PERMISSION_NEEDED)
+        val afterBothKidsAck = afterKid1Ack.copy(
+            scheduleStatus = com.example.model.FamilyAlarm.STATUS_EXACT_PERMISSION_NEEDED,
+            acknowledgedByMemberId = kid2Id,
+            acknowledgedByMemberIds = listOf(kid1Id, kid2Id),
+            nextTriggerAtMillis = afterKid1Ack.nextTriggerAtMillis + 500L
+        )
+        assertTrue(afterBothKidsAck.isAcknowledgedByMember(kid1Id))
+        assertTrue(afterBothKidsAck.isAcknowledgedByMember(kid2Id))
+        assertTrue(
+            "Multi-recipient alarm must report target devices acknowledged once both children are in effectiveAcknowledgedMemberIds",
+            afterBothKidsAck.isTargetDeviceAcknowledged()
+        )
+
+        // Verify ZERO Ping-Pong: when Kid 1 receives snapshot afterBothKidsAck (even though acknowledgedByMemberId == kid2Id
+        // and scheduleStatus == EXACT_PERMISSION_NEEDED != Kid 1's SCHEDULED_LOCALLY), Kid 1 sees isAcknowledgedByMember(kid1Id) == true!
+        val isMultiRecipient = afterBothKidsAck.effectiveAssignedMemberIds.size > 1
+        val kid1NeedsAckWriteAgain = isMultiRecipient && (
+            !afterBothKidsAck.isAcknowledgedByMember(kid1Id) ||
+                afterBothKidsAck.scheduleStatus == com.example.model.FamilyAlarm.STATUS_PENDING_TARGET_DEVICE
+        )
+        val kid2NeedsAckWriteAgain = isMultiRecipient && (
+            !afterBothKidsAck.isAcknowledgedByMember(kid2Id) ||
+                afterBothKidsAck.scheduleStatus == com.example.model.FamilyAlarm.STATUS_PENDING_TARGET_DEVICE
+        )
+        assertFalse("Kid 1 must NOT re-write Ack after Kid 2 acknowledges (prevents Ping-Pong)", kid1NeedsAckWriteAgain)
+        assertFalse("Kid 2 must NOT re-write Ack after acknowledging (prevents Ping-Pong)", kid2NeedsAckWriteAgain)
+
+        // 6. Mixed old-app + new-app compatibility:
+        //    Suppose Kid 1 runs new app (wrote acknowledgedByMemberIds = [kid1Id]) and Kid 2 runs old app
+        //    (overwrote acknowledgedByMemberId = kid2Id without touching acknowledgedByMemberIds).
+        val mixedVersionAlarm = alarmFor2Kids.copy(
+            scheduleStatus = com.example.model.FamilyAlarm.STATUS_SCHEDULED_LOCALLY,
+            acknowledgedByMemberId = kid2Id,
+            acknowledgedByMemberIds = listOf(kid1Id)
+        )
+        assertEquals(
+            "effectiveAcknowledgedMemberIds must combine acknowledgedByMemberIds (new app) and acknowledgedByMemberId (old app)",
+            listOf(kid1Id, kid2Id),
+            mixedVersionAlarm.effectiveAcknowledgedMemberIds
+        )
+        assertTrue(mixedVersionAlarm.isAcknowledgedByMember(kid1Id))
+        assertTrue(mixedVersionAlarm.isAcknowledgedByMember(kid2Id))
+        assertTrue(mixedVersionAlarm.isTargetDeviceAcknowledged())
+
+        // 7. Repository test: adding a 3rd child without changing time preserves existing Acks,
+        //    while changing alarm time resets acknowledgedByMemberIds!
+        val repo = FamilyRepository(context = context)
+        val parentMember = repo.members.value.first { it.id == "m_dad" }
+        val kid1Member = repo.members.value.first { it.id == "m_kid1" }
+        val kid2Member = repo.members.value.first { it.id == "m_kid2" }
+        val kid3Member = repo.members.value.find { it.id == "m_kid3" } ?: com.example.model.FamilyMember(
+            id = "m_kid3",
+            name = "איתי",
+            role = com.example.model.UserRole.CHILD
+        )
+        repo.switchCurrentMember(parentMember)
+
+        // Create alarm for kid1Member and kid2Member
+        val repoAlarmId = "alarm_repo_multi_kids"
+        val repoAlarmFor2 = com.example.model.FamilyAlarm(
+            id = repoAlarmId,
+            title = "השכמה לילדים",
+            hour = 7,
+            minute = 0,
+            assignedMemberId = kid1Member.id,
+            assignedToMemberId = kid1Member.id,
+            assignedMemberName = "${kid1Member.name}, ${kid2Member.name}",
+            assignedMemberIds = listOf(kid1Member.id, kid2Member.id),
+            assignedMemberNames = listOf(kid1Member.name, kid2Member.name),
+            createdByMemberId = parentMember.id,
+            createdByMemberName = parentMember.name,
+            createdByRole = "PARENT",
+            isPersonal = false,
+            isEnabled = true
+        )
+        assertTrue(repo.addOrUpdateFamilyAlarm(repoAlarmFor2))
+        // Switch to Kid 1 and Kid 2 so both acknowledge local scheduling in repo
+        repo.switchCurrentMember(kid1Member)
+        repo.switchCurrentMember(kid2Member)
+        repo.switchCurrentMember(parentMember)
+
+        val ackedByBothInRepo = repo.familyAlarms.value.first { it.id == repoAlarmId }
+        assertEquals(
+            listOf(kid1Member.id, kid2Member.id),
+            ackedByBothInRepo.effectiveAcknowledgedMemberIds
+        )
+
+        // 7a. Parent adds Kid 3 WITHOUT changing time or settings -> Kid 1 & Kid 2 Acks are preserved!
+        assertTrue(
+            repo.addOrUpdateFamilyAlarm(
+                ackedByBothInRepo.copy(
+                    assignedMemberIds = listOf(kid1Member.id, kid2Member.id, kid3Member.id),
+                    assignedMemberNames = listOf(kid1Member.name, kid2Member.name, kid3Member.name)
+                )
+            )
+        )
+        val afterAddKid3InRepo = repo.familyAlarms.value.first { it.id == repoAlarmId }
+        assertEquals(
+            "Adding a 3rd child without changing schedule must retain existing children's Acks",
+            listOf(kid1Member.id, kid2Member.id),
+            afterAddKid3InRepo.acknowledgedByMemberIds
+        )
+        assertEquals(
+            "Schedule status must become PENDING_TARGET_DEVICE until the newly added 3rd child acknowledges",
+            com.example.model.FamilyAlarm.STATUS_PENDING_TARGET_DEVICE,
+            afterAddKid3InRepo.scheduleStatus
+        )
+
+        // 7b. Parent changes the time of the multi-recipient alarm (07:00 -> 07:30) -> all Acks are reset!
+        assertTrue(
+            repo.addOrUpdateFamilyAlarm(
+                afterAddKid3InRepo.copy(hour = 7, minute = 30)
+            )
+        )
+        val afterTimeChangeInRepo = repo.familyAlarms.value.first { it.id == repoAlarmId }
+        assertTrue(
+            "Changing alarm time must reset acknowledgedByMemberIds so all recipients re-acknowledge the new time",
+            afterTimeChangeInRepo.acknowledgedByMemberIds.isEmpty()
+        )
+        assertEquals("", afterTimeChangeInRepo.acknowledgedByMemberId)
+        assertEquals(com.example.model.FamilyAlarm.STATUS_PENDING_TARGET_DEVICE, afterTimeChangeInRepo.scheduleStatus)
+
+        // 8. Boot restore test: persist multi-recipient alarm on Kid 2's device, simulate reboot, verify restored with acknowledgedByMemberIds intact
+        val ackedForBoot = alarmFor3Kids.copy(
+            scheduleStatus = com.example.model.FamilyAlarm.STATUS_SCHEDULED_LOCALLY,
+            acknowledgedByMemberId = kid2Id,
+            acknowledgedByMemberIds = listOf(kid1Id, kid2Id)
+        )
+        com.example.notifications.FamilyAlarmScheduler.syncAlarmsForCurrentDevice(
+            context = context,
+            alarms = listOf(ackedForBoot),
+            currentMemberId = kid2Id,
+            currentAuthUid = kid2Id,
+            currentMemberName = "יובל",
+            isChildDevice = true,
+            authoritativeRemoteSync = true
+        )
+        val persistedDiskAlarms = com.example.notifications.FamilyAlarmScheduler.loadPersistedAlarms(context)
+        val persistedMulti = persistedDiskAlarms.find { it.id == alarmMultiId }
+        assertNotNull("Multi-recipient alarm must be persisted on disk for boot restore", persistedMulti)
+        assertEquals(listOf(kid1Id, kid2Id, kid3Id), persistedMulti!!.effectiveAssignedMemberIds)
+        assertEquals(listOf(kid1Id, kid2Id), persistedMulti.effectiveAcknowledgedMemberIds)
+
+        val restoredCount = com.example.notifications.FamilyAlarmScheduler.restoreAlarmsOnBoot(context)
+        assertTrue("restoreAlarmsOnBoot must restore persisted multi-recipient alarm", restoredCount >= 1)
+        assertTrue(com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmMultiId))
+
+        // 9. Background FCM sync when app is closed for multiple children + deletion of multi-recipient alarm
+        var kid1DeleteSynced = false
+        var kid2DeleteSynced = false
+        val deletePayloadKid1 = mapOf(
+            "eventKey" to "alarm_del:$alarmMultiId:$kid1Id,$kid2Id:1700200000:$kid1Id",
+            "eventType" to com.example.notifications.FcmTokenManager.EVENT_ALARM_SYNC_REQUIRED,
+            "action" to "DELETE",
+            "familyId" to "fam_multi_test",
+            "alarmId" to alarmMultiId,
+            "targetUid" to kid1Id,
+            "actorUid" to parentId,
+            "updatedAt" to "1700200000"
+        )
+        val deletePayloadKid2 = mapOf(
+            "eventKey" to "alarm_del:$alarmMultiId:$kid1Id,$kid2Id:1700200000:$kid2Id",
+            "eventType" to com.example.notifications.FcmTokenManager.EVENT_ALARM_SYNC_REQUIRED,
+            "action" to "DELETE",
+            "familyId" to "fam_multi_test",
+            "alarmId" to alarmMultiId,
+            "targetUid" to kid2Id,
+            "actorUid" to parentId,
+            "updatedAt" to "1700200000"
+        )
+        assertTrue(
+            com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+                context = context,
+                data = deletePayloadKid1,
+                signedInUidOverride = kid1Id,
+                onAlarmReconcileRequested = { _, alId, act ->
+                    if (alId == alarmMultiId && act == "DELETE") kid1DeleteSynced = true
+                }
+            )
+        )
+        assertTrue(
+            com.example.notifications.FamilyMessagingService.handleRemoteMessagePayload(
+                context = context,
+                data = deletePayloadKid2,
+                signedInUidOverride = kid2Id,
+                onAlarmReconcileRequested = { _, alId, act ->
+                    if (alId == alarmMultiId && act == "DELETE") {
+                        kid2DeleteSynced = true
+                        com.example.notifications.FamilyAlarmScheduler.markAlarmDeletedAndCancel(context, alId)
+                    }
+                }
+            )
+        )
+        assertTrue("Kid 1 must process background FCM DELETE sync", kid1DeleteSynced)
+        assertTrue("Kid 2 must process background FCM DELETE sync", kid2DeleteSynced)
+        assertFalse(
+            "Multi-recipient alarm must be cancelled in AlarmManager after DELETE sync",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmMultiId)
+        )
+    }
 }
 
 

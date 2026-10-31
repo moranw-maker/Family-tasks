@@ -3454,7 +3454,8 @@ class FamilyRepository(
                         if (cancelledAlarmIds.isNotEmpty()) {
                             confirmedCancelledAlarmIdsByMember[doc.id] = cancelledAlarmIds
                             _deletedAlarmNotices.value = _deletedAlarmNotices.value.map { notice ->
-                                if (!notice.isConfirmedCancelledOnTarget && notice.alarmId in cancelledAlarmIds) {
+                                val matchesTargetMember = notice.targetMemberId.isBlank() || notice.targetMemberId == doc.id
+                                if (!notice.isConfirmedCancelledOnTarget && matchesTargetMember && notice.alarmId in cancelledAlarmIds) {
                                     notice.copy(
                                         isConfirmedCancelledOnTarget = true,
                                         confirmedAtMillis = System.currentTimeMillis()
@@ -3797,6 +3798,15 @@ class FamilyRepository(
                         }?.ifEmpty { SchoolDay.allWeekDays } ?: SchoolDay.allWeekDays
                         val isEnabled = doc.getBoolean("isEnabled") ?: true
                         val emoji = doc.getString("ringtoneEmoji") ?: "⏰"
+                        val ackSingle = doc.getString("acknowledgedByMemberId").orEmpty().trim()
+                        val rawAckIds = (doc.get("acknowledgedByMemberIds") as? List<*>)
+                            ?.mapNotNull { (it as? String)?.trim()?.takeIf { s -> s.isNotBlank() } }
+                            .orEmpty()
+                        val effectiveAckIds = buildList {
+                            rawAckIds.forEach { if (it !in this) add(it) }
+                            if (ackSingle.isNotBlank() && ackSingle !in this) add(ackSingle)
+                        }
+
                         FamilyAlarm(
                             id = doc.id,
                             familyId = familyId,
@@ -3823,7 +3833,8 @@ class FamilyRepository(
                             snoozeDurationMinutes = (doc.getLong("snoozeDurationMinutes") ?: 5L).toInt().coerceIn(1, 60),
                             volumePercent = (doc.getLong("volumePercent") ?: 85L).toInt().coerceIn(10, 100),
                             scheduleStatus = doc.getString("scheduleStatus") ?: if (isEnabled) FamilyAlarm.STATUS_SCHEDULED_LOCALLY else FamilyAlarm.STATUS_DISABLED,
-                            acknowledgedByMemberId = doc.getString("acknowledgedByMemberId").orEmpty(),
+                            acknowledgedByMemberId = ackSingle,
+                            acknowledgedByMemberIds = effectiveAckIds,
                             acknowledgedByDeviceName = doc.getString("acknowledgedByDeviceName").orEmpty(),
                             acknowledgedAtMillis = doc.getLong("acknowledgedAtMillis") ?: 0L,
                             nextTriggerAtMillis = doc.getLong("nextTriggerAtMillis") ?: 0L,
@@ -3899,12 +3910,36 @@ class FamilyRepository(
                         mergedAlarms.map { alarm ->
                             val localRes = localResults[alarm.id]
                             if (localRes != null && localRes.isScheduled) {
-                                val needsAckWrite = alarm.scheduleStatus != localRes.statusCode ||
-                                    alarm.acknowledgedByMemberId != effectiveDeviceMemberId ||
-                                    (alarm.isTargetedToAnotherMember() && !alarm.isTargetDeviceAcknowledged())
+                                val isMultiRecipient = alarm.effectiveAssignedMemberIds.size > 1
+                                val isAlreadyAckedByThisDevice = alarm.isAcknowledgedByMember(effectiveDeviceMemberId)
+                                val needsAckWrite = effectiveDeviceMemberId.isNotBlank() && if (isMultiRecipient) {
+                                    !isAlreadyAckedByThisDevice ||
+                                        alarm.scheduleStatus == FamilyAlarm.STATUS_PENDING_TARGET_DEVICE
+                                } else {
+                                    !isAlreadyAckedByThisDevice ||
+                                        alarm.scheduleStatus != localRes.statusCode
+                                }
+                                val mergedScheduleStatus = if (
+                                    isMultiRecipient &&
+                                    alarm.scheduleStatus == FamilyAlarm.STATUS_EXACT_PERMISSION_NEEDED &&
+                                    alarm.effectiveAcknowledgedMemberIds.any { it != effectiveDeviceMemberId }
+                                ) {
+                                    FamilyAlarm.STATUS_EXACT_PERMISSION_NEEDED
+                                } else {
+                                    localRes.statusCode
+                                }
+                                val updatedAckIds = if (
+                                    effectiveDeviceMemberId.isNotBlank() &&
+                                    effectiveDeviceMemberId !in alarm.effectiveAcknowledgedMemberIds
+                                ) {
+                                    alarm.effectiveAcknowledgedMemberIds + effectiveDeviceMemberId
+                                } else {
+                                    alarm.effectiveAcknowledgedMemberIds
+                                }
                                 val updatedAlarm = alarm.copy(
-                                    scheduleStatus = localRes.statusCode,
+                                    scheduleStatus = mergedScheduleStatus,
                                     acknowledgedByMemberId = effectiveDeviceMemberId.ifBlank { alarm.acknowledgedByMemberId },
+                                    acknowledgedByMemberIds = updatedAckIds,
                                     acknowledgedByDeviceName = deviceModelLabel,
                                     acknowledgedAtMillis = if (alarm.acknowledgedAtMillis > 0L && !needsAckWrite) {
                                         alarm.acknowledgedAtMillis
@@ -5957,12 +5992,36 @@ class FamilyRepository(
         val updatedList = currentAlarms.map { alarm ->
             val localRes = localResults[alarm.id]
             if (localRes != null && localRes.isScheduled) {
-                val needsAckWrite = alarm.scheduleStatus != localRes.statusCode ||
-                    alarm.acknowledgedByMemberId != effectiveDeviceMemberId ||
-                    (alarm.isTargetedToAnotherMember() && !alarm.isTargetDeviceAcknowledged())
+                val isMultiRecipient = alarm.effectiveAssignedMemberIds.size > 1
+                val isAlreadyAckedByThisDevice = alarm.isAcknowledgedByMember(effectiveDeviceMemberId)
+                val needsAckWrite = effectiveDeviceMemberId.isNotBlank() && if (isMultiRecipient) {
+                    !isAlreadyAckedByThisDevice ||
+                        alarm.scheduleStatus == FamilyAlarm.STATUS_PENDING_TARGET_DEVICE
+                } else {
+                    !isAlreadyAckedByThisDevice ||
+                        alarm.scheduleStatus != localRes.statusCode
+                }
+                val mergedScheduleStatus = if (
+                    isMultiRecipient &&
+                    alarm.scheduleStatus == FamilyAlarm.STATUS_EXACT_PERMISSION_NEEDED &&
+                    alarm.effectiveAcknowledgedMemberIds.any { it != effectiveDeviceMemberId }
+                ) {
+                    FamilyAlarm.STATUS_EXACT_PERMISSION_NEEDED
+                } else {
+                    localRes.statusCode
+                }
+                val updatedAckIds = if (
+                    effectiveDeviceMemberId.isNotBlank() &&
+                    effectiveDeviceMemberId !in alarm.effectiveAcknowledgedMemberIds
+                ) {
+                    alarm.effectiveAcknowledgedMemberIds + effectiveDeviceMemberId
+                } else {
+                    alarm.effectiveAcknowledgedMemberIds
+                }
                 val updated = alarm.copy(
-                    scheduleStatus = localRes.statusCode,
+                    scheduleStatus = mergedScheduleStatus,
                     acknowledgedByMemberId = effectiveDeviceMemberId.ifBlank { alarm.acknowledgedByMemberId },
+                    acknowledgedByMemberIds = updatedAckIds,
                     acknowledgedByDeviceName = deviceModelLabel,
                     acknowledgedAtMillis = if (alarm.acknowledgedAtMillis > 0L && !needsAckWrite) {
                         alarm.acknowledgedAtMillis
@@ -6119,23 +6178,57 @@ class FamilyRepository(
             isPersonal = resolvedTargetIds.size == 1 && (primaryTargetId == resolvedCreatedById || !current.isParent)
         )
 
+        val scheduleConfigChanged = existing == null ||
+            existing.hour != normalizedInput.hour ||
+            existing.minute != normalizedInput.minute ||
+            existing.daysOfWeek.toSet() != normalizedInput.daysOfWeek.toSet() ||
+            existing.isEnabled != normalizedInput.isEnabled ||
+            existing.title != normalizedInput.title ||
+            existing.soundType != normalizedInput.soundType ||
+            existing.customSoundUri != normalizedInput.customSoundUri ||
+            existing.vibrateEnabled != normalizedInput.vibrateEnabled ||
+            existing.snoozeDurationMinutes != normalizedInput.snoozeDurationMinutes ||
+            existing.volumePercent != normalizedInput.volumePercent
+
         val ctx = appContext
         val scheduledAlarm = when {
             !normalizedInput.isEnabled -> {
                 ctx?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, normalizedInput.id) }
                 normalizedInput.copy(
                     scheduleStatus = FamilyAlarm.STATUS_DISABLED,
+                    acknowledgedByMemberId = "",
+                    acknowledgedByMemberIds = emptyList(),
                     nextTriggerAtMillis = 0L
                 )
             }
             isTargetedOnlyToOtherMembers -> {
-                // Created/updated by parent for a child's device: cancel on parent's phone and wait for child's device confirmation
+                // Created/updated by parent for child device(s): cancel on parent's phone and wait for child device confirmation.
+                // Reset acknowledgements only when the alarm schedule/settings changed; if only the recipient list was edited,
+                // preserve acknowledgements of children who remain assigned to the alarm.
                 ctx?.let { com.example.notifications.FamilyAlarmScheduler.cancelLocalAlarm(it, normalizedInput.id) }
+                val retainedAckIds = if (!scheduleConfigChanged && existing != null) {
+                    existing.effectiveAcknowledgedMemberIds.filter { it in resolvedTargetIds }
+                } else {
+                    emptyList()
+                }
+                val allTargetsAlreadyAcked = resolvedTargetIds.isNotEmpty() &&
+                    resolvedTargetIds.all { it in retainedAckIds }
+                val resolvedStatus = if (
+                    allTargetsAlreadyAcked &&
+                    existing != null &&
+                    existing.scheduleStatus != FamilyAlarm.STATUS_PENDING_TARGET_DEVICE &&
+                    existing.scheduleStatus != FamilyAlarm.STATUS_DISABLED
+                ) {
+                    existing.scheduleStatus
+                } else {
+                    FamilyAlarm.STATUS_PENDING_TARGET_DEVICE
+                }
                 normalizedInput.copy(
-                    scheduleStatus = FamilyAlarm.STATUS_PENDING_TARGET_DEVICE,
-                    acknowledgedByMemberId = "",
-                    acknowledgedByDeviceName = "",
-                    acknowledgedAtMillis = 0L,
+                    scheduleStatus = resolvedStatus,
+                    acknowledgedByMemberId = retainedAckIds.lastOrNull().orEmpty(),
+                    acknowledgedByMemberIds = retainedAckIds,
+                    acknowledgedByDeviceName = if (retainedAckIds.isNotEmpty()) existing?.acknowledgedByDeviceName.orEmpty() else "",
+                    acknowledgedAtMillis = if (retainedAckIds.isNotEmpty()) existing?.acknowledgedAtMillis ?: 0L else 0L,
                     nextTriggerAtMillis = com.example.notifications.FamilyAlarmScheduler.computeNextTriggerAtMillis(normalizedInput)
                 )
             }
@@ -6147,9 +6240,17 @@ class FamilyRepository(
                 val nextTrigger = localRes?.nextTriggerAtMillis
                     ?: com.example.notifications.FamilyAlarmScheduler.computeNextTriggerAtMillis(normalizedInput)
                 val status = localRes?.statusCode ?: FamilyAlarm.STATUS_SCHEDULED_LOCALLY
+                val retainedAckIds = if (!scheduleConfigChanged && existing != null) {
+                    (existing.effectiveAcknowledgedMemberIds.filter { it in resolvedTargetIds } + effectiveCallerId)
+                        .filter { it.isNotBlank() }
+                        .distinct()
+                } else {
+                    listOfNotNull(effectiveCallerId.takeIf { it.isNotBlank() })
+                }
                 normalizedInput.copy(
                     scheduleStatus = status,
                     acknowledgedByMemberId = effectiveCallerId,
+                    acknowledgedByMemberIds = retainedAckIds,
                     acknowledgedByDeviceName = deviceModelLabel,
                     acknowledgedAtMillis = System.currentTimeMillis(),
                     nextTriggerAtMillis = nextTrigger,
@@ -6263,14 +6364,19 @@ class FamilyRepository(
         val db = firestoreProvider() ?: return
         authProvider()?.currentUser ?: return
         if (familyId.isBlank() || alarm.id in explicitlyDeletedAlarmIds) return
+        val ackMemberId = alarm.acknowledgedByMemberId.trim()
+        if (ackMemberId.isEmpty()) return
         repoScope.launch {
             val docRef = db.collection("families").document(familyId)
                 .collection("alarms").document(alarm.id)
             // Separate who updated the alarm configuration (updatedByUid) from who acknowledged
-            // local scheduling on the target device (acknowledgedByMemberId).
+            // local scheduling on the target device (acknowledgedByMemberId / acknowledgedByMemberIds).
+            // Use atomic FieldValue.arrayUnion(ackMemberId) so simultaneous acknowledgements by multiple
+            // children never overwrite each other.
             val ackFields = mapOf(
                 "scheduleStatus" to alarm.scheduleStatus,
-                "acknowledgedByMemberId" to alarm.acknowledgedByMemberId,
+                "acknowledgedByMemberId" to ackMemberId,
+                "acknowledgedByMemberIds" to com.google.firebase.firestore.FieldValue.arrayUnion(ackMemberId),
                 "acknowledgedByDeviceName" to alarm.acknowledgedByDeviceName,
                 "acknowledgedAtMillis" to alarm.acknowledgedAtMillis,
                 "nextTriggerAtMillis" to alarm.nextTriggerAtMillis,
@@ -6337,6 +6443,7 @@ class FamilyRepository(
                         "volumePercent" to alarm.volumePercent,
                         "scheduleStatus" to alarm.scheduleStatus,
                         "acknowledgedByMemberId" to alarm.acknowledgedByMemberId,
+                        "acknowledgedByMemberIds" to alarm.acknowledgedByMemberIds,
                         "acknowledgedByDeviceName" to alarm.acknowledgedByDeviceName,
                         "acknowledgedAtMillis" to alarm.acknowledgedAtMillis,
                         "nextTriggerAtMillis" to alarm.nextTriggerAtMillis,

@@ -1539,7 +1539,12 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         )
         assertNotNull("inviteNewMember by PARENT must return confirmed invitation", dialogInvitation)
         val dialogInviteSnap = withTimeout(timeoutMs) {
-            firestore.collection("family_invites").document(dialogInvitation!!.code).get().awaitTask()
+            var snap = firestore.collection("family_invites").document(dialogInvitation!!.code).get().awaitTask()
+            while (!snap.exists()) {
+                kotlinx.coroutines.delay(50L)
+                snap = firestore.collection("family_invites").document(dialogInvitation.code).get().awaitTask()
+            }
+            snap
         }
         assertTrue("inviteNewMember document MUST exist in /family_invites/{code}", dialogInviteSnap.exists())
         assertEquals(parentUid, dialogInviteSnap.getString("createdById"))
@@ -2469,9 +2474,10 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
     @Test
     fun pointsSecurityAudit_atomicTaskApproval_noDuplicatePoints_addDeductReset_andSensitiveFieldsProtected() = runBlocking {
         val timeoutMs = 15_000L
-        val dadEmail = "dad.pts.audit@example.com"
-        val momEmail = "mom.pts.audit@example.com"
-        val childEmail = "noam.pts.audit@example.com"
+        val runTag = java.util.UUID.randomUUID().toString().take(5)
+        val dadEmail = "dad.pts.audit.$runTag@example.com"
+        val momEmail = "mom.pts.audit.$runTag@example.com"
+        val childEmail = "noam.pts.audit.$runTag@example.com"
 
         // 1. Dad creates family as PARENT (FATHER)
         val dadUid = signInTestUser(dadEmail)
@@ -2695,8 +2701,9 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         com.example.notifications.FcmTokenManager.clearAllDispatchedEventsForTesting()
         com.example.notifications.FamilyAlarmCloudSyncWorker.clearCompletedSyncEventsForTesting(context)
 
-        val dadEmail = "dad.alarm.cancel@example.com"
-        val roeyEmail = "roey.alarm.cancel@example.com"
+        val runTag = java.util.UUID.randomUUID().toString().take(5)
+        val dadEmail = "dad.alarm.cancel.$runTag@example.com"
+        val roeyEmail = "roey.alarm.cancel.$runTag@example.com"
 
         // 1. Parent (Dad) creates family and invites Child (Roey)
         val dadUid = signInTestUser(dadEmail)
@@ -2746,7 +2753,7 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
                 forceRefresh = true
             )
         }
-        val alarmId = "alarm_roey_school_0715"
+        val alarmId = "alarm_roey_school_$runTag"
         val alarmForRoey = FamilyAlarm(
             id = alarmId,
             familyId = familyId,
@@ -2900,6 +2907,225 @@ class FamilyFirestoreRuleTest : FirestoreEmulatorTestBase() {
         }
         assertTrue("Duplicate DELETE reconciliation must succeed idempotently", duplicateDeleteSyncResult.success)
         assertFalse(com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmId))
+    }
+
+    @Test
+    fun `test multi recipient alarm background worker sync for 2 children simultaneous ack without ping pong and removing a child cancels only removed child`() = runBlocking {
+        val timeoutMs = 15_000L
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val dadEmail = "dad_multi_alarm_${java.util.UUID.randomUUID().toString().take(5)}@example.com"
+        val roeyEmail = "roey_multi_alarm_${java.util.UUID.randomUUID().toString().take(5)}@example.com"
+        val mayaEmail = "maya_multi_alarm_${java.util.UUID.randomUUID().toString().take(5)}@example.com"
+
+        // 1. Parent creates family
+        val dadUid = signInTestUser(dadEmail)
+        val dadRepo = repo()
+        val createdFam = withTimeout(timeoutMs) {
+            dadRepo.createFamilyAsParent(
+                familyNameInput = "משפחת לוי",
+                parentDisplayName = "אבא אלמוג",
+                creatorUidOverride = dadUid,
+                creatorEmailOverride = dadEmail,
+                familyIdentity = FamilyIdentity.FATHER
+            )
+        }.getOrThrow()
+        val familyId = createdFam.familyId
+
+        // 2. Invite Child 1 (Roey) and Child 2 (Maya)
+        val roeyInvite = withTimeout(timeoutMs) {
+            dadRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "רועי",
+                intendedEmail = roeyEmail
+            )
+        }.getOrThrow()
+
+        val mayaInvite = withTimeout(timeoutMs) {
+            dadRepo.createRoleSpecificInvitation(
+                invitedRole = UserRole.CHILD,
+                invitedNickname = "מאיה",
+                intendedEmail = mayaEmail
+            )
+        }.getOrThrow()
+        dadRepo.detachAll()
+
+        // 3. Redeem invitations for Roey and Maya
+        val roeyUid = signInTestUser(roeyEmail)
+        val roeyRepo = repo()
+        withTimeout(timeoutMs) {
+            roeyRepo.redeemInvitationAndJoinFamily(
+                rawCode = roeyInvite.code,
+                memberDisplayName = "רועי",
+                joiningUidOverride = roeyUid,
+                joiningEmailOverride = roeyEmail,
+                familyIdentity = FamilyIdentity.SON
+            )
+        }.getOrThrow()
+        roeyRepo.detachAll()
+
+        val mayaUid = signInTestUser(mayaEmail)
+        val mayaRepo = repo()
+        withTimeout(timeoutMs) {
+            mayaRepo.redeemInvitationAndJoinFamily(
+                rawCode = mayaInvite.code,
+                memberDisplayName = "מאיה",
+                joiningUidOverride = mayaUid,
+                joiningEmailOverride = mayaEmail,
+                familyIdentity = FamilyIdentity.DAUGHTER
+            )
+        }.getOrThrow()
+        mayaRepo.detachAll()
+
+        // 4. Parent creates a multi-recipient alarm assigned to BOTH Roey and Maya
+        signInTestUser(dadEmail)
+        withTimeout(timeoutMs) {
+            dadRepo.checkAuthenticatedUserMembership(
+                uid = dadUid,
+                email = dadEmail,
+                displayName = "אבא אלמוג",
+                forceRefresh = true
+            )
+        }
+        val alarmId = "alarm_roey_and_maya_700"
+        val multiAlarm = FamilyAlarm(
+            id = alarmId,
+            familyId = familyId,
+            title = "השכמה לרועי ומאיה",
+            hour = 7,
+            minute = 10,
+            assignedMemberId = roeyUid,
+            assignedToMemberId = roeyUid,
+            assignedMemberName = "רועי, מאיה",
+            assignedMemberIds = listOf(roeyUid, mayaUid),
+            assignedMemberNames = listOf("רועי", "מאיה"),
+            createdByMemberId = dadUid,
+            createdByMemberName = "אבא אלמוג",
+            createdByRole = "PARENT",
+            isPersonal = false,
+            isEnabled = true
+        )
+        assertTrue(dadRepo.addOrUpdateFamilyAlarm(multiAlarm))
+        val alarmRef = firestore.collection("families").document(familyId).collection("alarms").document(alarmId)
+        withTimeout(timeoutMs) {
+            while (!alarmRef.get().awaitTask().exists()) {
+                kotlinx.coroutines.delay(50L)
+            }
+        }
+        dadRepo.detachAll()
+
+        // 5. Roey's device runs background sync -> schedules locally & appends roeyUid to acknowledgedByMemberIds
+        signInTestUser(roeyEmail)
+        val roeySync1 = withTimeout(timeoutMs) {
+            com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestore(
+                context = context,
+                hintFamilyId = familyId,
+                hintAlarmId = alarmId,
+                hintAction = "CREATE",
+                dbOverride = firestore,
+                uidOverride = roeyUid
+            )
+        }
+        assertTrue("Roey background CREATE sync must succeed: ${roeySync1.errorMessage}", roeySync1.success)
+        assertTrue(com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmId))
+
+        // 6. Maya's device runs background sync -> schedules locally & appends mayaUid to acknowledgedByMemberIds without erasing roeyUid
+        signInTestUser(mayaEmail)
+        val mayaSync1 = withTimeout(timeoutMs) {
+            com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestore(
+                context = context,
+                hintFamilyId = familyId,
+                hintAlarmId = alarmId,
+                hintAction = "CREATE",
+                dbOverride = firestore,
+                uidOverride = mayaUid
+            )
+        }
+        assertTrue("Maya background CREATE sync must succeed: ${mayaSync1.errorMessage}", mayaSync1.success)
+        assertTrue(com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmId))
+
+        val snapAfterBothAck = withTimeout(timeoutMs) { alarmRef.get().awaitTask() }
+        val ackIdsInFirestore = (snapAfterBothAck.get("acknowledgedByMemberIds") as? List<*>)
+            ?.mapNotNull { it as? String }
+            .orEmpty()
+        assertTrue("Roey's Ack must be preserved in acknowledgedByMemberIds", roeyUid in ackIdsInFirestore)
+        assertTrue("Maya's Ack must be preserved in acknowledgedByMemberIds", mayaUid in ackIdsInFirestore)
+        assertEquals("acknowledgedByMemberId is the latest acknowledging child", mayaUid, snapAfterBothAck.getString("acknowledgedByMemberId"))
+        val updatedAtAfterMayaAck = snapAfterBothAck.getLong("updatedAt") ?: 0L
+
+        // 7. Verify NO Ping-Pong: when Roey's device reconciles again (seeing acknowledgedByMemberId == mayaUid),
+        //    Roey's device sees roeyUid in acknowledgedByMemberIds and does NOT re-write Ack!
+        signInTestUser(roeyEmail)
+        val roeySync2 = withTimeout(timeoutMs) {
+            com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestore(
+                context = context,
+                hintFamilyId = familyId,
+                hintAlarmId = alarmId,
+                hintAction = "SYNC",
+                dbOverride = firestore,
+                uidOverride = roeyUid
+            )
+        }
+        assertTrue(roeySync2.success)
+        val snapAfterRoeyResync = withTimeout(timeoutMs) { alarmRef.get().awaitTask() }
+        assertEquals(
+            "Roey's device must NOT overwrite acknowledgedByMemberId or trigger Ack Ping-Pong when already in acknowledgedByMemberIds",
+            mayaUid,
+            snapAfterRoeyResync.getString("acknowledgedByMemberId")
+        )
+        assertEquals(updatedAtAfterMayaAck, snapAfterRoeyResync.getLong("updatedAt") ?: 0L)
+
+        // 8. Parent removes Maya from the alarm (leaving only Roey):
+        //    Maya's background sync cancels her local schedule, while Roey's remains scheduled!
+        signInTestUser(dadEmail)
+        withTimeout(timeoutMs) {
+            alarmRef.update(
+                mapOf(
+                    "assignedMemberIds" to listOf(roeyUid),
+                    "assignedMemberNames" to listOf("רועי"),
+                    "assignedMemberName" to "רועי",
+                    "acknowledgedByMemberIds" to listOf(roeyUid),
+                    "acknowledgedByMemberId" to roeyUid,
+                    "updatedByUid" to dadUid,
+                    "updatedAt" to System.currentTimeMillis()
+                )
+            ).awaitTask()
+        }
+
+        signInTestUser(mayaEmail)
+        val mayaRemoveSync = withTimeout(timeoutMs) {
+            com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestore(
+                context = context,
+                hintFamilyId = familyId,
+                hintAlarmId = alarmId,
+                hintAction = "UPDATE",
+                dbOverride = firestore,
+                uidOverride = mayaUid
+            )
+        }
+        assertTrue("Maya background UPDATE sync after removal must succeed", mayaRemoveSync.success)
+        assertTrue("Removed child must report cancelled alarm", mayaRemoveSync.cancelledCount >= 1)
+        assertFalse(
+            "Alarm must be cancelled in AlarmManager on removed child's device",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmId)
+        )
+
+        // Meanwhile, when Roey's device reconciles, the alarm remains scheduled on Roey's device!
+        signInTestUser(roeyEmail)
+        val roeyAfterMayaRemovedSync = withTimeout(timeoutMs) {
+            com.example.notifications.FamilyAlarmCloudSyncWorker.reconcileAlarmsFromFirestore(
+                context = context,
+                hintFamilyId = familyId,
+                hintAlarmId = alarmId,
+                hintAction = "UPDATE",
+                dbOverride = firestore,
+                uidOverride = roeyUid
+            )
+        }
+        assertTrue(roeyAfterMayaRemovedSync.success)
+        assertTrue(
+            "Remaining child (Roey) must still have the alarm scheduled in AlarmManager",
+            com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmId)
+        )
     }
 
     private val activeRepos = mutableListOf<FamilyRepository>()

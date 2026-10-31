@@ -3470,6 +3470,392 @@ test("Personal Avatars & Multi-Recipient Alarms: Child updates own avatar, paren
   );
 });
 
+test("Multi-Recipient Alarm Sync & Ack Ping-Pong Fix: 1/2/3 children, add/remove child, time change, delete, simultaneous arrayUnion Ack, mixed old/new app compatibility, and strict security rules", async () => {
+  const assert = require("node:assert");
+  const functionsIndex = require("./functions/index.js");
+  const {
+    classifyAlarmSyncEvent,
+    extractAlarmTargetUids,
+    resolveVerifiedRecipientUids,
+  } = functionsIndex;
+
+  const famId = "fam_multi_alarm_audit_fix";
+  const parentUid = ALICE_UID;
+  const child1Uid = BOB_UID;
+  const child2Uid = "uid_child_maya_2";
+  const child3Uid = "uid_child_itay_3";
+  const unassignedChild4Uid = "uid_child_dana_4";
+  const pendingInviteUid = "uid_pending_invite_5";
+  const outsiderUid = "uid_outsider_stranger_99";
+
+  const parentDb = testEnv.authenticatedContext(parentUid).firestore();
+  const child1Db = testEnv.authenticatedContext(child1Uid).firestore();
+  const child2Db = testEnv.authenticatedContext(child2Uid).firestore();
+  const child3Db = testEnv.authenticatedContext(child3Uid).firestore();
+  const child4Db = testEnv.authenticatedContext(unassignedChild4Uid).firestore();
+  const outsiderDb = testEnv.authenticatedContext(outsiderUid).firestore();
+  const arrayUnion = (...elements) => {
+    if (
+      parentDb.app &&
+      parentDb.app.firebase_ &&
+      parentDb.app.firebase_.firestore &&
+      parentDb.app.firebase_.firestore.FieldValue
+    ) {
+      return parentDb.app.firebase_.firestore.FieldValue.arrayUnion(...elements);
+    }
+    const firestoreMod = require("/usr/local/lib/node_modules/@firebase/rules-unit-testing/node_modules/@firebase/firestore");
+    return firestoreMod.arrayUnion(...elements);
+  };
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const adminDb = context.firestore();
+    const allMemberUids = [parentUid, child1Uid, child2Uid, child3Uid, unassignedChild4Uid];
+    await adminDb.collection("families").doc(famId).set({
+      id: famId,
+      familyId: famId,
+      familyName: "משפחת לוי",
+      ownerUid: parentUid,
+      createdById: parentUid,
+      adminUids: [parentUid],
+      memberUids: allMemberUids,
+      memberIds: allMemberUids,
+    });
+    const members = [
+      { uid: parentUid, name: "אמא", role: "PARENT" },
+      { uid: child1Uid, name: "רועי", role: "CHILD" },
+      { uid: child2Uid, name: "מאיה", role: "CHILD" },
+      { uid: child3Uid, name: "איתי", role: "CHILD" },
+      { uid: unassignedChild4Uid, name: "דנה", role: "CHILD" },
+    ];
+    for (const m of members) {
+      await adminDb.collection("families").doc(famId).collection("members").doc(m.uid).set({
+        id: m.uid,
+        uid: m.uid,
+        familyId: famId,
+        name: m.name,
+        role: m.role,
+        earnedPoints: 0,
+        spentPoints: 0,
+      });
+    }
+    // Unaccepted pending invite member (must NOT receive FCM pushes)
+    await adminDb.collection("families").doc(famId).collection("members").doc(pendingInviteUid).set({
+      id: pendingInviteUid,
+      uid: pendingInviteUid,
+      familyId: famId,
+      name: "מוזמן ממתין",
+      role: "CHILD",
+      invitationPending: true,
+      invitationAccepted: false,
+    });
+  });
+
+  // 1. Legacy compatibility: alarm with only assignedMemberId / assignedToMemberId (1 child)
+  const legacySingleData = {
+    id: "alarm_legacy_1",
+    familyId: famId,
+    title: "שעון ישן לרועי",
+    hour: 7,
+    minute: 0,
+    assignedMemberId: child1Uid,
+    assignedToMemberId: child1Uid,
+    createdByMemberId: parentUid,
+    createdByRole: "PARENT",
+    isEnabled: true,
+    updatedByUid: parentUid,
+    updatedAt: 1700100001000,
+  };
+  assert.deepStrictEqual(extractAlarmTargetUids(legacySingleData), [child1Uid]);
+  const singleCreateSpec = classifyAlarmSyncEvent(null, legacySingleData, "alarm_legacy_1");
+  assert.ok(singleCreateSpec);
+  assert.strictEqual(singleCreateSpec.action, "CREATE");
+  assert.strictEqual(singleCreateSpec.targetMode, "SINGLE_MEMBER");
+  assert.strictEqual(singleCreateSpec.targetUid, child1Uid);
+  assert.deepStrictEqual(singleCreateSpec.targetUids, [child1Uid]);
+
+  // 2. Alarm for 2 children (assignedMemberIds: [child1Uid, child2Uid])
+  const alarm2Id = "alarm_two_kids";
+  const alarm2Data = {
+    id: alarm2Id,
+    familyId: famId,
+    title: "השכמה לרועי ומאיה",
+    hour: 7,
+    minute: 15,
+    assignedMemberId: child1Uid,
+    assignedToMemberId: child1Uid,
+    assignedMemberName: "רועי, מאיה",
+    assignedMemberIds: [child1Uid, child2Uid],
+    assignedMemberNames: ["רועי", "מאיה"],
+    createdByMemberId: parentUid,
+    createdByRole: "PARENT",
+    isPersonal: false,
+    isEnabled: true,
+    scheduleStatus: "PENDING_TARGET_DEVICE",
+    acknowledgedByMemberId: "",
+    acknowledgedByMemberIds: [],
+    updatedByUid: parentUid,
+    updatedAt: 1700100002000,
+  };
+  await assertSucceeds(
+    parentDb.collection("families").doc(famId).collection("alarms").doc(alarm2Id).set(alarm2Data)
+  );
+  const create2Spec = classifyAlarmSyncEvent(null, alarm2Data, alarm2Id);
+  assert.ok(create2Spec);
+  assert.strictEqual(create2Spec.action, "CREATE");
+  assert.strictEqual(create2Spec.targetMode, "MULTIPLE_MEMBERS");
+  assert.deepStrictEqual(create2Spec.targetUids, [child1Uid, child2Uid]);
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const adminDb = context.firestore();
+    const verified2 = await resolveVerifiedRecipientUids(adminDb, famId, create2Spec);
+    assert.deepStrictEqual(verified2, [child1Uid, child2Uid]);
+
+    // Verify outsiders and unaccepted invites are strictly rejected by resolveVerifiedRecipientUids
+    const spoofedSpec = {
+      ...create2Spec,
+      targetUids: [child1Uid, child2Uid, outsiderUid, pendingInviteUid],
+    };
+    const verifiedFiltered = await resolveVerifiedRecipientUids(adminDb, famId, spoofedSpec);
+    assert.deepStrictEqual(
+      verifiedFiltered,
+      [child1Uid, child2Uid],
+      "Outsiders and unaccepted invites must never receive alarm sync pushes"
+    );
+  });
+
+  // 3. Alarm for 3 children (assignedMemberIds: [child1Uid, child2Uid, child3Uid]) via adding child3
+  const alarm3Data = {
+    ...alarm2Data,
+    assignedMemberName: "רועי, מאיה, איתי",
+    assignedMemberIds: [child1Uid, child2Uid, child3Uid],
+    assignedMemberNames: ["רועי", "מאיה", "איתי"],
+    updatedAt: 1700100003000,
+  };
+  const addChild3Spec = classifyAlarmSyncEvent(alarm2Data, alarm3Data, alarm2Id);
+  assert.ok(addChild3Spec, "Adding a 3rd child must emit sync event");
+  assert.strictEqual(addChild3Spec.action, "UPDATE");
+  assert.deepStrictEqual(
+    addChild3Spec.targetUids,
+    [child3Uid],
+    "Adding a child without changing time/settings must sync the newly added child"
+  );
+  assert.deepStrictEqual(addChild3Spec.addedTargetUids, [child3Uid]);
+  assert.deepStrictEqual(addChild3Spec.removedTargetUids, []);
+
+  // Also verify creating an alarm directly for 3 children targets all 3
+  const create3DirectSpec = classifyAlarmSyncEvent(null, alarm3Data, "alarm_three_kids_direct");
+  assert.ok(create3DirectSpec);
+  assert.strictEqual(create3DirectSpec.action, "CREATE");
+  assert.deepStrictEqual(create3DirectSpec.targetUids, [child1Uid, child2Uid, child3Uid]);
+
+  // 4. Removing a child from an existing alarm ([child1, child2, child3] -> [child1, child3])
+  const afterRemoveChild2Data = {
+    ...alarm3Data,
+    assignedMemberName: "רועי, איתי",
+    assignedMemberIds: [child1Uid, child3Uid],
+    assignedMemberNames: ["רועי", "איתי"],
+    updatedAt: 1700100004000,
+  };
+  const removeChild2Spec = classifyAlarmSyncEvent(alarm3Data, afterRemoveChild2Data, alarm2Id);
+  assert.ok(removeChild2Spec, "Removing a child must emit sync event so removed child cancels local alarm");
+  assert.strictEqual(removeChild2Spec.action, "UPDATE");
+  assert.deepStrictEqual(removeChild2Spec.targetUids, [child2Uid]);
+  assert.deepStrictEqual(removeChild2Spec.removedTargetUids, [child2Uid]);
+
+  // 5. Changing time of a multi-recipient alarm synchronizes ALL assigned recipients
+  const afterTimeChangeData = {
+    ...alarm2Data,
+    hour: 7,
+    minute: 45,
+    updatedAt: 1700100005000,
+  };
+  const timeChangeSpec = classifyAlarmSyncEvent(alarm2Data, afterTimeChangeData, alarm2Id);
+  assert.ok(timeChangeSpec);
+  assert.strictEqual(timeChangeSpec.action, "UPDATE");
+  assert.deepStrictEqual(timeChangeSpec.targetUids, [child1Uid, child2Uid]);
+
+  // 6. Two children acknowledging schedule simultaneously using atomic FieldValue.arrayUnion(uid)
+  const child1AlarmRef = child1Db.collection("families").doc(famId).collection("alarms").doc(alarm2Id);
+  const child2AlarmRef = child2Db.collection("families").doc(famId).collection("alarms").doc(alarm2Id);
+
+  await Promise.all([
+    assertSucceeds(
+      child1AlarmRef.update({
+        scheduleStatus: "SCHEDULED_LOCALLY",
+        acknowledgedByMemberId: child1Uid,
+        acknowledgedByMemberIds: arrayUnion(child1Uid),
+        acknowledgedByDeviceName: "Galaxy S24 (Roey)",
+        acknowledgedAtMillis: 1700100006000,
+        nextTriggerAtMillis: 1700150000000,
+        lastScheduleError: "",
+        updatedAt: 1700100006000,
+      })
+    ),
+    assertSucceeds(
+      child2AlarmRef.update({
+        scheduleStatus: "EXACT_PERMISSION_NEEDED",
+        acknowledgedByMemberId: child2Uid,
+        acknowledgedByMemberIds: arrayUnion(child2Uid),
+        acknowledgedByDeviceName: "Pixel 8 (Maya)",
+        acknowledgedAtMillis: 1700100006005,
+        nextTriggerAtMillis: 1700150000500,
+        lastScheduleError: "",
+        updatedAt: 1700100006005,
+      })
+    ),
+  ]);
+
+  const snapAfterSimultaneousAck = await parentDb
+    .collection("families")
+    .doc(famId)
+    .collection("alarms")
+    .doc(alarm2Id)
+    .get();
+  const dataAfterSimultaneousAck = snapAfterSimultaneousAck.data();
+  assert.ok(Array.isArray(dataAfterSimultaneousAck.acknowledgedByMemberIds));
+  assert.strictEqual(
+    dataAfterSimultaneousAck.acknowledgedByMemberIds.includes(child1Uid),
+    true,
+    "Simultaneous Ack must preserve child1Uid in acknowledgedByMemberIds"
+  );
+  assert.strictEqual(
+    dataAfterSimultaneousAck.acknowledgedByMemberIds.includes(child2Uid),
+    true,
+    "Simultaneous Ack must preserve child2Uid in acknowledgedByMemberIds"
+  );
+  assert.strictEqual(
+    dataAfterSimultaneousAck.updatedByUid,
+    parentUid,
+    "Simultaneous child Acks must never overwrite parent's updatedByUid"
+  );
+
+  // 7. Ack-only updates must NEVER trigger FCM messages (classifyAlarmSyncEvent returns null)
+  const ackEventSpec = classifyAlarmSyncEvent(alarm2Data, dataAfterSimultaneousAck, alarm2Id);
+  assert.strictEqual(ackEventSpec, null, "Multi-child Ack updates must never trigger FCM push");
+
+  // 8. Mixed old-app + new-app compatibility:
+  //    Suppose Child 1 (new app) acknowledged with acknowledgedByMemberIds: [child1Uid],
+  //    and Child 2 (old app installed on phone) writes ONLY acknowledgedByMemberId: child2Uid without touching acknowledgedByMemberIds
+  const alarmMixedId = "alarm_mixed_versions";
+  await assertSucceeds(
+    parentDb.collection("families").doc(famId).collection("alarms").doc(alarmMixedId).set({
+      ...alarm2Data,
+      id: alarmMixedId,
+    })
+  );
+  // Child 1 (new app) Acks first
+  await assertSucceeds(
+    child1Db.collection("families").doc(famId).collection("alarms").doc(alarmMixedId).update({
+      scheduleStatus: "SCHEDULED_LOCALLY",
+      acknowledgedByMemberId: child1Uid,
+      acknowledgedByMemberIds: arrayUnion(child1Uid),
+      acknowledgedByDeviceName: "Roey New App",
+      acknowledgedAtMillis: 1700100010000,
+      nextTriggerAtMillis: 1700150000000,
+      lastScheduleError: "",
+      updatedAt: 1700100010000,
+    })
+  );
+  // Child 2 (old app) Acks without touching acknowledgedByMemberIds
+  await assertSucceeds(
+    child2Db.collection("families").doc(famId).collection("alarms").doc(alarmMixedId).update({
+      scheduleStatus: "SCHEDULED_LOCALLY",
+      acknowledgedByMemberId: child2Uid,
+      acknowledgedByDeviceName: "Maya Old App",
+      acknowledgedAtMillis: 1700100011000,
+      nextTriggerAtMillis: 1700150000000,
+      lastScheduleError: "",
+      updatedAt: 1700100011000,
+    })
+  );
+  const mixedSnap = await parentDb.collection("families").doc(famId).collection("alarms").doc(alarmMixedId).get();
+  const mixedData = mixedSnap.data();
+  assert.deepStrictEqual(
+    mixedData.acknowledgedByMemberIds,
+    [child1Uid],
+    "Old app Ack must not erase Child 1's entry in acknowledgedByMemberIds"
+  );
+  assert.strictEqual(mixedData.acknowledgedByMemberId, child2Uid);
+  assert.strictEqual(classifyAlarmSyncEvent(alarm2Data, mixedData, alarmMixedId), null);
+
+  // 9. Strict Firestore Security Rules enforcement on child acknowledgements:
+  // 9a. Child 1 CANNOT add an Ack on behalf of Child 3
+  await assertFails(
+    child1AlarmRef.update({
+      scheduleStatus: "SCHEDULED_LOCALLY",
+      acknowledgedByMemberId: child1Uid,
+      acknowledgedByMemberIds: [child1Uid, child2Uid, child3Uid],
+      updatedAt: 1700100020000,
+    })
+  );
+
+  // 9b. Child 1 CANNOT delete/remove Child 2's existing Ack from acknowledgedByMemberIds
+  await assertFails(
+    child1AlarmRef.update({
+      scheduleStatus: "SCHEDULED_LOCALLY",
+      acknowledgedByMemberId: child1Uid,
+      acknowledgedByMemberIds: [child1Uid],
+      updatedAt: 1700100021000,
+    })
+  );
+
+  // 9c. Child 1 CANNOT modify assignedMemberIds
+  await assertFails(
+    child1AlarmRef.update({
+      scheduleStatus: "SCHEDULED_LOCALLY",
+      acknowledgedByMemberId: child1Uid,
+      assignedMemberIds: [child1Uid],
+      updatedAt: 1700100022000,
+    })
+  );
+
+  // 9d. Child 1 CANNOT modify alarm time (hour/minute) or settings
+  await assertFails(
+    child1AlarmRef.update({
+      scheduleStatus: "SCHEDULED_LOCALLY",
+      acknowledgedByMemberId: child1Uid,
+      hour: 9,
+      minute: 30,
+      updatedAt: 1700100023000,
+    })
+  );
+
+  // 9e. Unassigned Child 4 (in family, but NOT in assignedMemberIds) CANNOT acknowledge the alarm
+  await assertFails(
+    child4Db.collection("families").doc(famId).collection("alarms").doc(alarm2Id).update({
+      scheduleStatus: "SCHEDULED_LOCALLY",
+      acknowledgedByMemberId: unassignedChild4Uid,
+      acknowledgedByMemberIds: arrayUnion(unassignedChild4Uid),
+      updatedAt: 1700100024000,
+    })
+  );
+
+  // 9f. Outsider (not in family) CANNOT read or acknowledge the alarm
+  await assertFails(
+    outsiderDb.collection("families").doc(famId).collection("alarms").doc(alarm2Id).update({
+      scheduleStatus: "SCHEDULED_LOCALLY",
+      acknowledgedByMemberId: outsiderUid,
+      acknowledgedByMemberIds: arrayUnion(outsiderUid),
+      updatedAt: 1700100025000,
+    })
+  );
+
+  // 10. Deleting a multi-recipient alarm sends DELETE to ALL previous recipients
+  const multiDeleteSpec = classifyAlarmSyncEvent(dataAfterSimultaneousAck, null, alarm2Id);
+  assert.ok(multiDeleteSpec);
+  assert.strictEqual(multiDeleteSpec.action, "DELETE");
+  assert.strictEqual(multiDeleteSpec.targetMode, "MULTIPLE_MEMBERS");
+  assert.deepStrictEqual(multiDeleteSpec.targetUids, [child1Uid, child2Uid]);
+  assert.strictEqual(multiDeleteSpec.actorUid, parentUid);
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const adminDb = context.firestore();
+    const deleteRecipients = await resolveVerifiedRecipientUids(adminDb, famId, multiDeleteSpec);
+    assert.deepStrictEqual(deleteRecipients, [child1Uid, child2Uid]);
+  });
+});
+
+
 
 
 

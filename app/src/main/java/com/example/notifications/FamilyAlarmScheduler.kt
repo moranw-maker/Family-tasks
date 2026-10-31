@@ -1261,6 +1261,8 @@ object FamilyAlarmScheduler {
                     put("snoozeDurationMinutes", alarm.snoozeDurationMinutes)
                     put("volumePercent", alarm.volumePercent)
                     put("isPersonal", alarm.isPersonal)
+                    put("acknowledgedByMemberId", alarm.acknowledgedByMemberId)
+                    put("acknowledgedByMemberIds", alarm.effectiveAcknowledgedMemberIds.joinToString(","))
                 }
                 arr.put(obj)
             }
@@ -1329,6 +1331,12 @@ object FamilyAlarmScheduler {
                             emptyList()
                         }
                     }
+                val ackSingle = obj.optString("acknowledgedByMemberId", "").trim()
+                val ackIdsCsv = obj.optString("acknowledgedByMemberIds", "")
+                val ackIds = ackIdsCsv.split(",")
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .ifEmpty { if (ackSingle.isNotBlank()) listOf(ackSingle) else emptyList() }
                 list.add(
                     FamilyAlarm(
                         id = id,
@@ -1353,7 +1361,9 @@ object FamilyAlarmScheduler {
                         vibrateEnabled = obj.optBoolean("vibrateEnabled", true),
                         snoozeDurationMinutes = obj.optInt("snoozeDurationMinutes", 5),
                         volumePercent = obj.optInt("volumePercent", 85),
-                        isPersonal = obj.optBoolean("isPersonal", false)
+                        isPersonal = obj.optBoolean("isPersonal", false),
+                        acknowledgedByMemberId = ackSingle,
+                        acknowledgedByMemberIds = ackIds
                     )
                 )
             }

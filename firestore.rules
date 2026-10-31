@@ -192,17 +192,34 @@ service cloud.firestore {
 
     // Allows the assigned child's device to update ONLY local scheduling acknowledgement fields
     // on a parent-created alarm assigned to that child, without modifying time, enabled state, sound,
-    // recurrence, or updatedByUid (separating who updated the alarm from who acknowledged the schedule).
+    // recurrence, assignedMemberIds, or updatedByUid (separating who updated the alarm from who acknowledged the schedule).
     function isChildTargetDeviceAckOnly() {
       let changedKeys = request.resource.data.diff(resource.data).affectedKeys();
       let targetId = alarmTargetMemberId(resource.data);
       let assignedIds = resource.data.get('assignedMemberIds', []);
-      return (targetId == request.auth.uid
-          || (assignedIds is list && request.auth.uid in assignedIds)
-          || (targetId != resource.data.get('createdByMemberId', '') && resource.data.get('isPersonal', false) == false))
+      let oldAckList = resource.data.get('acknowledgedByMemberIds', []);
+      let safeOldAckList = oldAckList is list ? oldAckList : [];
+      let newAckList = request.resource.data.get('acknowledgedByMemberIds', []);
+      let isAssignedRecipient = targetId == request.auth.uid
+        || (assignedIds is list && request.auth.uid in assignedIds)
+        || (
+          (targetId == '' || targetId.matches('^m_.*'))
+          && (!(assignedIds is list) || assignedIds.size() == 0 || (assignedIds.size() == 1 && assignedIds[0].matches('^m_.*')))
+          && targetId != resource.data.get('createdByMemberId', '')
+          && resource.data.get('isPersonal', false) == false
+        );
+      let validAckListUpdate = !('acknowledgedByMemberIds' in changedKeys)
+        || (
+          newAckList is list
+          && request.auth.uid in newAckList
+          && newAckList.hasAll(safeOldAckList)
+          && newAckList.toSet().difference(safeOldAckList.toSet()).hasOnly([request.auth.uid])
+        );
+      return isAssignedRecipient
         && changedKeys.hasOnly([
           'scheduleStatus',
           'acknowledgedByMemberId',
+          'acknowledgedByMemberIds',
           'acknowledgedByDeviceName',
           'acknowledgedAtMillis',
           'nextTriggerAtMillis',
@@ -211,6 +228,7 @@ service cloud.firestore {
           'updatedAtMillis'
         ])
         && request.resource.data.get('acknowledgedByMemberId', '') == request.auth.uid
+        && validAckListUpdate
         && request.resource.data.get('updatedByUid', '') == resource.data.get('updatedByUid', '');
     }
 

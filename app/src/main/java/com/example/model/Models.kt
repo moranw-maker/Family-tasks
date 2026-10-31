@@ -1079,6 +1079,7 @@ data class FamilyAlarm(
     val volumePercent: Int = 85,
     val scheduleStatus: String = STATUS_SCHEDULED_LOCALLY, // SCHEDULED_LOCALLY, PENDING_TARGET_DEVICE, EXACT_PERMISSION_NEEDED, SCHEDULE_ERROR, DISABLED
     val acknowledgedByMemberId: String = "",
+    val acknowledgedByMemberIds: List<String> = emptyList(),
     val acknowledgedByDeviceName: String = "",
     val acknowledgedAtMillis: Long = 0L,
     val nextTriggerAtMillis: Long = 0L,
@@ -1114,6 +1115,23 @@ data class FamilyAlarm(
             return if (single.isNotEmpty()) listOf(single) else emptyList()
         }
 
+    val effectiveAcknowledgedMemberIds: List<String>
+        get() = buildList {
+            acknowledgedByMemberIds.forEach { id ->
+                val trimmed = id.trim()
+                if (trimmed.isNotEmpty() && trimmed !in this) add(trimmed)
+            }
+            val legacy = acknowledgedByMemberId.trim()
+            if (legacy.isNotEmpty() && legacy !in this) add(legacy)
+        }
+
+    fun isAcknowledgedByMember(memberIdOrUid: String): Boolean {
+        val clean = memberIdOrUid.trim()
+        if (clean.isEmpty()) return false
+        if (scheduleStatus == STATUS_PENDING_TARGET_DEVICE) return false
+        return clean in effectiveAcknowledgedMemberIds
+    }
+
     val timeFormatted: String
         get() = String.format(java.util.Locale.US, "%02d:%02d", hour.coerceIn(0, 23), minute.coerceIn(0, 59))
 
@@ -1128,8 +1146,8 @@ data class FamilyAlarm(
             (scheduleStatus == STATUS_SCHEDULED_LOCALLY || scheduleStatus == STATUS_EXACT_PERMISSION_NEEDED) &&
                 (isPersonal ||
                     effectiveAssignedMemberId.isBlank() ||
-                    effectiveAssignedMemberId == createdByMemberId ||
-                    acknowledgedByMemberId.isNotBlank())
+                    effectiveAssignedMemberIds.all { it == createdByMemberId } ||
+                    effectiveAcknowledgedMemberIds.isNotEmpty())
         )
 
     fun isTargetedToAnotherMember(): Boolean {
@@ -1143,10 +1161,12 @@ data class FamilyAlarm(
 
     fun isTargetDeviceAcknowledged(): Boolean {
         if (!isTargetedToAnotherMember()) return true
+        val remoteTargetIds = effectiveAssignedMemberIds.filter { it.isNotBlank() && it != createdByMemberId }
+        val ackIds = effectiveAcknowledgedMemberIds.filter { it != createdByMemberId }
         return isConfirmedOnTargetDevice &&
             scheduleStatus != STATUS_PENDING_TARGET_DEVICE &&
-            acknowledgedByMemberId.isNotBlank() &&
-            acknowledgedByMemberId != createdByMemberId
+            ackIds.isNotEmpty() &&
+            (remoteTargetIds.size <= 1 || remoteTargetIds.all { it in effectiveAcknowledgedMemberIds })
     }
 
     /**
@@ -1306,15 +1326,25 @@ data class FamilyAlarm(
         //    (handles cases where parent selected a child profile before UID migration or matched by name)
         if (isChildDevice) {
             val isParentPersonal = createdByRole.equals("PARENT", ignoreCase = true) &&
-                (isPersonal || (targetId.isNotBlank() && targetId == createdByMemberId))
+                (isPersonal || (targetId.isNotBlank() && targetIds.size == 1 && targetId == createdByMemberId))
             if (!isParentPersonal) {
-                if (currentMemberName.isNotBlank() &&
-                    assignedMemberName.isNotBlank() &&
-                    assignedMemberName.trim().equals(currentMemberName.trim(), ignoreCase = true)
-                ) {
+                val targetNames = effectiveAssignedMemberNames
+                val matchesByName = currentMemberName.isNotBlank() &&
+                    targetNames.any { it.trim().equals(currentMemberName.trim(), ignoreCase = true) }
+                // Only use name fallback if targetIds is empty or contains pre-migration local IDs (`m_kid*`)
+                if (matchesByName && (targetIds.isEmpty() || targetIds.any { it.startsWith("m_kid") })) {
                     return true
                 }
-                if (targetId.startsWith("m_kid") && createdByRole.equals("PARENT", ignoreCase = true)) {
+                // Pre-UID-migration fallback: only when device member ID is a migrated UID (not a different `m_kid*` profile)
+                // and target name is either unspecified or matches this child
+                val deviceUsesLocalPlaceholder = candidateIds.any { it.startsWith("m_kid") }
+                if (
+                    !deviceUsesLocalPlaceholder &&
+                    targetIds.size == 1 &&
+                    targetId.startsWith("m_kid") &&
+                    createdByRole.equals("PARENT", ignoreCase = true) &&
+                    (currentMemberName.isBlank() || targetNames.isEmpty() || matchesByName)
+                ) {
                     return true
                 }
             }
