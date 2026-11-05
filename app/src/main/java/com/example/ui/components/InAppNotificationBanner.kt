@@ -12,11 +12,17 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -34,12 +40,18 @@ fun InAppNotificationBanner(
     alert: AppNotification?,
     onDismiss: () -> Unit,
     onBannerClick: ((AppNotification) -> Unit)? = null,
+    onUserInteraction: (() -> Unit)? = null,
     autoDismissDurationMs: Long = IN_APP_BANNER_AUTO_DISMISS_MS
 ) {
-    LaunchedEffect(alert?.id, autoDismissDurationMs) {
-        if (alert != null && autoDismissDurationMs > 0L) {
+    // Reset interaction state whenever a new notification alert ID arrives
+    var hasUserInteracted by remember(alert?.id) { mutableStateOf(false) }
+
+    LaunchedEffect(alert?.id, autoDismissDurationMs, hasUserInteracted) {
+        if (alert != null && autoDismissDurationMs > 0L && !hasUserInteracted) {
             delay(autoDismissDurationMs)
-            onDismiss()
+            if (!hasUserInteracted) {
+                onDismiss()
+            }
         }
     }
 
@@ -72,9 +84,23 @@ fun InAppNotificationBanner(
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("in_app_notification_banner_card")
+                    .pointerInput(alert.id) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (event.changes.any { it.pressed }) {
+                                    if (!hasUserInteracted) {
+                                        hasUserInteracted = true
+                                        onUserInteraction?.invoke()
+                                    }
+                                }
+                            }
+                        }
+                    }
                     .clickable {
+                        hasUserInteracted = true
+                        onUserInteraction?.invoke()
                         onBannerClick?.invoke(alert)
-                        onDismiss()
                     }
             ) {
                 Column(
@@ -140,7 +166,10 @@ fun InAppNotificationBanner(
                         }
 
                         IconButton(
-                            onClick = onDismiss,
+                            onClick = {
+                                hasUserInteracted = true
+                                onDismiss()
+                            },
                             modifier = Modifier
                                 .size(32.dp)
                                 .testTag("dismiss_banner_alert_button")

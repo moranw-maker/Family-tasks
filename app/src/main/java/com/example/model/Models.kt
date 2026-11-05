@@ -1546,6 +1546,31 @@ data class TaskCollaborationProposal(
         }
         return status == TaskProposalStatus.PENDING_CHILD_APPROVAL && targetChildId in candidateIds
     }
+
+    /**
+     * True when this proposal should be displayed in the TasksScreen "הצעות שיתוף והחלפת משימות" section
+     * for [member]:
+     * - Must be actively pending ([TaskProposalStatus.isPending] == true). Approved, rejected,
+     *   cancelled, or closed proposals are never shown in the active TasksScreen proposals section.
+     * - For a PARENT: only when awaiting parent approval ([TaskProposalStatus.PENDING_PARENT_APPROVAL]).
+     * - For a CHILD: when awaiting the target child's approval ([TaskProposalStatus.PENDING_CHILD_APPROVAL])
+     *   or when the child is the requester of the pending proposal (allowing cancellation).
+     */
+    fun isPendingActionableForMember(member: FamilyMember, authUid: String = ""): Boolean {
+        if (!status.isPending) return false
+        if (member.isParent) {
+            return status == TaskProposalStatus.PENDING_PARENT_APPROVAL
+        }
+        val candidateIds = buildSet {
+            if (member.id.isNotBlank()) add(member.id)
+            if (authUid.isNotBlank()) add(authUid)
+        }
+        val isTargetAwaitingChildDecision = !isOpenTaskVolunteer &&
+            status == TaskProposalStatus.PENDING_CHILD_APPROVAL &&
+            targetChildId in candidateIds
+        val isRequesterWithPendingProposal = requesterChildId in candidateIds
+        return isTargetAwaitingChildDecision || isRequesterWithPendingProposal
+    }
 }
 
 /**

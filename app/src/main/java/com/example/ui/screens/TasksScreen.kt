@@ -154,41 +154,52 @@ fun TasksScreen(
         }
     }
 
-    // Automatically close task detail dialog if the task was deleted or if an open task was claimed by someone else
-    LaunchedEffect(tasks, selectedTaskForDetail?.id) {
-        val currentOpenDetail = selectedTaskForDetail ?: return@LaunchedEffect
-        val latest = tasks.find { it.id == currentOpenDetail.id }
-        if (latest == null) {
-            selectedTaskForDetail = null
-            staleOpenTaskNotice = if (isHebrew) {
-                "משימה זו כבר נלקחה או אינה זמינה עוד"
-            } else {
-                "This task is no longer available"
+    // Automatically close task modals if the task was deleted, cancelled, or claimed by another user
+    LaunchedEffect(tasks, selectedTaskForDetail?.id, targetTaskForSwapDialog?.id, taskForParentSplitDialog?.id, currentMember.id) {
+        selectedTaskForDetail?.let { currentOpenDetail ->
+            val latest = tasks.find { it.id == currentOpenDetail.id }
+            val wasClaimedOrCancelledFromOpen = currentOpenDetail.isUnassignedOpenTask &&
+                !latest?.isUnassignedOpenTask.let { it == true } &&
+                (latest == null || latest.assignedToMemberId != currentMember.id)
+            val wasTakenByAnotherUser = latest != null &&
+                !currentMember.isParent &&
+                latest.assignedToMemberId.isNotBlank() &&
+                latest.assignedToMemberId != currentMember.id &&
+                currentOpenDetail.assignedToMemberId != latest.assignedToMemberId
+            if (latest == null || wasClaimedOrCancelledFromOpen || wasTakenByAnotherUser) {
+                selectedTaskForDetail = null
+                staleOpenTaskNotice = if (isHebrew) {
+                    "משימה זו כבר נלקחה או אינה זמינה עוד"
+                } else {
+                    "This task is no longer available"
+                }
             }
-        } else if (
-            currentOpenDetail.isUnassignedOpenTask &&
-            !latest.isUnassignedOpenTask &&
-            latest.assignedToMemberId != currentMember.id &&
-            !currentMember.isParent
-        ) {
-            selectedTaskForDetail = null
-            staleOpenTaskNotice = if (isHebrew) {
-                "משימה זו כבר נלקחה או אינה זמינה עוד"
-            } else {
-                "This task was already assigned to another child"
+        }
+        targetTaskForSwapDialog?.let { currentSwapTarget ->
+            val latest = tasks.find { it.id == currentSwapTarget.id }
+            if (latest == null || latest.isCompleted || latest.approvedByParent || latest.assignedToMemberId != currentSwapTarget.assignedToMemberId) {
+                targetTaskForSwapDialog = null
+                staleOpenTaskNotice = if (isHebrew) {
+                    "משימה זו כבר נלקחה או אינה זמינה עוד"
+                } else {
+                    "This task is no longer available"
+                }
+            }
+        }
+        taskForParentSplitDialog?.let { currentSplitTarget ->
+            val latest = tasks.find { it.id == currentSplitTarget.id }
+            if (latest == null || !latest.isCompleted || latest.approvedByParent) {
+                taskForParentSplitDialog = null
             }
         }
     }
 
-    val visibleProposals = remember(taskProposals, currentMember) {
-        taskProposals
-            .filter { it.isVisibleToMember(currentMember) && it.status != TaskProposalStatus.CANCELLED }
-            .sortedWith(
-                compareByDescending<TaskCollaborationProposal> { it.isAwaitingActionFromMember(currentMember) }
-                    .thenByDescending { it.status.isPending }
-                    .thenByDescending { it.updatedAtMillis }
-            )
-            .take(8)
+    val visibleProposals = remember(taskProposals, tasks, currentMember) {
+        filterPendingProposalsForMember(
+            taskProposals = taskProposals,
+            tasks = tasks,
+            currentMember = currentMember
+        )
     }
 
     val todayDate = remember { LocalDate.now() }
@@ -1929,6 +1940,39 @@ private fun OpenTasksVolunteeringSection(
     }
 }
 
+internal fun filterPendingProposalsForMember(
+    taskProposals: List<TaskCollaborationProposal>,
+    tasks: List<FamilyTask>,
+    currentMember: FamilyMember
+): List<TaskCollaborationProposal> {
+    val tasksById = if (tasks.isEmpty()) emptyMap() else tasks.associateBy { it.id }
+    return taskProposals
+        .filter { proposal ->
+            if (!proposal.isPendingActionableForMember(currentMember)) return@filter false
+            if (tasksById.isNotEmpty()) {
+                val primaryTask = tasksById[proposal.primaryTaskId]
+                if (primaryTask == null || primaryTask.isCompleted || primaryTask.approvedByParent) {
+                    return@filter false
+                }
+                if (proposal.isOpenTaskVolunteer && !primaryTask.isUnassignedOpenTask) {
+                    return@filter false
+                }
+                val swapId = proposal.offeredSwapTaskId?.takeIf { it.isNotBlank() }
+                if (swapId != null) {
+                    val swapTask = tasksById[swapId]
+                    if (swapTask == null || swapTask.isCompleted || swapTask.approvedByParent) {
+                        return@filter false
+                    }
+                }
+            }
+            true
+        }
+        .sortedWith(
+            compareByDescending<TaskCollaborationProposal> { it.isAwaitingActionFromMember(currentMember) }
+                .thenByDescending { it.updatedAtMillis }
+        )
+}
+
 @Composable
 private fun TaskCollaborationProposalsCard(
     proposals: List<TaskCollaborationProposal>,
@@ -1938,6 +1982,11 @@ private fun TaskCollaborationProposalsCard(
     onParentDecide: (proposalId: String, approve: Boolean) -> Unit,
     onCancelProposal: (proposalId: String) -> Unit = {}
 ) {
+    val pendingProposals = remember(proposals, currentMember) {
+        proposals.filter { it.isPendingActionableForMember(currentMember) }
+    }
+    if (pendingProposals.isEmpty()) return
+
     val glass = LocalSoftGlassColors.current
     FamilyGlassCard(
         cornerRadius = 22.dp,
@@ -1962,13 +2011,14 @@ private fun TaskCollaborationProposalsCard(
                     )
                 )
                 FamilyStatusChip(
-                    label = "${proposals.count { it.status.isPending }} ${if (isHebrew) "פעילות" else "active"}",
+                    label = "${pendingProposals.size} ${if (isHebrew) "ממתינות" else "pending"}",
                     containerColor = glass.primaryAccentSoftBg,
-                    contentColor = glass.primaryAccent
+                    contentColor = glass.primaryAccent,
+                    modifier = Modifier.testTag("task_proposals_pending_counter")
                 )
             }
 
-            proposals.forEach { proposal ->
+            pendingProposals.forEach { proposal ->
                 val isAwaitingMyChildResponse = !currentMember.isParent &&
                     !proposal.isOpenTaskVolunteer &&
                     proposal.status == TaskProposalStatus.PENDING_CHILD_APPROVAL &&

@@ -6116,13 +6116,474 @@ class ExampleRobolectricTest {
             com.example.notifications.FamilyAlarmScheduler.isAlarmLocallyScheduled(context, alarmMultiId)
         )
     }
+
+    @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+    @Test
+    fun taskNotificationPopupModal_fourSecondAutoClose_touchPause_manualDismiss_andSequentialAlerts() = androidx.compose.ui.test.runComposeUiTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repo = FamilyRepository(
+            context = context,
+            authProvider = { null },
+            firestoreProvider = { null }
+        )
+
+        assertEquals(4_000L, com.example.ui.components.IN_APP_BANNER_AUTO_DISMISS_MS)
+        assertEquals(4_000L, com.example.ui.dialogs.TASK_DETAIL_AUTO_DISMISS_MS)
+        assertEquals(4_000L, repo.bannerAutoDismissDelayMs)
+
+        // 1. Test Compose UI: 4-second auto-close when untouched, touch cancels auto-close, manual close cancels timer,
+        // and a new notification starts a fresh timer for the new notification only.
+        mainClock.autoAdvance = false
+        val currentAlertState = androidx.compose.runtime.mutableStateOf<com.example.model.FamilyNotificationAlert?>(
+            com.example.model.FamilyNotificationAlert(
+                id = "alert_seq_1",
+                title = "משימה פתוחה 1",
+                message = "סידור הסלון (+20 נק')",
+                targetMemberName = "נועם",
+                targetMemberEmoji = "👦",
+                reason = com.example.model.AlertReason.TASK_REMINDER,
+                timestampFormatted = "12:00",
+                taskId = "t1",
+                eventKey = "open_task:t1"
+            )
+        )
+        var dismissCount = 0
+        var userTouchDetectedCount = 0
+
+        setContent {
+            com.example.ui.theme.MyApplicationTheme {
+                com.example.ui.components.InAppNotificationBanner(
+                    alert = currentAlertState.value,
+                    onDismiss = {
+                        dismissCount++
+                        currentAlertState.value = null
+                    },
+                    onUserInteraction = {
+                        userTouchDetectedCount++
+                    },
+                    autoDismissDurationMs = 4_000L
+                )
+            }
+        }
+        mainClock.advanceTimeByFrame()
+
+        // Advance 2.5s (< 4s) -> still visible
+        mainClock.advanceTimeBy(2_500L)
+        assertEquals("Modal must not close before 4 seconds", 0, dismissCount)
+        assertNotNull(currentAlertState.value)
+
+        // Advance past 4s -> auto-closes
+        mainClock.advanceTimeBy(1_600L)
+        mainClock.advanceTimeByFrame()
+        assertEquals("Modal must auto-close after 4 seconds", 1, dismissCount)
+        assertNull(currentAlertState.value)
+
+        // 2. Touch interaction pauses/cancels the auto-close timer so it never closes mid-action
+        currentAlertState.value = com.example.model.FamilyNotificationAlert(
+            id = "alert_touch_2",
+            title = "משימה פתוחה 2",
+            message = "פינוי מדיח (+15 נק')",
+            targetMemberName = "נועם",
+            targetMemberEmoji = "👦",
+            reason = com.example.model.AlertReason.TASK_REMINDER,
+            timestampFormatted = "12:01",
+            taskId = "t2",
+            eventKey = "open_task:t2"
+        )
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        mainClock.advanceTimeByFrame()
+
+        mainClock.advanceTimeBy(1_500L)
+        // Simulate user touching the modal card (triggers PointerEventPass.Initial in InAppNotificationBanner)
+        onNodeWithTag("in_app_notification_banner_card").performClick()
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        mainClock.advanceTimeByFrame()
+        assertTrue("User touch must notify interaction callback", userTouchDetectedCount >= 1)
+
+        // Advance 10 full seconds while user has interacted -> modal must NOT auto-close mid-action!
+        mainClock.advanceTimeBy(10_000L)
+        mainClock.advanceTimeByFrame()
+        assertEquals("Touched modal must not auto-close mid-action", 1, dismissCount)
+        assertNotNull("Modal must remain open after user touch", currentAlertState.value)
+
+        // Close manually via dismiss button
+        onNodeWithTag("dismiss_banner_alert_button").performClick()
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        mainClock.advanceTimeByFrame()
+        assertEquals("Manual close must dismiss modal immediately", 2, dismissCount)
+        assertNull(currentAlertState.value)
+
+        // 3 & 4 & 8. Sequential notifications: Alert A arrives, after 2.5s Alert B arrives ->
+        // Timer resets for Alert B only (Alert B stays open at t=4.0s from A, and closes 4.0s after B arrived!)
+        currentAlertState.value = com.example.model.FamilyNotificationAlert(
+            id = "alert_seq_A",
+            title = "התראה A",
+            message = "הודעה ראשונה",
+            targetMemberName = "מאיה",
+            targetMemberEmoji = "👧",
+            reason = com.example.model.AlertReason.TASK_REMINDER,
+            timestampFormatted = "12:02",
+            eventKey = "seq:A"
+        )
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        mainClock.advanceTimeByFrame()
+        mainClock.advanceTimeBy(2_500L)
+        assertEquals(2, dismissCount)
+
+        // New notification B arrives at t=2.5s
+        currentAlertState.value = com.example.model.FamilyNotificationAlert(
+            id = "alert_seq_B",
+            title = "התראה B",
+            message = "הודעה שנייה חדשה",
+            targetMemberName = "מאיה",
+            targetMemberEmoji = "👧",
+            reason = com.example.model.AlertReason.TASK_REMINDER,
+            timestampFormatted = "12:03",
+            eventKey = "seq:B"
+        )
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        mainClock.advanceTimeByFrame()
+
+        // Advance 2.0s (total 4.5s since A, but only 2.0s since B) -> B must still be open!
+        mainClock.advanceTimeBy(2_000L)
+        mainClock.advanceTimeByFrame()
+        assertEquals("New notification B must have its own fresh 4-second timer", 2, dismissCount)
+        assertEquals("alert_seq_B", currentAlertState.value?.id)
+
+        // Advance remaining 2.1s for B (total 4.1s since B) -> B auto-closes!
+        mainClock.advanceTimeBy(2_100L)
+        mainClock.advanceTimeByFrame()
+        assertEquals("New notification B must auto-close after its own 4-second timer", 3, dismissCount)
+        assertNull(currentAlertState.value)
+        mainClock.autoAdvance = true
+    }
+
+    @Test
+    fun taskNotificationPopupModal_noReopenOnFirestoreOrFcmUpdates_preservesHistoryAndTaskState_andClosesWhenTaskUnavailable() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.notifications.FcmTokenManager.clearAllDispatchedEventsForTesting(context)
+        com.example.notifications.FcmTokenManager.setAppForegroundState(true)
+
+        val repo = FamilyRepository(
+            context = context,
+            authProvider = { null },
+            firestoreProvider = { null }
+        )
+
+        val parent = repo.members.value.first { it.isParent }
+        val child1 = repo.members.value.filter { !it.isParent }[0]
+        val child2 = repo.members.value.filter { !it.isParent }[1]
+        val todayEpoch = LocalDate.now().toEpochDay()
+
+        // Parent creates an open task for volunteering
+        repo.switchCurrentMember(parent)
+        val openTask = FamilyTask(
+            id = "open_modal_test_1",
+            title = "שטיפת כלים בכיור",
+            description = "משימה פתוחה",
+            assignedToMemberId = "",
+            isOpenForVolunteering = true,
+            points = 30,
+            dateEpochDay = todayEpoch
+        )
+        assertTrue(repo.addTask(openTask))
+        assertNotNull("Open task banner must appear initially", repo.activeBannerAlert.value)
+        assertEquals("open_modal_test_1", repo.activeBannerAlert.value?.taskId)
+
+        // Requirement 7: Closing the banner manually does NOT delete notification history and does NOT change task state
+        val historyCountBeforeDismiss = repo.notifications.value.size
+        repo.dismissActiveBanner()
+        assertNull("Banner must be closed after dismissActiveBanner()", repo.activeBannerAlert.value)
+        assertEquals(
+            "Closing the popup must NOT delete the notification from notification history",
+            historyCountBeforeDismiss,
+            repo.notifications.value.size
+        )
+        assertTrue(
+            "Notification must remain in history after popup dismissal",
+            repo.notifications.value.any { it.taskId == "open_modal_test_1" }
+        )
+        val taskAfterDismiss = repo.tasks.value.find { it.id == "open_modal_test_1" }
+        assertNotNull("Task must still exist after popup dismissal", taskAfterDismiss)
+        assertTrue("Task state must remain unchanged (open for volunteering)", taskAfterDismiss!!.isUnassignedOpenTask)
+        assertFalse("Task completion state must remain unchanged", taskAfterDismiss.isCompleted)
+
+        // Requirement 6: Prevent repeated re-opening of the same popup due to Firestore updates or duplicate FCM events
+        repo.pushAlert(
+            title = "📢 משימה פתוחה להתנדבות!",
+            message = "שטיפת כלים בכיור",
+            targetName = child1.name,
+            targetEmoji = "🙋",
+            reason = com.example.model.AlertReason.TASK_REMINDER,
+            showBanner = true,
+            taskId = "open_modal_test_1",
+            eventKey = "open_task:open_modal_test_1:${child1.id}",
+            isOpenTaskAlert = true
+        )
+        assertNull(
+            "Same canonical eventKey must NEVER re-open the popup after it was already shown/dismissed",
+            repo.activeBannerAlert.value
+        )
+        assertEquals(
+            "Duplicate eventKey must not create duplicate history entries",
+            historyCountBeforeDismiss,
+            repo.notifications.value.size
+        )
+
+        // Requirement 5: When a task is claimed by another user, cancelled, or deleted, active popup closes immediately
+        val openTask2 = FamilyTask(
+            id = "open_modal_test_2",
+            title = "קיפול כביסה",
+            description = "משימה פתוחה שנייה",
+            assignedToMemberId = "",
+            isOpenForVolunteering = true,
+            points = 25,
+            dateEpochDay = todayEpoch
+        )
+        assertTrue(repo.addTask(openTask2))
+        assertEquals("open_modal_test_2", repo.activeBannerAlert.value?.taskId)
+
+        // Switch to child1 while child2 is assigned the open task by parent
+        repo.switchCurrentMember(child1)
+        val claimedTask2 = openTask2.copy(
+            assignedToMemberId = child2.id,
+            isOpenForVolunteering = false
+        )
+        repo.reconcileActiveBannerAgainstTasks(
+            repo.tasks.value.map { if (it.id == openTask2.id) claimedTask2 else it }
+        )
+        assertNull(
+            "Active popup must close immediately when the open task is claimed/assigned to another user",
+            repo.activeBannerAlert.value
+        )
+
+        // Test deleted task auto-closes popup
+        repo.switchCurrentMember(parent)
+        val regularTask = FamilyTask(
+            id = "reg_modal_test_3",
+            title = "הוצאת אשפה",
+            assignedToMemberId = child1.id,
+            points = 15,
+            dateEpochDay = todayEpoch
+        )
+        assertTrue(repo.addTask(regularTask))
+        repo.sendParentNudgeForTask(regularTask)
+        assertEquals("reg_modal_test_3", repo.activeBannerAlert.value?.taskId)
+
+        // Delete the task -> popup must close immediately while history remains intact
+        val historyBeforeDelete = repo.notifications.value.size
+        assertTrue(repo.deleteTask("reg_modal_test_3"))
+        assertNull(
+            "Active popup must close immediately when its referenced task is deleted",
+            repo.activeBannerAlert.value
+        )
+        assertEquals(
+            "Deleting task and auto-closing popup must preserve notification history",
+            historyBeforeDelete,
+            repo.notifications.value.size
+        )
+    }
+
+    @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+    @Test
+    fun taskCollaborationProposalsSection_showsOnlyPendingForCurrentUser_hidesOnApproveReject_noReappearOnFirestoreSync_andPreservesHistory() = androidx.compose.ui.test.runComposeUiTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repo = FamilyRepository(
+            context = context,
+            authProvider = { null },
+            firestoreProvider = { null }
+        )
+
+        val dad = repo.members.value.first { it.isParent }
+        val kid1 = repo.members.value.filter { !it.isParent }[0]
+        val kid2 = repo.members.value.filter { !it.isParent }[1]
+        val todayEpoch = LocalDate.now().toEpochDay()
+
+        repo.switchCurrentMember(dad)
+        val taskA = FamilyTask(
+            id = "prop_clean_task_a",
+            title = "סידור מדיח כלים",
+            assignedToMemberId = kid1.id,
+            points = 20,
+            dateEpochDay = todayEpoch
+        )
+        val taskB = FamilyTask(
+            id = "prop_clean_task_b",
+            title = "טאטוא סלון",
+            assignedToMemberId = kid1.id,
+            points = 25,
+            dateEpochDay = todayEpoch
+        )
+        assertTrue(repo.addTask(taskA))
+        assertTrue(repo.addTask(taskB))
+
+        // Bind TasksScreen to live repo flows so UI updates immediately without reopening the screen
+        setContent {
+            val tasksState by repo.tasks.collectAsState()
+            val membersState by repo.members.collectAsState()
+            val currentMemberState by repo.currentMember.collectAsState()
+            val proposalsState by repo.taskProposals.collectAsState()
+            com.example.ui.theme.MyApplicationTheme {
+                com.example.ui.screens.TasksScreen(
+                    tasks = tasksState,
+                    members = membersState,
+                    currentMember = currentMemberState,
+                    selectedMemberFilter = null,
+                    isHebrew = true,
+                    onFilterChange = {},
+                    onToggleTask = { repo.toggleTaskCompletion(it) },
+                    onEditTask = {},
+                    onDeleteTask = { repo.deleteTask(it) },
+                    onSendNudge = {},
+                    onAddNewTask = {},
+                    taskProposals = proposalsState,
+                    onChildRespondProposal = { propId, approve ->
+                        repo.respondToTaskProposalAsChild(propId, approve)
+                    },
+                    onParentDecideProposal = { propId, approve ->
+                        repo.decideTaskProposalAsParent(propId, approve)
+                    },
+                    onCancelTaskProposal = { propId ->
+                        repo.cancelTaskProposal(propId)
+                    }
+                )
+            }
+        }
+        waitForIdle()
+
+        // 5. Initially there are no pending proposals -> the entire section ("task_proposals_banner") must be hidden!
+        assertTrue(
+            com.example.ui.screens.filterPendingProposalsForMember(
+                repo.taskProposals.value,
+                repo.tasks.value,
+                dad
+            ).isEmpty()
+        )
+        onNodeWithTag("task_proposals_banner").assertDoesNotExist()
+
+        // Kid 2 creates two volunteer proposals for Kid 1's tasks (propA and propB -> PENDING_CHILD_APPROVAL)
+        repo.switchCurrentMember(kid2)
+        val propA = kotlinx.coroutines.runBlocking {
+            repo.proposeVolunteerForTaskAsync(taskA.id, "אני אעזור במדיח").getOrThrow()
+        }
+        val propB = kotlinx.coroutines.runBlocking {
+            repo.proposeVolunteerForTaskAsync(taskB.id, "אני אטאטא את הסלון").getOrThrow()
+        }
+        waitForIdle()
+
+        // 1. While PENDING_CHILD_APPROVAL, Parent (dad) should NOT see them yet because they are awaiting target child (kid1), not parent!
+        repo.switchCurrentMember(dad)
+        waitForIdle()
+        assertTrue(
+            "Parent must not see proposals that are still awaiting target child approval",
+            com.example.ui.screens.filterPendingProposalsForMember(
+                repo.taskProposals.value,
+                repo.tasks.value,
+                dad
+            ).isEmpty()
+        )
+        onNodeWithTag("task_proposals_banner").assertDoesNotExist()
+
+        // Switch to target child (kid1): both pending proposals are awaiting kid1's approval!
+        repo.switchCurrentMember(kid1)
+        waitForIdle()
+        assertEquals(
+            2,
+            com.example.ui.screens.filterPendingProposalsForMember(
+                repo.taskProposals.value,
+                repo.tasks.value,
+                kid1
+            ).size
+        )
+        onNodeWithTag("tasks_screen").performScrollToNode(hasTestTag("task_proposals_banner"))
+        onNodeWithTag("task_proposals_banner").assertExists()
+        onNodeWithTag("task_proposals_pending_counter").assertExists()
+        onNode(androidx.compose.ui.test.hasText("2 ממתינות"), useUnmergedTree = true).assertExists()
+        onNodeWithTag("proposal_card_${propA.id}").assertExists()
+        onNodeWithTag("proposal_card_${propB.id}").assertExists()
+
+        // 3. Kid 1 REJECTS propB directly via UI -> propB must disappear immediately from the screen, leaving only 1 pending proposal!
+        onNodeWithTag("child_reject_proposal_${propB.id}").performClick()
+        waitForIdle()
+        onNodeWithTag("proposal_card_${propB.id}").assertDoesNotExist()
+        onNodeWithTag("proposal_card_${propA.id}").assertExists()
+        onNode(androidx.compose.ui.test.hasText("1 ממתינות"), useUnmergedTree = true).assertExists()
+
+        // Kid 1 APPROVES propA directly via UI -> propA moves to PENDING_PARENT_APPROVAL.
+        // Because kid1 has no more pending proposals awaiting kid1's action, propA disappears for kid1 and the entire banner hides!
+        onNodeWithTag("child_approve_proposal_${propA.id}").performClick()
+        waitForIdle()
+        assertTrue(
+            com.example.ui.screens.filterPendingProposalsForMember(
+                repo.taskProposals.value,
+                repo.tasks.value,
+                kid1
+            ).isEmpty()
+        )
+        onNodeWithTag("proposal_card_${propA.id}").assertDoesNotExist()
+        onNodeWithTag("task_proposals_banner").assertDoesNotExist()
+
+        // Switch to Parent (dad): propA (now PENDING_PARENT_APPROVAL) is displayed for dad, while rejected propB is NOT displayed!
+        repo.switchCurrentMember(dad)
+        waitForIdle()
+        assertEquals(
+            listOf(propA.id),
+            com.example.ui.screens.filterPendingProposalsForMember(
+                repo.taskProposals.value,
+                repo.tasks.value,
+                dad
+            ).map { it.id }
+        )
+        onNodeWithTag("tasks_screen").performScrollToNode(hasTestTag("task_proposals_banner"))
+        onNodeWithTag("task_proposals_banner").assertExists()
+        onNode(androidx.compose.ui.test.hasText("1 ממתינות"), useUnmergedTree = true).assertExists()
+        onNodeWithTag("proposal_card_${propA.id}").assertExists()
+        onNodeWithTag("proposal_card_${propB.id}").assertDoesNotExist()
+
+        // 2 & 5 & 7. Parent APPROVES propA via UI -> propA disappears immediately and the entire section is hidden!
+        onNodeWithTag("parent_approve_proposal_${propA.id}").performClick()
+        waitForIdle()
+        assertTrue(
+            com.example.ui.screens.filterPendingProposalsForMember(
+                repo.taskProposals.value,
+                repo.tasks.value,
+                dad
+            ).isEmpty()
+        )
+        onNodeWithTag("proposal_card_${propA.id}").assertDoesNotExist()
+        onNodeWithTag("task_proposals_banner").assertDoesNotExist()
+
+        // 4 & 8. Simulate a stale Firestore snapshot where propA and propB still appear as PENDING ->
+        // reconcileRemoteProposalsWithLocalState must prevent handled proposals from reappearing!
+        val staleRemoteSnapshot = listOf(
+            propA.copy(status = com.example.model.TaskProposalStatus.PENDING_PARENT_APPROVAL),
+            propB.copy(status = com.example.model.TaskProposalStatus.PENDING_CHILD_APPROVAL)
+        )
+        repo.reconcileRemoteProposalsWithLocalState(staleRemoteSnapshot)
+        waitForIdle()
+        assertTrue(
+            "Handled proposals must not reappear after stale Firestore snapshot",
+            com.example.ui.screens.filterPendingProposalsForMember(
+                repo.taskProposals.value,
+                repo.tasks.value,
+                dad
+            ).isEmpty()
+        )
+        onNodeWithTag("task_proposals_banner").assertDoesNotExist()
+        onNodeWithTag("proposal_card_${propA.id}").assertDoesNotExist()
+        onNodeWithTag("proposal_card_${propB.id}").assertDoesNotExist()
+
+        // 6. Verify proposal history is preserved in repository.taskProposals (never deleted!)
+        val storedPropA = repo.taskProposals.value.find { it.id == propA.id }
+        val storedPropB = repo.taskProposals.value.find { it.id == propB.id }
+        assertNotNull("Approved proposal must be preserved in history", storedPropA)
+        assertNotNull("Rejected proposal must be preserved in history", storedPropB)
+        assertEquals(com.example.model.TaskProposalStatus.APPROVED_BY_PARENT, storedPropA?.status)
+        assertEquals(com.example.model.TaskProposalStatus.REJECTED_BY_CHILD, storedPropB?.status)
+
+        // Verify task assignment was updated properly for taskA and unchanged for taskB
+        assertEquals(kid2.id, repo.tasks.value.first { it.id == taskA.id }.assignedToMemberId)
+        assertEquals(kid1.id, repo.tasks.value.first { it.id == taskB.id }.assignedToMemberId)
+    }
 }
-
-
-
-
-
-
-
-
 

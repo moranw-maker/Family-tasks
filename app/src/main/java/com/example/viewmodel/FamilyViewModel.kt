@@ -1186,6 +1186,30 @@ class FamilyViewModel(
         repository.dismissActiveBanner()
     }
 
+    fun pauseBannerAutoDismiss() {
+        repository.pauseActiveBannerAutoDismiss()
+    }
+
+    fun onBannerAlertClicked(alert: FamilyNotificationAlert) {
+        repository.pauseActiveBannerAutoDismiss()
+        val taskId = alert.taskId?.takeIf { it.isNotBlank() }
+        if (taskId != null) {
+            val task = repository.tasks.value.find { it.id == taskId }
+            val current = repository.currentMember.value
+            val isUnavailable = task == null ||
+                (alert.isOpenTaskAlert && !task.isUnassignedOpenTask) ||
+                (!current.isParent && alert.reason != AlertReason.TASK_COMPLETED && task.assignedToMemberId.isNotBlank() && task.assignedToMemberId != current.id)
+            if (isUnavailable) {
+                _snackbarMessage.value = "משימה זו כבר נלקחה או אינה זמינה עוד"
+                repository.dismissActiveBanner()
+                return
+            }
+        }
+        if (_currentScreen.value != AppScreen.HOME) {
+            navigateTo(AppScreen.HOME)
+        }
+    }
+
     // --- Settings & Preferences ---
 
     fun setLanguage(lang: AppLanguage) {

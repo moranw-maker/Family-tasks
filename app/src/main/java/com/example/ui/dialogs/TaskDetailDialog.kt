@@ -9,11 +9,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -21,13 +28,17 @@ import androidx.compose.ui.unit.sp
 import com.example.model.*
 import com.example.ui.components.TimeFormatUtils
 import com.example.ui.theme.*
+import kotlinx.coroutines.delay
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+
+const val TASK_DETAIL_AUTO_DISMISS_MS = 4_000L
 
 /**
  * Polished Material 3 Modal Bottom Sheet displaying full task details, assigned member,
  * scheduled date & 24h time, completion/approval status, reward points, and role-permitted actions.
- * Supports dismissal by swiping down or tapping outside without navigating away.
+ * Supports dismissal by swiping down or tapping outside without navigating away, as well as
+ * automatic dismissal after 4 seconds unless the user touches or interacts with the modal.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -42,7 +53,9 @@ fun TaskDetailBottomSheet(
     onDelete: () -> Unit,
     onSendNudge: () -> Unit = {},
     syncState: TaskCompletionSyncState = TaskCompletionSyncState.IDLE,
-    onApprove: () -> Unit = {}
+    onApprove: () -> Unit = {},
+    autoDismissDurationMs: Long = TASK_DETAIL_AUTO_DISMISS_MS,
+    onUserInteraction: (() -> Unit)? = null
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -66,7 +79,9 @@ fun TaskDetailBottomSheet(
             onDelete = onDelete,
             onSendNudge = onSendNudge,
             syncState = syncState,
-            onApprove = onApprove
+            onApprove = onApprove,
+            autoDismissDurationMs = autoDismissDurationMs,
+            onUserInteraction = onUserInteraction
         )
     }
 }
@@ -87,7 +102,9 @@ fun TaskDetailDialog(
     onDelete: () -> Unit,
     onSendNudge: () -> Unit = {},
     syncState: TaskCompletionSyncState = TaskCompletionSyncState.IDLE,
-    onApprove: () -> Unit = {}
+    onApprove: () -> Unit = {},
+    autoDismissDurationMs: Long = TASK_DETAIL_AUTO_DISMISS_MS,
+    onUserInteraction: (() -> Unit)? = null
 ) {
     TaskDetailBottomSheet(
         task = task,
@@ -100,7 +117,9 @@ fun TaskDetailDialog(
         onDelete = onDelete,
         onSendNudge = onSendNudge,
         syncState = syncState,
-        onApprove = onApprove
+        onApprove = onApprove,
+        autoDismissDurationMs = autoDismissDurationMs,
+        onUserInteraction = onUserInteraction
     )
 }
 
@@ -116,8 +135,21 @@ fun TaskDetailSheetContent(
     onDelete: () -> Unit,
     onSendNudge: () -> Unit = {},
     syncState: TaskCompletionSyncState = TaskCompletionSyncState.IDLE,
-    onApprove: () -> Unit = {}
+    onApprove: () -> Unit = {},
+    autoDismissDurationMs: Long = TASK_DETAIL_AUTO_DISMISS_MS,
+    onUserInteraction: (() -> Unit)? = null
 ) {
+    var hasUserInteracted by remember(task.id) { mutableStateOf(false) }
+
+    LaunchedEffect(task.id, autoDismissDurationMs, hasUserInteracted) {
+        if (autoDismissDurationMs > 0L && !hasUserInteracted) {
+            delay(autoDismissDurationMs)
+            if (!hasUserInteracted) {
+                onDismiss()
+            }
+        }
+    }
+
     val dateText = try {
         val ld = LocalDate.ofEpochDay(task.dateEpochDay)
         val today = LocalDate.now()
@@ -139,6 +171,19 @@ fun TaskDetailSheetContent(
             .navigationBarsPadding()
             .padding(horizontal = 20.dp, vertical = 8.dp)
             .padding(bottom = 16.dp)
+            .pointerInput(task.id) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        if (event.changes.any { it.pressed }) {
+                            if (!hasUserInteracted) {
+                                hasUserInteracted = true
+                                onUserInteraction?.invoke()
+                            }
+                        }
+                    }
+                }
+            }
             .testTag("task_detail_dialog")
     ) {
         // Header row with category badge and close button

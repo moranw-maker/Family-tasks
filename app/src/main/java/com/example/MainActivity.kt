@@ -715,8 +715,11 @@ fun FamilyTasksApp(
                                 InAppNotificationBanner(
                                     alert = notif,
                                     onDismiss = { viewModel.dismissBannerAlert() },
-                                    onBannerClick = {
-                                        viewModel.navigateTo(AppScreen.HOME)
+                                    onBannerClick = { clickedAlert ->
+                                        viewModel.onBannerAlertClicked(clickedAlert)
+                                    },
+                                    onUserInteraction = {
+                                        viewModel.pauseBannerAutoDismiss()
                                     }
                                 )
                             }

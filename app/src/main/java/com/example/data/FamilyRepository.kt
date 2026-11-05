@@ -275,6 +275,7 @@ class FamilyRepository(
 
     private val _taskProposals = MutableStateFlow<List<TaskCollaborationProposal>>(emptyList())
     val taskProposals: StateFlow<List<TaskCollaborationProposal>> = _taskProposals.asStateFlow()
+    private val locallyHandledProposalsById = ConcurrentHashMap<String, TaskCollaborationProposal>()
 
     private val _rewardRedemptions = MutableStateFlow<List<RewardRedemptionRequest>>(emptyList())
     val rewardRedemptions: StateFlow<List<RewardRedemptionRequest>> = _rewardRedemptions.asStateFlow()
@@ -724,6 +725,14 @@ class FamilyRepository(
 
     private val _activeBannerAlert = MutableStateFlow<FamilyNotificationAlert?>(null)
     val activeBannerAlert: StateFlow<FamilyNotificationAlert?> = _activeBannerAlert.asStateFlow()
+
+    private val shownOrDismissedBannerKeys: MutableSet<String> =
+        java.util.Collections.synchronizedSet(LinkedHashSet<String>())
+    private var bannerAutoDismissJob: kotlinx.coroutines.Job? = null
+    @Volatile
+    var bannerAutoDismissDelayMs: Long = 4_000L
+    @Volatile
+    private var isActiveBannerTouchPaused: Boolean = false
 
     private val _selectedFolderId = MutableStateFlow<String?>(null)
     val selectedFolderId: StateFlow<String?> = _selectedFolderId.asStateFlow()
@@ -1655,6 +1664,14 @@ class FamilyRepository(
                             _tasks.value = loadedTasks
                             val initialSyncMap = mutableMapOf<String, TaskCompletionSyncState>()
                             for (t in loadedTasks) {
+                                if (t.isUnassignedOpenTask) {
+                                    val initOpenKey = "open_task:${t.id}"
+                                    notifiedTaskCompletionKeys.add(initOpenKey)
+                                    FcmTokenManager.markEventDispatchedIfNew(initOpenKey, appContext)
+                                }
+                                if (t.assignedToMemberId.isNotBlank()) {
+                                    notifiedTaskCompletionKeys.add("assign:${t.id}:${t.assignedToMemberId}")
+                                }
                                 if (t.isCompleted) {
                                     notifiedTaskCompletionKeys.add("${t.id}:completed")
                                     if (t.approvedByParent) {
@@ -3363,7 +3380,7 @@ class FamilyRepository(
                                 }
                             }
                         }
-                        if (!snapshot.metadata.hasPendingWrites()) {
+                        if (!snapshot.metadata.hasPendingWrites() && (!snapshot.metadata.isFromCache || remoteTasks.isNotEmpty())) {
                             hasProcessedInitialTasksSnapshot = true
                         }
                         _taskSyncStates.value = updatedSyncStates
@@ -4030,7 +4047,9 @@ class FamilyRepository(
                                             targetName = prop.targetChildName,
                                             targetEmoji = "📬",
                                             reason = AlertReason.TASK_REMINDER,
-                                            showBanner = true
+                                            showBanner = true,
+                                            taskId = prop.primaryTaskId,
+                                            eventKey = statusEventKey
                                         )
                                     }
                                 }
@@ -4047,7 +4066,10 @@ class FamilyRepository(
                                             targetName = current.name,
                                             targetEmoji = "👨‍👩‍👧‍👦",
                                             reason = AlertReason.TASK_REMINDER,
-                                            showBanner = true
+                                            showBanner = true,
+                                            taskId = prop.primaryTaskId,
+                                            eventKey = statusEventKey,
+                                            isOpenTaskAlert = prop.isOpenTaskVolunteer
                                         )
                                     }
                                 }
@@ -4059,7 +4081,9 @@ class FamilyRepository(
                                             targetName = current.name,
                                             targetEmoji = "✅",
                                             reason = AlertReason.TASK_COMPLETED,
-                                            showBanner = true
+                                            showBanner = true,
+                                            taskId = prop.primaryTaskId,
+                                            eventKey = statusEventKey
                                         )
                                     }
                                 }
@@ -4071,7 +4095,9 @@ class FamilyRepository(
                                             targetName = current.name,
                                             targetEmoji = "❌",
                                             reason = AlertReason.TASK_REMINDER,
-                                            showBanner = true
+                                            showBanner = true,
+                                            taskId = prop.primaryTaskId,
+                                            eventKey = statusEventKey
                                         )
                                     }
                                 }
@@ -4080,8 +4106,11 @@ class FamilyRepository(
                             }
                         }
                     }
-                    hasProcessedInitialProposalsSnapshot = true
-                    _taskProposals.value = remoteProposals
+                    if (!snapshot.metadata.hasPendingWrites() && (!snapshot.metadata.isFromCache || remoteProposals.isNotEmpty())) {
+                        hasProcessedInitialProposalsSnapshot = true
+                    }
+                    reconcileRemoteProposalsWithLocalState(remoteProposals)
+                    reconcileActiveBannerAgainstTasks(_tasks.value)
                 }
         }
 
@@ -5209,6 +5238,7 @@ class FamilyRepository(
         }
         _taskSyncStates.value = _taskSyncStates.value + (taskId to finalSyncState)
         _tasks.value = _tasks.value.map { if (it.id == taskId) updatedTask else it }
+        reconcileActiveBannerAgainstTasks(_tasks.value)
         resyncTaskRemindersForActiveMember()
 
         repoScope.launch {
@@ -5673,6 +5703,7 @@ class FamilyRepository(
         val finalApprovedTask = outcome.approvedTask
         _taskSyncStates.value = _taskSyncStates.value + (taskId to TaskCompletionSyncState.SAVED_APPROVED)
         _tasks.value = _tasks.value.map { if (it.id == taskId) finalApprovedTask else it }
+        reconcileActiveBannerAgainstTasks(_tasks.value)
         resyncTaskRemindersForActiveMember()
 
         if (outcome.updatedBalance != null && finalApprovedTask.assignedToMemberId.isNotBlank()) {
@@ -8180,15 +8211,6 @@ class FamilyRepository(
                         eventKey = payload.eventKey,
                         isOpenTaskAlert = isOpenTaskEvent
                     )
-                } else if (FcmTokenManager.isAppInForeground) {
-                    val matchingAlert = _notifications.value.firstOrNull { existing ->
-                        val existingKey = existing.eventKey.orEmpty()
-                        existingKey == payload.eventKey ||
-                            FcmTokenManager.canonicalizeEventKey(existingKey) == canonicalKey
-                    }
-                    if (matchingAlert != null) {
-                        _activeBannerAlert.value = matchingAlert
-                    }
                 }
                 if (FcmTokenManager.isAppInForeground) {
                     playForegroundEventSoundOnce(payload.eventKey, payload.eventType)
@@ -8256,20 +8278,110 @@ class FamilyRepository(
         }
     }
 
+    private fun isTaskStillValidForBanner(
+        taskId: String?,
+        isOpenTaskAlert: Boolean,
+        reason: AlertReason,
+        eventKey: String? = null,
+        currentTasks: List<FamilyTask> = _tasks.value
+    ): Boolean {
+        val cleanTaskId = taskId?.takeIf { it.isNotBlank() } ?: return true
+        val matchingTask = currentTasks.find { it.id == cleanTaskId } ?: return false
+        if (isOpenTaskAlert && !matchingTask.isUnassignedOpenTask) {
+            return false
+        }
+        if (reason != AlertReason.TASK_COMPLETED && matchingTask.isCompleted) {
+            return false
+        }
+        val current = _currentMember.value
+        val selfUid = currentUid()
+        val isProposalAlert = eventKey?.trim()?.startsWith("prop:") == true
+        if (!current.isParent && reason != AlertReason.TASK_COMPLETED && !isProposalAlert && matchingTask.assignedToMemberId.isNotBlank()) {
+            val isAssignedToSelf = matchingTask.assignedToMemberId == current.id ||
+                (selfUid.isNotBlank() && matchingTask.assignedToMemberId == selfUid)
+            if (!isAssignedToSelf) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun recordBannerAlertShownOrDismissed(alert: FamilyNotificationAlert) {
+        shownOrDismissedBannerKeys.add("id:${alert.id}")
+        val rawKey = alert.eventKey?.trim().orEmpty()
+        if (rawKey.isNotEmpty()) {
+            shownOrDismissedBannerKeys.add("event:$rawKey")
+            val canonical = FcmTokenManager.canonicalizeEventKey(rawKey)
+            if (canonical.isNotEmpty()) {
+                shownOrDismissedBannerKeys.add("canonical:$canonical")
+            }
+        }
+    }
+
+    private fun hasBannerAlertAlreadyBeenShownOrDismissed(
+        alertId: String,
+        eventKey: String?
+    ): Boolean {
+        if (shownOrDismissedBannerKeys.contains("id:$alertId")) return true
+        val rawKey = eventKey?.trim().orEmpty()
+        if (rawKey.isNotEmpty()) {
+            if (shownOrDismissedBannerKeys.contains("event:$rawKey")) return true
+            val canonical = FcmTokenManager.canonicalizeEventKey(rawKey)
+            if (canonical.isNotEmpty() && shownOrDismissedBannerKeys.contains("canonical:$canonical")) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun scheduleBannerAutoDismissForAlert(alertId: String) {
+        bannerAutoDismissJob?.cancel()
+        bannerAutoDismissJob = null
+        isActiveBannerTouchPaused = false
+        val delayMs = bannerAutoDismissDelayMs
+        if (delayMs <= 0L) return
+        bannerAutoDismissJob = repoScope.launch {
+            kotlinx.coroutines.delay(delayMs)
+            if (!isActiveBannerTouchPaused && _activeBannerAlert.value?.id == alertId) {
+                dismissActiveBanner()
+            }
+        }
+    }
+
+    /**
+     * Pauses/cancels the automatic 4-second dismissal timer when the user touches or interacts
+     * with the active notification popup so it never closes in the middle of a user action.
+     */
+    fun pauseActiveBannerAutoDismiss() {
+        isActiveBannerTouchPaused = true
+        bannerAutoDismissJob?.cancel()
+        bannerAutoDismissJob = null
+    }
+
     /**
      * Automatically dismisses `_activeBannerAlert` if it references a task that was deleted,
-     * completed, or an open task that was already claimed/assigned or cancelled.
+     * cancelled, completed, or already claimed/taken by another user.
      */
     fun reconcileActiveBannerAgainstTasks(currentTasks: List<FamilyTask> = _tasks.value) {
         val banner = _activeBannerAlert.value ?: return
         val bannerTaskId = banner.taskId?.takeIf { it.isNotBlank() } ?: return
-        val matchingTask = currentTasks.find { it.id == bannerTaskId }
-        if (matchingTask == null) {
-            _activeBannerAlert.value = null
+        if (!isTaskStillValidForBanner(bannerTaskId, banner.isOpenTaskAlert, banner.reason, banner.eventKey, currentTasks)) {
+            dismissActiveBanner()
             return
         }
-        if (banner.isOpenTaskAlert && !matchingTask.isUnassignedOpenTask) {
-            _activeBannerAlert.value = null
+        val rawKey = banner.eventKey?.trim().orEmpty()
+        if (rawKey.startsWith("prop:")) {
+            val parts = rawKey.split(":")
+            val propId = parts.getOrNull(1).orEmpty()
+            if (propId.isNotBlank()) {
+                val proposal = _taskProposals.value.find { it.id == propId }
+                if (proposal == null ||
+                    proposal.status == TaskProposalStatus.CANCELLED ||
+                    proposal.status == TaskProposalStatus.CLOSED_NOT_SELECTED
+                ) {
+                    dismissActiveBanner()
+                }
+            }
         }
     }
 
@@ -8285,7 +8397,22 @@ class FamilyRepository(
         isOpenTaskAlert: Boolean = false
     ) {
         val nowStr = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm"))
-        val alert = FamilyNotificationAlert(
+        val cleanEventKey = eventKey?.trim()?.takeIf { it.isNotEmpty() }
+        val canonicalKey = cleanEventKey?.let { FcmTokenManager.canonicalizeEventKey(it) }.orEmpty()
+
+        val existingInHistory = if (cleanEventKey != null) {
+            _notifications.value.firstOrNull { existing ->
+                val existingKey = existing.eventKey?.trim().orEmpty()
+                existingKey.isNotEmpty() && (
+                    existingKey == cleanEventKey ||
+                        (canonicalKey.isNotEmpty() && FcmTokenManager.canonicalizeEventKey(existingKey) == canonicalKey)
+                    )
+            }
+        } else {
+            null
+        }
+
+        val alert = existingInHistory ?: FamilyNotificationAlert(
             title = title,
             message = message,
             targetMemberName = targetName,
@@ -8293,16 +8420,32 @@ class FamilyRepository(
             reason = reason,
             timestampFormatted = nowStr,
             taskId = taskId,
-            eventKey = eventKey,
+            eventKey = cleanEventKey,
             isOpenTaskAlert = isOpenTaskAlert
         )
-        _notifications.value = listOf(alert) + _notifications.value
+
+        if (existingInHistory == null) {
+            _notifications.value = listOf(alert) + _notifications.value
+        }
+
         if (showBanner) {
-            _activeBannerAlert.value = alert
+            val alreadyShownOrDismissed = hasBannerAlertAlreadyBeenShownOrDismissed(alert.id, cleanEventKey)
+            val taskStillValid = isTaskStillValidForBanner(taskId, isOpenTaskAlert, reason, cleanEventKey, _tasks.value)
+            if (!alreadyShownOrDismissed && taskStillValid) {
+                recordBannerAlertShownOrDismissed(alert)
+                _activeBannerAlert.value = alert
+                scheduleBannerAutoDismissForAlert(alert.id)
+            }
         }
     }
 
     fun dismissActiveBanner() {
+        bannerAutoDismissJob?.cancel()
+        bannerAutoDismissJob = null
+        isActiveBannerTouchPaused = false
+        _activeBannerAlert.value?.let { current ->
+            recordBannerAlertShownOrDismissed(current)
+        }
         _activeBannerAlert.value = null
     }
 
@@ -9805,6 +9948,42 @@ class FamilyRepository(
         _collaborationError.value = null
     }
 
+    /**
+     * Reconciles incoming Firestore `task_proposals` snapshots with locally handled proposals so
+     * that a proposal that was just approved, rejected, closed, or cancelled never flickers or
+     * reappears as pending due to a cached or out-of-order Firestore snapshot, while preserving
+     * all historical proposal records in Firestore and in [taskProposals].
+     */
+    internal fun reconcileRemoteProposalsWithLocalState(
+        remoteProposals: List<TaskCollaborationProposal>
+    ): List<TaskCollaborationProposal> {
+        val merged = remoteProposals.map { remote ->
+            val localHandled = locallyHandledProposalsById[remote.id]
+            if (localHandled != null) {
+                if (!localHandled.status.isPending && remote.status.isPending) {
+                    localHandled
+                } else if (
+                    localHandled.status == TaskProposalStatus.PENDING_PARENT_APPROVAL &&
+                    remote.status == TaskProposalStatus.PENDING_CHILD_APPROVAL
+                ) {
+                    localHandled
+                } else {
+                    if (!remote.status.isPending) {
+                        locallyHandledProposalsById[remote.id] = remote
+                    }
+                    remote
+                }
+            } else {
+                if (!remote.status.isPending) {
+                    locallyHandledProposalsById[remote.id] = remote
+                }
+                remote
+            }
+        }.sortedByDescending { it.updatedAtMillis }
+        _taskProposals.value = merged
+        return merged
+    }
+
     private fun parseTaskProposalDocument(
         docId: String,
         data: Map<String, Any?>,
@@ -9952,6 +10131,10 @@ class FamilyRepository(
             updatedAtMillis = nowMillis
         )
 
+        val previousProposals = _taskProposals.value
+        val previousHandled = locallyHandledProposalsById.remove(proposalId)
+        _taskProposals.value = listOf(proposal) + _taskProposals.value.filterNot { it.id == proposalId }
+
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
         if (db != null && authUser != null) {
@@ -9960,6 +10143,10 @@ class FamilyRepository(
                     .collection("task_proposals").document(proposalId)
                 proposalRef.set(buildTaskProposalFirestoreMap(proposal)).await()
             } catch (e: Exception) {
+                if (previousHandled != null) {
+                    locallyHandledProposalsById[proposalId] = previousHandled
+                }
+                _taskProposals.value = previousProposals
                 val msg = e.localizedMessage ?: "שגיאה בשליחת בקשת ההתנדבות למשימה הפתוחה"
                 _collaborationError.value = msg
                 return Result.failure(e)
@@ -9967,7 +10154,6 @@ class FamilyRepository(
         }
 
         _collaborationError.value = null
-        _taskProposals.value = listOf(proposal) + _taskProposals.value.filterNot { it.id == proposalId }
 
         pushAlert(
             title = "🙋 התנדבות למשימה פתוחה",
@@ -10302,6 +10488,21 @@ class FamilyRepository(
             updatedAtMillis = nowMillis
         )
 
+        val previousProposals = _taskProposals.value
+        val previousTasks = _tasks.value
+        val previousHandled = locallyHandledProposalsById[proposalId]
+        locallyHandledProposalsById[proposalId] = updatedProposal
+        _taskProposals.value = _taskProposals.value.map { if (it.id == proposalId) updatedProposal else it }
+        if (!approve) {
+            _tasks.value = _tasks.value.map { t ->
+                if (t.id == proposal.primaryTaskId || t.id == proposal.offeredSwapTaskId) {
+                    t.copy(pendingProposalId = null, updatedAtMillis = nowMillis)
+                } else {
+                    t
+                }
+            }
+        }
+
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
         if (db != null && authUser != null) {
@@ -10327,6 +10528,13 @@ class FamilyRepository(
                     }
                 }.await()
             } catch (e: Exception) {
+                if (previousHandled != null) {
+                    locallyHandledProposalsById[proposalId] = previousHandled
+                } else {
+                    locallyHandledProposalsById.remove(proposalId)
+                }
+                _taskProposals.value = previousProposals
+                _tasks.value = previousTasks
                 val msg = e.localizedMessage ?: "שגיאה בעדכון תגובת הילד/ה להצעה"
                 _collaborationError.value = msg
                 return Result.failure(e)
@@ -10334,15 +10542,7 @@ class FamilyRepository(
         }
 
         _collaborationError.value = null
-        _taskProposals.value = _taskProposals.value.map { if (it.id == proposalId) updatedProposal else it }
         if (!approve) {
-            _tasks.value = _tasks.value.map { t ->
-                if (t.id == proposal.primaryTaskId || t.id == proposal.offeredSwapTaskId) {
-                    t.copy(pendingProposalId = null, updatedAtMillis = nowMillis)
-                } else {
-                    t
-                }
-            }
             pushAlert(
                 title = "ההצעה נדחתה ע״י ${proposal.targetChildName}",
                 message = "${proposal.targetChildName} דחה/תה את ההצעה עבור המשימה \"${proposal.primaryTaskTitle}\".",
@@ -10437,10 +10637,12 @@ class FamilyRepository(
                 _tasks.value = _tasks.value.map { if (it.id == primaryTask.id) primaryTask else it }
                 _taskProposals.value = _taskProposals.value.map { existing ->
                     if (existing.id == proposalId && existing.status.isPending) {
-                        existing.copy(
+                        val closed = existing.copy(
                             status = TaskProposalStatus.CLOSED_NOT_SELECTED,
                             updatedAtMillis = conflictNow
                         )
+                        locallyHandledProposalsById[proposalId] = closed
+                        closed
                     } else {
                         existing
                     }
@@ -10560,6 +10762,29 @@ class FamilyRepository(
             }
         } else {
             null
+        }
+
+        val previousProposals = _taskProposals.value
+        val previousTasks = _tasks.value
+        val previousHandledMain = locallyHandledProposalsById[proposalId]
+        val previousHandledCompeting = closedCompetingById.keys.associateWith { locallyHandledProposalsById[it] }
+        locallyHandledProposalsById[proposalId] = updatedProposal
+        closedCompetingById.forEach { (compId, compProp) ->
+            locallyHandledProposalsById[compId] = compProp
+        }
+        _taskProposals.value = _taskProposals.value.map { existing ->
+            when {
+                existing.id == proposalId -> updatedProposal
+                closedCompetingById.containsKey(existing.id) -> closedCompetingById.getValue(existing.id)
+                else -> existing
+            }
+        }
+        _tasks.value = _tasks.value.map { t ->
+            when (t.id) {
+                updatedPrimaryTask.id -> updatedPrimaryTask
+                updatedSwapTask?.id -> updatedSwapTask
+                else -> t
+            }
         }
 
         val db = firestoreProvider()
@@ -10698,6 +10923,20 @@ class FamilyRepository(
                     }
                 }.await()
             } catch (e: Exception) {
+                if (previousHandledMain != null) {
+                    locallyHandledProposalsById[proposalId] = previousHandledMain
+                } else {
+                    locallyHandledProposalsById.remove(proposalId)
+                }
+                previousHandledCompeting.forEach { (compId, prevComp) ->
+                    if (prevComp != null) {
+                        locallyHandledProposalsById[compId] = prevComp
+                    } else {
+                        locallyHandledProposalsById.remove(compId)
+                    }
+                }
+                _taskProposals.value = previousProposals
+                _tasks.value = previousTasks
                 val msg = e.localizedMessage ?: "שגיאה בעדכון החלטת ההורה על ההצעה"
                 _collaborationError.value = msg
                 return@withLock Result.failure(e)
@@ -10705,20 +10944,6 @@ class FamilyRepository(
         }
 
         _collaborationError.value = null
-        _taskProposals.value = _taskProposals.value.map { existing ->
-            when {
-                existing.id == proposalId -> updatedProposal
-                closedCompetingById.containsKey(existing.id) -> closedCompetingById.getValue(existing.id)
-                else -> existing
-            }
-        }
-        _tasks.value = _tasks.value.map { t ->
-            when (t.id) {
-                updatedPrimaryTask.id -> updatedPrimaryTask
-                updatedSwapTask?.id -> updatedSwapTask
-                else -> t
-            }
-        }
         reconcileActiveBannerAgainstTasks(_tasks.value)
         resyncTaskRemindersForActiveMember()
         repoScope.launch {
@@ -10791,6 +11016,19 @@ class FamilyRepository(
             updatedAtMillis = nowMillis
         )
 
+        val previousProposals = _taskProposals.value
+        val previousTasks = _tasks.value
+        val previousHandled = locallyHandledProposalsById[proposalId]
+        locallyHandledProposalsById[proposalId] = cancelled
+        _taskProposals.value = _taskProposals.value.map { if (it.id == proposalId) cancelled else it }
+        _tasks.value = _tasks.value.map { t ->
+            if (t.id == proposal.primaryTaskId || t.id == proposal.offeredSwapTaskId) {
+                t.copy(pendingProposalId = null, updatedAtMillis = nowMillis)
+            } else {
+                t
+            }
+        }
+
         val db = firestoreProvider()
         val authUser = authProvider()?.currentUser
         if (db != null && authUser != null) {
@@ -10807,18 +11045,17 @@ class FamilyRepository(
                     }
                 }.await()
             } catch (e: Exception) {
+                if (previousHandled != null) {
+                    locallyHandledProposalsById[proposalId] = previousHandled
+                } else {
+                    locallyHandledProposalsById.remove(proposalId)
+                }
+                _taskProposals.value = previousProposals
+                _tasks.value = previousTasks
                 return Result.failure(e)
             }
         }
 
-        _taskProposals.value = _taskProposals.value.map { if (it.id == proposalId) cancelled else it }
-        _tasks.value = _tasks.value.map { t ->
-            if (t.id == proposal.primaryTaskId || t.id == proposal.offeredSwapTaskId) {
-                t.copy(pendingProposalId = null, updatedAtMillis = nowMillis)
-            } else {
-                t
-            }
-        }
         return Result.success(cancelled)
     }
 
