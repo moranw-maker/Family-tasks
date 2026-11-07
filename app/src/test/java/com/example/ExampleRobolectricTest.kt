@@ -6585,5 +6585,284 @@ class ExampleRobolectricTest {
         assertEquals(kid2.id, repo.tasks.value.first { it.id == taskA.id }.assignedToMemberId)
         assertEquals(kid1.id, repo.tasks.value.first { it.id == taskB.id }.assignedToMemberId)
     }
+
+    @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+    @Test
+    fun simplifiedNotificationSoundSettings_10BuiltInMp3s_systemAndSafSources_silentMode_channelReuse_noDoubleSound_andAlarmIsolation() = androidx.compose.ui.test.runComposeUiTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val shadowNotificationManager = org.robolectric.Shadows.shadowOf(notificationManager)
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+
+        org.robolectric.Shadows.shadowOf(context as android.app.Application).grantPermissions(
+            android.Manifest.permission.POST_NOTIFICATIONS
+        )
+
+        com.example.notifications.FamilySoundManager.clearAllSoundPrefsForTesting(context)
+        com.example.util.NotificationHelper.clearChannelPrefsForTesting(context)
+        com.example.notifications.FcmTokenManager.clearAllDispatchedEventsForTesting(context)
+        notificationManager.cancelAll()
+        audioManager.ringerMode = android.media.AudioManager.RINGER_MODE_NORMAL
+
+        // =========================================================================
+        // 1. Verify all 10 original MP3 files from the attached ZIP exist in res/raw
+        //    with exact byte sizes and valid resources
+        // =========================================================================
+        val verifiedBuiltInMp3s = com.example.notifications.FamilySoundManager.getVerifiedBuiltInNotificationSounds(context)
+        assertEquals(
+            "All 10 built-in MP3 notification sounds from the ZIP package must exist and be verified",
+            10,
+            verifiedBuiltInMp3s.size
+        )
+        verifiedBuiltInMp3s.forEach { sound ->
+            val actualBytes = context.resources.openRawResource(sound.rawResId).use { it.readBytes() }
+            assertEquals(
+                "Built-in MP3 ${sound.id} (${sound.originalFileName}) must match original byte size without modification",
+                sound.expectedSizeBytes,
+                actualBytes.size
+            )
+            assertTrue("Built-in MP3 ${sound.id} must have a clear Hebrew title", sound.titleHe.isNotBlank())
+            assertTrue("Built-in MP3 ${sound.id} must have a clear English title", sound.titleEn.isNotBlank())
+        }
+
+        // Preserve alarm clock default before modifying notification sounds
+        com.example.notifications.FamilySoundManager.saveSoundConfigForUsage(
+            context = context,
+            usageType = com.example.notifications.SoundUsageType.ALARM_DEFAULT,
+            config = com.example.notifications.SelectedSoundConfig(soundId = "sound_velvet_sapphire", volumePercent = 90)
+        )
+
+        // =========================================================================
+        // 2. Render NotificationSoundSettingsSection UI (Velvet Edition):
+        //    - Verify currently selected sound banner at top
+        //    - Verify 3 sound sources + Silent option
+        //    - Verify single-instance Play/Stop preview without simultaneous playback
+        //    - Verify automatic saving on click and persistence across close/reopen
+        // =========================================================================
+        val sessionState = androidx.compose.runtime.mutableIntStateOf(0)
+        val activeMemberState = androidx.compose.runtime.mutableStateOf("m_kid1")
+
+        setContent {
+            val session = sessionState.intValue
+            val memberId = activeMemberState.value
+            androidx.compose.runtime.key(session, memberId) {
+                androidx.compose.foundation.lazy.LazyColumn {
+                    item {
+                        com.example.ui.screens.NotificationSoundSettingsSection(
+                            memberId = memberId,
+                            isHebrew = true
+                        )
+                    }
+                }
+            }
+        }
+        waitForIdle()
+
+        // Top selected sound banner and all 3 sources + silent option must exist
+        onNodeWithTag("notification_selected_sound_banner").assertExists()
+        onNodeWithTag("notification_sound_silent_option").assertExists()
+        onNodeWithTag("notification_system_sound_picker_btn").assertExists()
+        onNodeWithTag("notification_custom_file_picker_btn").assertExists()
+        onNodeWithTag("notification_builtin_sounds_list").assertExists()
+
+        // Preview Sound #1 (notif_iphone_15_notification), then Preview Sound #2 (notif_plane_chime)
+        // -> Sound #1 must stop automatically so two sounds never play simultaneously!
+        onNodeWithTag("notification_builtin_sound_row_notif_iphone_15_notification").performScrollTo()
+        onNodeWithTag("notification_builtin_sound_preview_notif_iphone_15_notification", useUnmergedTree = true).performClick()
+        waitForIdle()
+        assertTrue(com.example.notifications.FamilySoundManager.notificationPreviewState.value.isPlaying)
+        assertEquals(
+            "notif_iphone_15_notification",
+            com.example.notifications.FamilySoundManager.notificationPreviewState.value.activeSoundKey
+        )
+
+        onNodeWithTag("notification_builtin_sound_row_notif_plane_chime").performScrollTo()
+        onNodeWithTag("notification_builtin_sound_preview_notif_plane_chime", useUnmergedTree = true).performClick()
+        waitForIdle()
+        assertTrue(com.example.notifications.FamilySoundManager.notificationPreviewState.value.isPlaying)
+        assertEquals(
+            "notif_plane_chime",
+            com.example.notifications.FamilySoundManager.notificationPreviewState.value.activeSoundKey
+        )
+
+        // Tap Stop on notif_plane_chime preview button -> stops preview
+        onNodeWithTag("notification_builtin_sound_preview_notif_plane_chime", useUnmergedTree = true).performClick()
+        waitForIdle()
+        assertFalse(com.example.notifications.FamilySoundManager.notificationPreviewState.value.isPlaying)
+
+        // Select "התראת iPhone 15" -> saves automatically and updates top banner immediately
+        onNodeWithTag("notification_builtin_sound_row_notif_iphone_15_notification").performScrollTo().performClick()
+        waitForIdle()
+        onNodeWithTag("notification_selected_sound_banner").performScrollTo()
+        onNodeWithTag("notification_selected_sound_title", useUnmergedTree = true)
+            .assertTextContains("התראת iPhone 15", substring = true)
+
+        // Simulate closing and reopening the screen (increment session) -> selection persists!
+        sessionState.intValue++
+        waitForIdle()
+        onNodeWithTag("notification_selected_sound_title", useUnmergedTree = true)
+            .assertTextContains("התראת iPhone 15", substring = true)
+        val persistedKid1 = com.example.notifications.FamilySoundManager.getUnifiedNotificationSoundSelection(context, "m_kid1")
+        assertEquals(com.example.notifications.NotificationSoundSource.BUILT_IN, persistedKid1.source)
+        assertEquals("notif_iphone_15_notification", persistedKid1.builtInSoundId)
+
+        // =========================================================================
+        // 3. Verify NotificationChannel behavior:
+        //    - Channel has the selected MP3 sound URI so it works when app is in background/closed
+        //    - Repeatedly calling createNotificationChannels or posting notifications does NOT create new channels
+        //    - Channel only rotates when the user actually changes the sound
+        // =========================================================================
+        val channelIdIphone15 = com.example.util.NotificationHelper.ensureChannelForSoundUsage(
+            context,
+            com.example.notifications.SoundUsageType.TASK_CREATED
+        )
+        val channelCountAfterSelect = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val ch = notificationManager.getNotificationChannel(channelIdIphone15)
+            assertNotNull("NotificationChannel must exist for background notifications", ch)
+            assertEquals(persistedKid1.soundUri, ch!!.sound?.toString())
+            notificationManager.notificationChannels.size
+        } else 0
+
+        // Simulate multiple app launches and background notifications with the same sound -> channel ID and count MUST NOT change!
+        repeat(3) { idx ->
+            com.example.util.NotificationHelper.createNotificationChannels(context)
+            val repeatedId = com.example.util.NotificationHelper.ensureChannelForSoundUsage(
+                context,
+                com.example.notifications.SoundUsageType.TASK_CREATED
+            )
+            assertEquals("Channel ID must be reused when sound has not changed", channelIdIphone15, repeatedId)
+            com.example.util.NotificationHelper.showIncomingFcmNotification(
+                context = context,
+                title = "משימה ברקע $idx",
+                message = "בדיקת ערוץ התראות",
+                eventKey = "bg_channel_reuse_$idx",
+                taskId = "t_$idx",
+                eventType = com.example.notifications.FcmTokenManager.EVENT_TASK_ASSIGNED
+            )
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            assertEquals(
+                "Posting multiple notifications or relaunching app must NOT create extra NotificationChannels",
+                channelCountAfterSelect,
+                notificationManager.notificationChannels.size
+            )
+        }
+
+        // =========================================================================
+        // 4. Verify NO double sound playback:
+        //    - Once showIncomingFcmNotification posts for an eventKey, markSoundPlayedIfNew(eventKey) is false
+        //      so foreground sound handler cannot play a second sound for the same event!
+        // =========================================================================
+        assertFalse(
+            "After OS notification is posted for an eventKey, foreground sound must be blocked from playing a second time",
+            com.example.notifications.FcmTokenManager.markSoundPlayedIfNew("bg_channel_reuse_0")
+        )
+
+        // =========================================================================
+        // 5. Verify Silent Mode ("ללא שמע (שקט)") & Device Silent/Vibrate Ringer Mode
+        // =========================================================================
+        onNodeWithTag("notification_sound_silent_option").performScrollTo().performClick()
+        waitForIdle()
+        onNodeWithTag("notification_selected_sound_title", useUnmergedTree = true)
+            .assertTextContains("ללא שמע (שקט)", substring = true)
+
+        val silentSelection = com.example.notifications.FamilySoundManager.getUnifiedNotificationSoundSelection(context, "m_kid1")
+        assertTrue("Silent selection must report isSilent = true", silentSelection.isSilent)
+        assertTrue(
+            com.example.notifications.FamilySoundManager.isUsageSilent(
+                context,
+                com.example.notifications.SoundUsageType.TASK_CREATED
+            )
+        )
+        val silentChannelId = com.example.util.NotificationHelper.ensureChannelForSoundUsage(
+            context,
+            com.example.notifications.SoundUsageType.TASK_CREATED
+        )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val silentCh = notificationManager.getNotificationChannel(silentChannelId)
+            assertNotNull(silentCh)
+            assertNull("Silent mode NotificationChannel must have null sound", silentCh!!.sound)
+        }
+
+        // Select a built-in sound ("צלצול Airbus"), then put device in RINGER_MODE_VIBRATE ->
+        // playNotificationSoundOneShot and isDeviceRingerAudible must respect system ringer mode!
+        onNodeWithTag("notification_builtin_sound_row_notif_airbus_ringtone_1").performScrollTo().performClick()
+        waitForIdle()
+        audioManager.ringerMode = android.media.AudioManager.RINGER_MODE_VIBRATE
+        assertFalse(
+            "isDeviceRingerAudible must return false when device is in vibrate mode",
+            com.example.notifications.FamilySoundManager.isDeviceRingerAudible(context)
+        )
+        assertFalse(
+            "playNotificationSoundOneShot must not play when device is in vibrate/silent mode",
+            com.example.notifications.FamilySoundManager.playNotificationSoundOneShot(
+                context = context,
+                uri = android.net.Uri.parse(
+                    com.example.notifications.FamilySoundManager.builtInNotificationSounds.first().buildResourceUri(context)
+                )
+            )
+        )
+        audioManager.ringerMode = android.media.AudioManager.RINGER_MODE_NORMAL
+
+        // =========================================================================
+        // 6. Verify Android System Ringtone Picker & SAF Custom File Selection + Fallback
+        // =========================================================================
+        val sysIntent = com.example.notifications.FamilySoundManager.createSystemNotificationRingtonePickerIntent(
+            context = context,
+            memberId = "m_kid1",
+            isHebrew = true
+        )
+        assertEquals(android.media.RingtoneManager.ACTION_RINGTONE_PICKER, sysIntent.action)
+        assertEquals(
+            android.media.RingtoneManager.TYPE_NOTIFICATION,
+            sysIntent.getIntExtra(android.media.RingtoneManager.EXTRA_RINGTONE_TYPE, -1)
+        )
+
+        // Simulate selecting a custom audio file from device storage and then deleting the file ->
+        // must fall back safely to the default built-in notification sound!
+        val customTempFile = java.io.File(context.cacheDir, "my_custom_alert_tone.mp3")
+        context.resources.openRawResource(com.example.R.raw.notif_realme_jingle).use { input ->
+            customTempFile.outputStream().use { output -> input.copyTo(output) }
+        }
+        val customResult = com.example.notifications.FamilySoundManager.selectCustomFileNotificationSound(
+            context = context,
+            documentUri = android.net.Uri.fromFile(customTempFile),
+            customTitleOverride = "צליל אישי לבדיקה",
+            memberId = "m_kid1"
+        )
+        assertTrue("Selecting a valid custom audio file must succeed", customResult.isSuccess)
+        val activeCustomSel = com.example.notifications.FamilySoundManager.getUnifiedNotificationSoundSelection(context, "m_kid1")
+        assertEquals(com.example.notifications.NotificationSoundSource.CUSTOM_FILE, activeCustomSel.source)
+        assertEquals("צליל אישי לבדיקה", activeCustomSel.displayTitleHe)
+
+        // Delete the custom file -> getUnifiedNotificationSoundSelection and resolvePlayableUriOrFallback
+        // must automatically fall back to the default built-in sound without crashing!
+        assertTrue(customTempFile.delete())
+        val fallbackSel = com.example.notifications.FamilySoundManager.getUnifiedNotificationSoundSelection(context, "m_kid1")
+        assertEquals(
+            "When custom audio file is deleted, selection must safely fall back to BUILT_IN default sound",
+            com.example.notifications.NotificationSoundSource.BUILT_IN,
+            fallbackSel.source
+        )
+        val fallbackPlayableUri = com.example.notifications.FamilySoundManager.resolvePlayableUriOrFallback(
+            context,
+            com.example.notifications.SoundUsageType.TASK_CREATED
+        )
+        assertEquals("android.resource", fallbackPlayableUri.scheme)
+
+        // =========================================================================
+        // 7. Verify strict isolation from Family Alarms (ALARM_DEFAULT untouched!)
+        // =========================================================================
+        val alarmCfgAfterNotifChanges = com.example.notifications.FamilySoundManager.getSoundConfigForUsage(
+            context,
+            com.example.notifications.SoundUsageType.ALARM_DEFAULT
+        )
+        assertEquals(
+            "Changing notification sounds (including Silent or Custom) must NEVER alter ALARM_DEFAULT",
+            "LIBRARY:sound_velvet_sapphire",
+            alarmCfgAfterNotifChanges.soundId
+        )
+    }
 }
+
 

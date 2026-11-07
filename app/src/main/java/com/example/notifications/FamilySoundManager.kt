@@ -1,13 +1,16 @@
 package com.example.notifications
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.os.UserManager
+import android.provider.OpenableColumns
 import android.util.Log
 import com.example.R
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -204,27 +207,182 @@ data class SelectedSoundConfig(
 )
 
 /**
- * Central manager for the unified FamilyTasks — Velvet Edition sound system.
- *
- * Guarantees:
- * 1. 48 real, royalty-free synthesized `.wav` sounds across 7 categories in `res/raw/`, verified
- *    at runtime before appearing in the UI.
- * 2. Separate persisted default sounds for Alarms, Task Reminders, Task Creation, Task Update,
- *    Task Completion, Task Deletion, and General Family Notifications.
- * 3. Persistent URI permissions + local file copy in both credential-protected and device-protected
- *    storage so custom audio survives app closure and device reboot.
- * 4. Automatic fallback to the default built-in/system sound if a custom audio file is deleted or
- *    its URI becomes inaccessible.
+ * The 3 notification sound sources + Silent mode for the simplified Velvet Edition
+ * notification sound settings.
  */
+enum class NotificationSoundSource {
+    BUILT_IN,
+    SYSTEM,
+    CUSTOM_FILE,
+    SILENT
+}
+
+/**
+ * One of the 10 original built-in MP3 notification sounds bundled in `res/raw/`.
+ */
+data class BuiltInNotificationSound(
+    val id: String,
+    val rawResId: Int,
+    val titleHe: String,
+    val titleEn: String,
+    val originalFileName: String,
+    val expectedSizeBytes: Int
+) {
+    fun buildResourceUri(context: Context): String =
+        "android.resource://${context.packageName}/$rawResId"
+}
+
+/**
+ * Persisted unified notification sound selection for the current device and active family member.
+ */
+data class UnifiedNotificationSoundSelection(
+    val source: NotificationSoundSource,
+    val builtInSoundId: String = "",
+    val soundUri: String = "",
+    val displayTitleHe: String = "",
+    val displayTitleEn: String = ""
+) {
+    val isSilent: Boolean
+        get() = source == NotificationSoundSource.SILENT
+
+    fun displayTitle(isHebrew: Boolean): String =
+        if (isHebrew) displayTitleHe.ifBlank { displayTitleEn } else displayTitleEn.ifBlank { displayTitleHe }
+
+    fun sourceBadge(isHebrew: Boolean): String = when (source) {
+        NotificationSoundSource.BUILT_IN -> if (isHebrew) "צליל מובנה" else "Built-in Sound"
+        NotificationSoundSource.SYSTEM -> if (isHebrew) "צליל מערכת Android" else "Android System Sound"
+        NotificationSoundSource.CUSTOM_FILE -> if (isHebrew) "צליל אישי מהמכשיר" else "Custom Device Sound"
+        NotificationSoundSource.SILENT -> if (isHebrew) "ללא שמע (שקט)" else "Silent"
+    }
+}
+
+/**
+ * Reactive state for single-instance notification sound preview playback.
+ */
+data class NotificationPreviewState(
+    val isPlaying: Boolean = false,
+    val activeSoundKey: String = "",
+    val activeUri: String = ""
+)
+
 object FamilySoundManager {
 
     private const val TAG = "FamilySoundManager"
     private const val PREFS_NAME = "family_unified_sound_prefs"
     const val SOUND_PREFIX_LIBRARY = "LIBRARY:"
     const val SOUND_ID_SIGNATURE_PULSE = "familytasks_signature_pulse"
+    const val SOUND_SILENT = "SILENT"
 
     private val oneShotLock = Any()
     private var activeOneShotPlayer: MediaPlayer? = null
+
+    private val previewLock = Any()
+    private var activePreviewPlayer: MediaPlayer? = null
+    private val _notificationPreviewState = MutableStateFlow(NotificationPreviewState())
+    val notificationPreviewState: StateFlow<NotificationPreviewState> = _notificationPreviewState.asStateFlow()
+
+    /**
+     * The 10 original built-in MP3 notification sounds from the attached ZIP package,
+     * preserved byte-for-byte with clear Hebrew and English display names.
+     */
+    val builtInNotificationSounds: List<BuiltInNotificationSound> = listOf(
+        BuiltInNotificationSound(
+            id = "notif_soft_notification",
+            rawResId = R.raw.notif_soft_notification,
+            titleHe = "התראה רכה (Soft Notification)",
+            titleEn = "Soft Notification",
+            originalFileName = "Soft notification .mp3",
+            expectedSizeBytes = 6369
+        ),
+        BuiltInNotificationSound(
+            id = "notif_notification_classic",
+            rawResId = R.raw.notif_notification_classic,
+            titleHe = "התראה קלאסית (Notification)",
+            titleEn = "Classic Notification",
+            originalFileName = "Notification .mp3",
+            expectedSizeBytes = 17598
+        ),
+        BuiltInNotificationSound(
+            id = "notif_iphone_15_notification",
+            rawResId = R.raw.notif_iphone_15_notification,
+            titleHe = "התראת iPhone 15",
+            titleEn = "iPhone 15 Notification",
+            originalFileName = "Iphone 15 notification.mp3",
+            expectedSizeBytes = 23542
+        ),
+        BuiltInNotificationSound(
+            id = "notif_iphone_notification",
+            rawResId = R.raw.notif_iphone_notification,
+            titleHe = "התראת iPhone קלאסית",
+            titleEn = "iPhone Notification",
+            originalFileName = "Iphone notification.mp3",
+            expectedSizeBytes = 29477
+        ),
+        BuiltInNotificationSound(
+            id = "notif_iphone_ringtone",
+            rawResId = R.raw.notif_iphone_ringtone,
+            titleHe = "צליל iPhone קצר",
+            titleEn = "iPhone Ringtone",
+            originalFileName = "iPhone Ringtone.mp3",
+            expectedSizeBytes = 12220
+        ),
+        BuiltInNotificationSound(
+            id = "notif_realme_jingle",
+            rawResId = R.raw.notif_realme_jingle,
+            titleHe = "ג'ינגל Realme",
+            titleEn = "Realme Jingle",
+            originalFileName = "Realme-jingle.mp3",
+            expectedSizeBytes = 25595
+        ),
+        BuiltInNotificationSound(
+            id = "notif_plane_chime",
+            rawResId = R.raw.notif_plane_chime,
+            titleHe = "פעמון תא נוסעים (Plane Chime)",
+            titleEn = "Plane Chime",
+            originalFileName = "Plane Chime.mp3",
+            expectedSizeBytes = 28499
+        ),
+        BuiltInNotificationSound(
+            id = "notif_seat_belt_plane",
+            rawResId = R.raw.notif_seat_belt_plane,
+            titleHe = "אות חגורת בטיחות (Seat Belt)",
+            titleEn = "Seat Belt Plane",
+            originalFileName = "seat belt plane.mp3",
+            expectedSizeBytes = 38496
+        ),
+        BuiltInNotificationSound(
+            id = "notif_airbus_ringtone_1",
+            rawResId = R.raw.notif_airbus_ringtone_1,
+            titleHe = "צלצול Airbus",
+            titleEn = "Airbus Ringtone 1",
+            originalFileName = "Airbus Ringtone 1.mp3",
+            expectedSizeBytes = 99936
+        ),
+        BuiltInNotificationSound(
+            id = "notif_call_tone",
+            rawResId = R.raw.notif_call_tone,
+            titleHe = "צליל קריאה (Call)",
+            titleEn = "Call Tone",
+            originalFileName = "call.mp3",
+            expectedSizeBytes = 77784
+        )
+    )
+
+    private val builtInNotificationCatalogItems: List<SoundLibraryItem> = builtInNotificationSounds.map { mp3 ->
+        SoundLibraryItem(
+            id = mp3.id,
+            rawResId = mp3.rawResId,
+            category = SoundLibraryCategory.SOFT_NOTIFICATIONS,
+            titleHe = mp3.titleHe,
+            titleEn = mp3.titleEn,
+            subtitleHe = mp3.originalFileName,
+            subtitleEn = mp3.originalFileName,
+            durationLabelHe = "MP3 מובנה",
+            durationLabelEn = "Built-in MP3",
+            isAlarmMelody = false,
+            emoji = "🔔"
+        )
+    }
 
     val allCatalogItems: List<SoundLibraryItem> = listOf(
         // ==================== 0. FAMILYTASKS SIGNATURE (1) ====================
@@ -901,15 +1059,18 @@ object FamilySoundManager {
     }
 
     fun findLibrarySoundById(context: Context, soundId: String): SoundLibraryItem? {
-        val normalized = soundId.removePrefix(SOUND_PREFIX_LIBRARY).trim()
-        val item = allCatalogItems.find { it.id == normalized } ?: return null
+        val normalized = soundId.removePrefix(SOUND_PREFIX_LIBRARY).removePrefix("SOUND:").trim()
+        val item = allCatalogItems.find { it.id == normalized }
+            ?: builtInNotificationCatalogItems.find { it.id == normalized }
+            ?: return null
         return if (isRawSoundResourceValid(context, item.rawResId)) item else null
     }
 
     fun findLibrarySoundByUri(context: Context, uriString: String): SoundLibraryItem? {
         if (uriString.isBlank()) return null
         val pkg = context.packageName
-        return allCatalogItems.find { item ->
+        val combined = allCatalogItems + builtInNotificationCatalogItems
+        return combined.find { item ->
             val resEntryName = runCatching { context.resources.getResourceEntryName(item.rawResId) }.getOrNull().orEmpty()
             val expectedUri = "android.resource://$pkg/${item.rawResId}"
             val expectedByName = "android.resource://$pkg/raw/${item.id}"
@@ -921,6 +1082,16 @@ object FamilySoundManager {
                 (resEntryName.isNotBlank() && uriString.endsWith("/$resEntryName"))) &&
                 isRawSoundResourceValid(context, item.rawResId)
         }
+    }
+
+    fun getVerifiedBuiltInNotificationSounds(context: Context): List<BuiltInNotificationSound> {
+        return builtInNotificationSounds.filter { isRawSoundResourceValid(context, it.rawResId) }
+    }
+
+    fun findBuiltInNotificationSoundById(context: Context, soundId: String): BuiltInNotificationSound? {
+        val cleanId = soundId.removePrefix(SOUND_PREFIX_LIBRARY).removePrefix("SOUND:").trim()
+        val found = builtInNotificationSounds.find { it.id == cleanId } ?: return null
+        return if (isRawSoundResourceValid(context, found.rawResId)) found else null
     }
 
     fun isRawSoundResourceValid(context: Context, rawResId: Int): Boolean {
@@ -1033,6 +1204,17 @@ object FamilySoundManager {
         }
     }
 
+    fun isUsageSilent(context: Context, usage: SoundUsageType): Boolean {
+        if (usage.isAlarmStream) return false
+        return getSoundConfigForUsage(context, usage).soundType == SOUND_SILENT
+    }
+
+    fun isDeviceRingerAudible(context: Context): Boolean {
+        val appCtx = context.applicationContext ?: context
+        val audioManager = appCtx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return true
+        return audioManager.ringerMode == AudioManager.RINGER_MODE_NORMAL
+    }
+
     /**
      * Loads the persisted [SelectedSoundConfig] for a [SoundUsageType], or returns its default
      * library sound configuration if none was explicitly saved yet.
@@ -1042,9 +1224,17 @@ object FamilySoundManager {
         val savedType = prefs.getString("${usage.prefKey}_type", null)
         val savedUri = prefs.getString("${usage.prefKey}_uri", null)
         val savedTitle = prefs.getString("${usage.prefKey}_title", null)
-        val savedVolume = prefs.getInt("${usage.prefKey}_vol", 85).coerceIn(10, 100)
+        val savedVolume = prefs.getInt("${usage.prefKey}_vol", 85).coerceIn(0, 100)
 
         if (!savedType.isNullOrBlank()) {
+            if (savedType == SOUND_SILENT && !usage.isAlarmStream) {
+                return SelectedSoundConfig(
+                    soundType = SOUND_SILENT,
+                    customSoundUri = "",
+                    customSoundTitle = savedTitle?.takeIf { it.isNotBlank() } ?: "ללא שמע (שקט)",
+                    volumePercent = 0
+                )
+            }
             // Verify that if it's a custom/library URI, it is still accessible; otherwise fall back cleanly
             if (savedType == AlarmAudioController.SOUND_CUSTOM_URI || savedType.startsWith(SOUND_PREFIX_LIBRARY)) {
                 val libItem = findLibrarySoundById(context, savedType)
@@ -1054,7 +1244,7 @@ object FamilySoundManager {
                         soundType = "$SOUND_PREFIX_LIBRARY${libItem.id}",
                         customSoundUri = libItem.buildResourceUri(context),
                         customSoundTitle = libItem.titleHe,
-                        volumePercent = savedVolume
+                        volumePercent = savedVolume.coerceIn(10, 100)
                     )
                 }
                 if (!savedUri.isNullOrBlank() && isUriAccessibleAndValid(context, savedUri)) {
@@ -1062,7 +1252,7 @@ object FamilySoundManager {
                         soundType = savedType,
                         customSoundUri = resolveAccessibleFileOrContentUri(context, savedUri),
                         customSoundTitle = savedTitle.orEmpty(),
-                        volumePercent = savedVolume
+                        volumePercent = savedVolume.coerceIn(10, 100)
                     )
                 }
                 Log.w(TAG, "Saved custom URI for ${usage.name} is no longer accessible ($savedUri); falling back to default.")
@@ -1071,7 +1261,7 @@ object FamilySoundManager {
                     soundType = savedType,
                     customSoundUri = savedUri.orEmpty(),
                     customSoundTitle = savedTitle.orEmpty(),
-                    volumePercent = savedVolume
+                    volumePercent = savedVolume.coerceIn(10, 100)
                 )
             }
         }
@@ -1111,22 +1301,28 @@ object FamilySoundManager {
         volumePercent: Int = 85
     ): SelectedSoundConfig {
         val appCtx = context.applicationContext ?: context
-        val libItem = findLibrarySoundById(appCtx, soundType)
-            ?: findLibrarySoundByUri(appCtx, customSoundUri)
+        val isSilent = soundType == SOUND_SILENT && !usage.isAlarmStream
+        val libItem = if (isSilent) null else (
+            findLibrarySoundById(appCtx, soundType)
+                ?: findLibrarySoundByUri(appCtx, customSoundUri)
+            )
 
         val normalizedType = when {
+            isSilent -> SOUND_SILENT
             libItem != null -> "$SOUND_PREFIX_LIBRARY${libItem.id}"
             else -> soundType
         }
         val normalizedUri = when {
+            isSilent -> ""
             libItem != null -> libItem.buildResourceUri(appCtx)
             else -> customSoundUri
         }
         val normalizedTitle = when {
+            isSilent -> customSoundTitle.ifBlank { "ללא שמע (שקט)" }
             libItem != null && customSoundTitle.isBlank() -> libItem.titleHe
             else -> customSoundTitle
         }
-        val clampedVol = volumePercent.coerceIn(10, 100)
+        val clampedVol = if (isSilent) 0 else volumePercent.coerceIn(10, 100)
 
         fun writeToPrefs(targetCtx: Context) {
             runCatching {
@@ -1149,6 +1345,527 @@ object FamilySoundManager {
 
         refreshUsageConfigsState(appCtx)
         return getSoundConfigForUsage(appCtx, usage)
+    }
+
+    // =========================================================================
+    // Simplified Unified Notification Sound Settings (Per Device & Active User)
+    // =========================================================================
+
+    private val notificationUsageTypes: List<SoundUsageType> = listOf(
+        SoundUsageType.TASK_CREATED,
+        SoundUsageType.TASK_UPDATED,
+        SoundUsageType.TASK_COMPLETED,
+        SoundUsageType.TASK_DELETED,
+        SoundUsageType.TASK_REMINDER,
+        SoundUsageType.FAMILY_GENERAL
+    )
+
+    private fun resolveMemberKey(context: Context, memberId: String): String {
+        val clean = memberId.trim()
+        if (clean.isNotEmpty()) return clean
+        val prefs = getReadablePrefs(context)
+        val savedActive = prefs.getString("active_notification_member_id", null)?.trim().orEmpty()
+        if (savedActive.isNotEmpty()) return savedActive
+        val cachedUid = FcmTokenManager.getCachedUid(context)?.trim().orEmpty()
+        return cachedUid.ifEmpty { "default" }
+    }
+
+    /**
+     * Switches the active family member on this device and restores that member's saved
+     * notification sound selection (or default if none was saved yet), updating the
+     * Android NotificationChannel only if the sound actually changed.
+     */
+    fun setActiveNotificationMemberId(context: Context, memberId: String): UnifiedNotificationSoundSelection {
+        val appCtx = context.applicationContext ?: context
+        val clean = memberId.trim().ifEmpty { "default" }
+        fun writeActiveMember(targetCtx: Context) {
+            runCatching {
+                targetCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString("active_notification_member_id", clean)
+                    .apply()
+            }
+        }
+        if (isCredentialStorageUnlocked(appCtx)) writeActiveMember(appCtx)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            writeActiveMember(appCtx.createDeviceProtectedStorageContext())
+        }
+        val prefs = getReadablePrefs(appCtx)
+        val hasMemberExplicitSelection = !prefs.getString("unified_notif_${clean}_source", null).isNullOrBlank()
+        val selection = getUnifiedNotificationSoundSelection(appCtx, clean)
+        if (hasMemberExplicitSelection) {
+            applyUnifiedSelectionToNotificationUsages(appCtx, selection)
+        }
+        return selection
+    }
+
+    /**
+     * Returns the currently selected [UnifiedNotificationSoundSelection] for [memberId] (or active user).
+     * Automatically falls back to the default built-in notification sound if a previously chosen
+     * custom audio file was deleted or is no longer accessible.
+     */
+    fun getUnifiedNotificationSoundSelection(
+        context: Context,
+        memberId: String = ""
+    ): UnifiedNotificationSoundSelection {
+        val appCtx = context.applicationContext ?: context
+        val prefs = getReadablePrefs(appCtx)
+        val memberKey = resolveMemberKey(appCtx, memberId)
+
+        val rawSource = prefs.getString("unified_notif_${memberKey}_source", null)
+            ?: prefs.getString("unified_notif_default_source", null)
+        val savedBuiltInId = prefs.getString("unified_notif_${memberKey}_builtin_id", null)
+            ?: prefs.getString("unified_notif_default_builtin_id", null)
+            ?: ""
+        val savedUri = prefs.getString("unified_notif_${memberKey}_uri", null)
+            ?: prefs.getString("unified_notif_default_uri", null)
+            ?: ""
+        val savedTitleHe = prefs.getString("unified_notif_${memberKey}_title_he", null)
+            ?: prefs.getString("unified_notif_default_title_he", null)
+            ?: ""
+        val savedTitleEn = prefs.getString("unified_notif_${memberKey}_title_en", null)
+            ?: prefs.getString("unified_notif_default_title_en", null)
+            ?: ""
+
+        val parsedSource = runCatching {
+            if (!rawSource.isNullOrBlank()) NotificationSoundSource.valueOf(rawSource) else null
+        }.getOrNull()
+
+        when (parsedSource) {
+            NotificationSoundSource.SILENT -> {
+                return UnifiedNotificationSoundSelection(
+                    source = NotificationSoundSource.SILENT,
+                    builtInSoundId = "",
+                    soundUri = "",
+                    displayTitleHe = "ללא שמע (שקט)",
+                    displayTitleEn = "Silent (No Sound)"
+                )
+            }
+            NotificationSoundSource.BUILT_IN -> {
+                val builtIn = findBuiltInNotificationSoundById(appCtx, savedBuiltInId)
+                if (builtIn != null) {
+                    return UnifiedNotificationSoundSelection(
+                        source = NotificationSoundSource.BUILT_IN,
+                        builtInSoundId = builtIn.id,
+                        soundUri = builtIn.buildResourceUri(appCtx),
+                        displayTitleHe = builtIn.titleHe,
+                        displayTitleEn = builtIn.titleEn
+                    )
+                }
+            }
+            NotificationSoundSource.SYSTEM -> {
+                if (savedUri.isNotBlank() && isUriAccessibleAndValid(appCtx, savedUri)) {
+                    val labelHe = savedTitleHe.ifBlank { "צליל מערכת Android" }
+                    val labelEn = savedTitleEn.ifBlank { labelHe }
+                    return UnifiedNotificationSoundSelection(
+                        source = NotificationSoundSource.SYSTEM,
+                        builtInSoundId = "",
+                        soundUri = savedUri,
+                        displayTitleHe = labelHe,
+                        displayTitleEn = labelEn
+                    )
+                }
+            }
+            NotificationSoundSource.CUSTOM_FILE -> {
+                if (savedUri.isNotBlank() && isUriAccessibleAndValid(appCtx, savedUri)) {
+                    val accessibleUri = resolveAccessibleFileOrContentUri(appCtx, savedUri)
+                    val labelHe = savedTitleHe.ifBlank { "קובץ שמע אישי" }
+                    val labelEn = savedTitleEn.ifBlank { labelHe }
+                    return UnifiedNotificationSoundSelection(
+                        source = NotificationSoundSource.CUSTOM_FILE,
+                        builtInSoundId = "",
+                        soundUri = accessibleUri,
+                        displayTitleHe = labelHe,
+                        displayTitleEn = labelEn
+                    )
+                }
+                Log.w(TAG, "Custom notification sound file ($savedUri) is unavailable; falling back to default built-in sound.")
+            }
+            null -> Unit
+        }
+
+        // Default to the first built-in MP3 notification sound
+        val defaultBuiltIn = builtInNotificationSounds.first()
+        return UnifiedNotificationSoundSelection(
+            source = NotificationSoundSource.BUILT_IN,
+            builtInSoundId = defaultBuiltIn.id,
+            soundUri = defaultBuiltIn.buildResourceUri(appCtx),
+            displayTitleHe = defaultBuiltIn.titleHe,
+            displayTitleEn = defaultBuiltIn.titleEn
+        )
+    }
+
+    private fun persistUnifiedSelection(
+        context: Context,
+        memberId: String,
+        selection: UnifiedNotificationSoundSelection
+    ) {
+        val appCtx = context.applicationContext ?: context
+        val memberKey = resolveMemberKey(appCtx, memberId)
+
+        fun writeToPrefs(targetCtx: Context) {
+            runCatching {
+                val editor = targetCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                editor.putString("active_notification_member_id", memberKey)
+                listOf(memberKey, "default").distinct().forEach { key ->
+                    editor.putString("unified_notif_${key}_source", selection.source.name)
+                    editor.putString("unified_notif_${key}_builtin_id", selection.builtInSoundId)
+                    editor.putString("unified_notif_${key}_uri", selection.soundUri)
+                    editor.putString("unified_notif_${key}_title_he", selection.displayTitleHe)
+                    editor.putString("unified_notif_${key}_title_en", selection.displayTitleEn)
+                }
+                editor.apply()
+            }
+        }
+
+        if (isCredentialStorageUnlocked(appCtx)) {
+            writeToPrefs(appCtx)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            writeToPrefs(appCtx.createDeviceProtectedStorageContext())
+        }
+
+        applyUnifiedSelectionToNotificationUsages(appCtx, selection)
+    }
+
+    private fun applyUnifiedSelectionToNotificationUsages(
+        context: Context,
+        selection: UnifiedNotificationSoundSelection
+    ) {
+        val appCtx = context.applicationContext ?: context
+        val (soundType, customUri, customTitle, vol) = when (selection.source) {
+            NotificationSoundSource.SILENT -> Quadruple(
+                SOUND_SILENT,
+                "",
+                selection.displayTitleHe.ifBlank { "ללא שמע (שקט)" },
+                0
+            )
+            NotificationSoundSource.BUILT_IN -> Quadruple(
+                "$SOUND_PREFIX_LIBRARY${selection.builtInSoundId}",
+                selection.soundUri,
+                selection.displayTitleHe,
+                85
+            )
+            NotificationSoundSource.SYSTEM -> Quadruple(
+                AlarmAudioController.SOUND_CUSTOM_URI,
+                selection.soundUri,
+                selection.displayTitleHe,
+                85
+            )
+            NotificationSoundSource.CUSTOM_FILE -> Quadruple(
+                AlarmAudioController.SOUND_CUSTOM_URI,
+                selection.soundUri,
+                selection.displayTitleHe,
+                85
+            )
+        }
+
+        // Only update notification SoundUsageTypes — NEVER touch SoundUsageType.ALARM_DEFAULT!
+        notificationUsageTypes.forEach { usage ->
+            saveSoundConfigForUsage(
+                context = appCtx,
+                usage = usage,
+                soundType = soundType,
+                customSoundUri = customUri,
+                customSoundTitle = customTitle,
+                volumePercent = vol
+            )
+        }
+        com.example.util.NotificationHelper.createNotificationChannels(appCtx)
+    }
+
+    private data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
+
+    /**
+     * Selects and automatically saves one of the 10 built-in MP3 notification sounds.
+     */
+    fun selectBuiltInNotificationSound(
+        context: Context,
+        soundId: String,
+        memberId: String = ""
+    ): UnifiedNotificationSoundSelection {
+        val appCtx = context.applicationContext ?: context
+        val builtIn = findBuiltInNotificationSoundById(appCtx, soundId)
+            ?: builtInNotificationSounds.first()
+        val selection = UnifiedNotificationSoundSelection(
+            source = NotificationSoundSource.BUILT_IN,
+            builtInSoundId = builtIn.id,
+            soundUri = builtIn.buildResourceUri(appCtx),
+            displayTitleHe = builtIn.titleHe,
+            displayTitleEn = builtIn.titleEn
+        )
+        persistUnifiedSelection(appCtx, memberId, selection)
+        return getUnifiedNotificationSoundSelection(appCtx, memberId)
+    }
+
+    /**
+     * Selects and automatically saves an Android System notification sound chosen via Ringtone Picker.
+     */
+    fun selectSystemNotificationSound(
+        context: Context,
+        ringtoneUri: Uri,
+        ringtoneTitle: String = "",
+        memberId: String = ""
+    ): UnifiedNotificationSoundSelection {
+        val appCtx = context.applicationContext ?: context
+        val resolvedTitle = ringtoneTitle.trim().ifBlank {
+            runCatching {
+                RingtoneManager.getRingtone(appCtx, ringtoneUri)?.getTitle(appCtx)?.trim()
+            }.getOrNull().orEmpty()
+        }.ifBlank { "צליל מערכת Android" }
+
+        val selection = UnifiedNotificationSoundSelection(
+            source = NotificationSoundSource.SYSTEM,
+            builtInSoundId = "",
+            soundUri = ringtoneUri.toString(),
+            displayTitleHe = resolvedTitle,
+            displayTitleEn = resolvedTitle
+        )
+        persistUnifiedSelection(appCtx, memberId, selection)
+        return getUnifiedNotificationSoundSelection(appCtx, memberId)
+    }
+
+    /**
+     * Selects and automatically saves a custom local audio file chosen via Android Storage Access Framework
+     * (`Intent.ACTION_OPEN_DOCUMENT`). Persists read URI permission (`takePersistableUriPermission`) and
+     * falls back safely to the default built-in sound if the file later becomes unavailable.
+     */
+    fun selectCustomFileNotificationSound(
+        context: Context,
+        documentUri: Uri,
+        customTitleOverride: String = "",
+        memberId: String = ""
+    ): Result<UnifiedNotificationSoundSelection> {
+        val appCtx = context.applicationContext ?: context
+        return runCatching {
+            if (documentUri.scheme.equals("content", ignoreCase = true)) {
+                runCatching {
+                    appCtx.contentResolver.takePersistableUriPermission(
+                        documentUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                }
+            }
+            if (!isUriAccessibleAndValid(appCtx, documentUri.toString())) {
+                throw IllegalArgumentException("Selected audio file is inaccessible or empty: $documentUri")
+            }
+            val displayName = customTitleOverride.trim().ifBlank {
+                extractDisplayNameFromUri(appCtx, documentUri)
+            }.ifBlank { "צליל אישי מהמכשיר" }
+
+            val selection = UnifiedNotificationSoundSelection(
+                source = NotificationSoundSource.CUSTOM_FILE,
+                builtInSoundId = "",
+                soundUri = documentUri.toString(),
+                displayTitleHe = displayName,
+                displayTitleEn = displayName
+            )
+            persistUnifiedSelection(appCtx, memberId, selection)
+            getUnifiedNotificationSoundSelection(appCtx, memberId)
+        }
+    }
+
+    /**
+     * Selects and automatically saves Silent mode ("ללא שמע (שקט)") for notifications.
+     */
+    fun selectSilentNotificationSound(
+        context: Context,
+        memberId: String = ""
+    ): UnifiedNotificationSoundSelection {
+        val appCtx = context.applicationContext ?: context
+        stopNotificationPreview(appCtx)
+        val selection = UnifiedNotificationSoundSelection(
+            source = NotificationSoundSource.SILENT,
+            builtInSoundId = "",
+            soundUri = "",
+            displayTitleHe = "ללא שמע (שקט)",
+            displayTitleEn = "Silent (No Sound)"
+        )
+        persistUnifiedSelection(appCtx, memberId, selection)
+        return getUnifiedNotificationSoundSelection(appCtx, memberId)
+    }
+
+    private fun extractDisplayNameFromUri(context: Context, uri: Uri): String {
+        if (uri.scheme.equals("content", ignoreCase = true)) {
+            runCatching {
+                context.contentResolver.query(
+                    uri,
+                    arrayOf(OpenableColumns.DISPLAY_NAME),
+                    null,
+                    null,
+                    null
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0) {
+                            val name = cursor.getString(idx)?.trim().orEmpty()
+                            if (name.isNotBlank()) return name.substringBeforeLast('.')
+                        }
+                    }
+                }
+            }
+        }
+        val rawSeg = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':') ?: ""
+        return rawSeg.substringBeforeLast('.').trim()
+    }
+
+    /**
+     * Builds the native Android Ringtone Picker intent (`RingtoneManager.ACTION_RINGTONE_PICKER`)
+     * for notification sounds (`RingtoneManager.TYPE_NOTIFICATION`).
+     */
+    fun createSystemNotificationRingtonePickerIntent(
+        context: Context,
+        memberId: String = "",
+        isHebrew: Boolean = true
+    ): Intent {
+        val current = getUnifiedNotificationSoundSelection(context, memberId)
+        val defaultNotifUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+        val existingUri: Uri? = when (current.source) {
+            NotificationSoundSource.SILENT -> null
+            NotificationSoundSource.SYSTEM -> {
+                val parsed = runCatching { Uri.parse(current.soundUri) }.getOrNull()
+                if (parsed != null && !parsed.scheme.equals("file", ignoreCase = true)) parsed else defaultNotifUri
+            }
+            else -> defaultNotifUri
+        }
+        return Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+            putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_NOTIFICATION)
+            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
+            putExtra(RingtoneManager.EXTRA_RINGTONE_DEFAULT_URI, defaultNotifUri)
+            putExtra(
+                RingtoneManager.EXTRA_RINGTONE_TITLE,
+                if (isHebrew) "בחר צליל התראה ממערכת Android" else "Select Android Notification Sound"
+            )
+            putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, existingUri)
+        }
+    }
+
+    /**
+     * Processes the result of `RingtoneManager.ACTION_RINGTONE_PICKER` for notification sounds.
+     */
+    fun handleSystemNotificationRingtonePickerResult(
+        context: Context,
+        resultCode: Int,
+        data: Intent?,
+        memberId: String = ""
+    ): UnifiedNotificationSoundSelection? {
+        if (resultCode != Activity.RESULT_OK || data == null) return null
+        val pickedUri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            data.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI, Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            data.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+        }
+        return if (pickedUri == null) {
+            selectSilentNotificationSound(context, memberId)
+        } else {
+            selectSystemNotificationSound(context, pickedUri, memberId = memberId)
+        }
+    }
+
+    /**
+     * Starts or toggles single-instance preview playback for a notification sound.
+     * Guarantees that two sounds never play simultaneously.
+     */
+    fun toggleNotificationPreview(
+        context: Context,
+        soundKey: String,
+        uri: Uri?
+    ): Boolean {
+        val current = _notificationPreviewState.value
+        if (current.isPlaying && current.activeSoundKey == soundKey) {
+            stopNotificationPreview(context)
+            return false
+        }
+        if (uri == null) {
+            stopNotificationPreview(context)
+            return false
+        }
+        return startNotificationPreview(context, soundKey, uri)
+    }
+
+    fun startNotificationPreview(
+        context: Context,
+        soundKey: String,
+        uri: Uri
+    ): Boolean {
+        val appCtx = context.applicationContext ?: context
+        // Stop any active preview in both FamilySoundManager and AlarmAudioController first
+        stopNotificationPreview(appCtx)
+        runCatching { AlarmAudioController.stopPreview(appCtx) }
+
+        val playableUri = if (isUriAccessibleAndValid(appCtx, uri.toString())) {
+            uri
+        } else {
+            Uri.parse(builtInNotificationSounds.first().buildResourceUri(appCtx))
+        }
+
+        _notificationPreviewState.value = NotificationPreviewState(
+            isPlaying = true,
+            activeSoundKey = soundKey,
+            activeUri = playableUri.toString()
+        )
+
+        runCatching {
+            val mp = MediaPlayer()
+            mp.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+            )
+            mp.setDataSource(appCtx, playableUri)
+            mp.isLooping = false
+            mp.setOnCompletionListener { player ->
+                synchronized(previewLock) {
+                    if (activePreviewPlayer === player) {
+                        activePreviewPlayer = null
+                        _notificationPreviewState.value = NotificationPreviewState()
+                    }
+                }
+                runCatching {
+                    player.reset()
+                    player.release()
+                }
+            }
+            mp.setOnErrorListener { player, _, _ ->
+                synchronized(previewLock) {
+                    if (activePreviewPlayer === player) {
+                        activePreviewPlayer = null
+                        _notificationPreviewState.value = NotificationPreviewState()
+                    }
+                }
+                runCatching {
+                    player.reset()
+                    player.release()
+                }
+                true
+            }
+            synchronized(previewLock) {
+                activePreviewPlayer = mp
+            }
+            mp.prepare()
+            mp.start()
+        }
+        return true
+    }
+
+    fun stopNotificationPreview(context: Context? = null) {
+        synchronized(previewLock) {
+            activePreviewPlayer?.let { player ->
+                runCatching {
+                    if (player.isPlaying) player.stop()
+                    player.reset()
+                    player.release()
+                }
+            }
+            activePreviewPlayer = null
+            _notificationPreviewState.value = NotificationPreviewState()
+        }
+        if (context != null) {
+            runCatching { AlarmAudioController.stopPreview(context) }
+        }
     }
 
     fun refreshUsageConfigsState(context: Context): Map<SoundUsageType, SelectedSoundConfig> {
@@ -1175,7 +1892,7 @@ object FamilySoundManager {
     /**
      * Resolves a guaranteed playable [Uri] for a given (`soundType`, `customSoundUri`) pair,
      * falling back to the [fallbackUsage] default sound or system default if a custom file was
-     * deleted or its URI is inaccessible.
+     * deleted or its URI is inaccessible. Returns `null` if [soundType] is [SOUND_SILENT].
      */
     fun resolvePlayableUriOrFallback(
         context: Context,
@@ -1184,6 +1901,9 @@ object FamilySoundManager {
         fallbackUsage: SoundUsageType = SoundUsageType.ALARM_DEFAULT
     ): Uri? {
         val appCtx = context.applicationContext ?: context
+        if (soundType == SOUND_SILENT && !fallbackUsage.isAlarmStream) {
+            return null
+        }
 
         // 1. Check if soundType or customSoundUri maps to a verified built-in raw library sound
         val libItem = findLibrarySoundById(appCtx, soundType)
@@ -1242,6 +1962,9 @@ object FamilySoundManager {
         customTitle: String,
         isHebrew: Boolean
     ): String {
+        if (soundType == SOUND_SILENT) {
+            return if (isHebrew) "ללא שמע (שקט)" else "Silent (No Sound)"
+        }
         val libItem = findLibrarySoundById(context, soundType)
             ?: findLibrarySoundByUri(context, customSoundUri)
         if (libItem != null) {
@@ -1262,14 +1985,23 @@ object FamilySoundManager {
     /**
      * Plays a short notification/reminder alert sound on `USAGE_NOTIFICATION` when a custom
      * app-private `file://` URI is used (which SystemUI cannot read directly from a NotificationChannel)
-     * or when deterministic immediate playback is needed.
+     * or when deterministic immediate foreground playback is needed.
+     *
+     * Respects Silent selection (`SOUND_SILENT` / `silent://`) and device Silent / Vibrate ringer mode.
      */
     fun playNotificationSoundOneShot(
         context: Context,
         uri: Uri,
         volumePercent: Int = 85
     ): Boolean {
+        if (volumePercent <= 0 || uri.scheme.equals("silent", ignoreCase = true) || uri.toString().isBlank()) {
+            return false
+        }
         val appCtx = context.applicationContext ?: context
+        val audioManager = appCtx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        if (audioManager != null && audioManager.ringerMode != AudioManager.RINGER_MODE_NORMAL) {
+            return false
+        }
         val scalar = (volumePercent.coerceIn(10, 100) / 100f).coerceIn(0.1f, 1.0f)
         return runCatching {
             synchronized(oneShotLock) {
@@ -1347,6 +2079,9 @@ object FamilySoundManager {
         usageType: SoundUsageType
     ): Uri {
         val cfg = getSoundConfigForUsage(context, usageType)
+        if (cfg.soundType == SOUND_SILENT && !usageType.isAlarmStream) {
+            return Uri.parse("silent://none")
+        }
         return resolvePlayableUriOrFallback(
             context = context,
             soundType = cfg.soundId.ifBlank { cfg.soundType },
@@ -1371,6 +2106,7 @@ object FamilySoundManager {
     }
 
     fun clearAllForTesting(context: Context) {
+        stopNotificationPreview(context)
         runCatching {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().clear().commit()
         }

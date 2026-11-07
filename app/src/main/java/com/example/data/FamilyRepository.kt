@@ -8265,6 +8265,11 @@ class FamilyRepository(
         val usageType = NotificationHelper.resolveSoundUsageForEvent(eventType)
         val ctx = appContext
         if (ctx != null) {
+            if (com.example.notifications.FamilySoundManager.isUsageSilent(ctx, usageType) ||
+                !com.example.notifications.FamilySoundManager.isDeviceRingerAudible(ctx)
+            ) {
+                return
+            }
             val uri = com.example.notifications.FamilySoundManager.resolvePlayableUriOrFallback(ctx, usageType)
             val cfg = com.example.notifications.FamilySoundManager.getSoundConfigForUsage(ctx, usageType)
             FcmTokenManager.recordForegroundSoundPlayed(uri.toString())

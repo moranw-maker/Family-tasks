@@ -284,14 +284,18 @@ class FamilyMessagingService : FirebaseMessagingService() {
                 )
             } else if (FcmTokenManager.markSoundPlayedIfNew(eventKey)) {
                 val usageType = NotificationHelper.resolveSoundUsageForEvent(eventType)
-                val uri = FamilySoundManager.resolvePlayableUriOrFallback(appCtx, usageType)
-                val cfg = FamilySoundManager.getSoundConfigForUsage(appCtx, usageType)
-                FcmTokenManager.recordForegroundSoundPlayed(uri.toString())
-                FamilySoundManager.playNotificationSoundOneShot(
-                    context = appCtx,
-                    uri = uri,
-                    volumePercent = cfg.volumePercent
-                )
+                if (!FamilySoundManager.isUsageSilent(appCtx, usageType) &&
+                    FamilySoundManager.isDeviceRingerAudible(appCtx)
+                ) {
+                    val uri = FamilySoundManager.resolvePlayableUriOrFallback(appCtx, usageType)
+                    val cfg = FamilySoundManager.getSoundConfigForUsage(appCtx, usageType)
+                    FcmTokenManager.recordForegroundSoundPlayed(uri.toString())
+                    FamilySoundManager.playNotificationSoundOneShot(
+                        context = appCtx,
+                        uri = uri,
+                        volumePercent = cfg.volumePercent
+                    )
+                }
             }
 
             // Emit to in-app stream so notification history (and foreground banner + sound) stays in sync

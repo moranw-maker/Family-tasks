@@ -156,18 +156,32 @@ object NotificationHelper {
             FamilySoundManager.getSoundConfigForUsage(context, usageType)
         }
 
-        val playableUri = FamilySoundManager.resolvePlayableUriOrFallback(
-            context = context,
-            soundType = config.soundType,
-            customSoundUri = config.customSoundUri,
-            fallbackUsage = usageType
-        )
-        val isPrivateFileUri = playableUri?.scheme?.equals("file", ignoreCase = true) == true
-        val channelSoundUri = if (isPrivateFileUri) null else playableUri
-        val soundSignature = if (isPrivateFileUri) {
-            "private_file_silent_channel"
+        val isSilentConfig = config.soundType == FamilySoundManager.SOUND_SILENT && !usageType.isAlarmStream
+        val playableUri = if (isSilentConfig) {
+            null
         } else {
-            channelSoundUri?.toString() ?: "default"
+            FamilySoundManager.resolvePlayableUriOrFallback(
+                context = context,
+                soundType = config.soundType,
+                customSoundUri = config.customSoundUri,
+                fallbackUsage = usageType
+            )
+        }
+        val isPrivateFileUri = playableUri?.scheme?.equals("file", ignoreCase = true) == true
+        val channelSoundUri = if (isSilentConfig || isPrivateFileUri) null else playableUri
+        if (channelSoundUri != null && channelSoundUri.scheme.equals("content", ignoreCase = true)) {
+            runCatching {
+                context.grantUriPermission(
+                    "com.android.systemui",
+                    channelSoundUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+        }
+        val soundSignature = when {
+            isSilentConfig -> "silent_notification_channel"
+            isPrivateFileUri -> "private_file_silent_channel"
+            else -> channelSoundUri?.toString() ?: "default"
         }
 
         val prefs = context.getSharedPreferences(CHANNEL_PREFS_NAME, Context.MODE_PRIVATE)
@@ -209,7 +223,10 @@ object NotificationHelper {
         val preservedBypassDnd = sourceChannel?.canBypassDnd() ?: false
         val userExplicitlyMutedPrevious = sourceChannel != null && (
             sourceChannel.importance < NotificationManager.IMPORTANCE_DEFAULT ||
-                (sourceChannel.sound == null && previousSig != null && previousSig != "private_file_silent_channel")
+                (sourceChannel.sound == null &&
+                    previousSig != null &&
+                    previousSig != "private_file_silent_channel" &&
+                    previousSig != "silent_notification_channel")
             )
 
         // Delete ONLY the single previous rotated channel for this usageType (never delete active targetChannelId)
@@ -229,7 +246,7 @@ object NotificationHelper {
             }
             enableLights(preservedLights)
             setBypassDnd(preservedBypassDnd)
-            if (userExplicitlyMutedPrevious || channelSoundUri == null) {
+            if (isSilentConfig || userExplicitlyMutedPrevious || channelSoundUri == null) {
                 setSound(null, null)
             } else {
                 setSound(channelSoundUri, buildNotificationAudioAttributes())
@@ -333,6 +350,7 @@ object NotificationHelper {
         eventType: String = FcmTokenManager.EVENT_TASK_ASSIGNED
     ) {
         val canonicalKey = FcmTokenManager.canonicalizeEventKey(eventKey)
+        FcmTokenManager.markSoundPlayedIfNew(canonicalKey)
         val deterministicId = 20_000 + abs(canonicalKey.ifBlank { "$eventType:$taskId:$title" }.hashCode() % 70_000)
         val usageType = resolveSoundUsageForEvent(eventType)
         val activeChannelId = ensureChannelForSoundUsage(context, usageType)
@@ -406,12 +424,17 @@ object NotificationHelper {
             FamilySoundManager.getSoundConfigForUsage(context, effectiveUsage)
         }
 
-        val playableUri = FamilySoundManager.resolvePlayableUriOrFallback(
-            context = context,
-            soundType = config.soundType,
-            customSoundUri = config.customSoundUri,
-            fallbackUsage = effectiveUsage
-        )
+        val isSilentConfig = config.soundType == FamilySoundManager.SOUND_SILENT && !effectiveUsage.isAlarmStream
+        val playableUri = if (isSilentConfig) {
+            null
+        } else {
+            FamilySoundManager.resolvePlayableUriOrFallback(
+                context = context,
+                soundType = config.soundType,
+                customSoundUri = config.customSoundUri,
+                fallbackUsage = effectiveUsage
+            )
+        }
         val isPrivateFileUri = playableUri?.scheme?.equals("file", ignoreCase = true) == true
 
         // Check POST_NOTIFICATIONS permission on Android 13+ (API 33+)
@@ -424,7 +447,7 @@ object NotificationHelper {
         }
 
         // If a custom private file:// audio was picked, play it safely once on USAGE_NOTIFICATION
-        if (isPrivateFileUri && playableUri != null) {
+        if (!isSilentConfig && isPrivateFileUri && playableUri != null) {
             FamilySoundManager.playNotificationSoundOneShot(context, playableUri, config.volumePercent)
         }
 
@@ -455,13 +478,17 @@ object NotificationHelper {
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
 
-        if (!isPrivateFileUri && playableUri != null) {
+        if (isSilentConfig) {
+            builder.setSilent(true)
+            builder.setSound(null)
+            builder.setDefaults(NotificationCompat.DEFAULT_VIBRATE or NotificationCompat.DEFAULT_LIGHTS)
+        } else if (!isPrivateFileUri && playableUri != null) {
             builder.setSound(playableUri)
             builder.setDefaults(NotificationCompat.DEFAULT_VIBRATE or NotificationCompat.DEFAULT_LIGHTS)
         } else if (isPrivateFileUri) {
             builder.setDefaults(NotificationCompat.DEFAULT_VIBRATE or NotificationCompat.DEFAULT_LIGHTS)
         } else {
-            builder.setDefaults(NotificationCompat.DEFAULT_ALL)
+            builder.setDefaults(NotificationCompat.DEFAULT_VIBRATE or NotificationCompat.DEFAULT_LIGHTS)
         }
 
         try {
